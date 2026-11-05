@@ -8,7 +8,6 @@ plugins {
 android {
     namespace = "com.pitgpt.galaxy"
     compileSdk = 35
-
     defaultConfig {
         applicationId = "com.pitgpt.galaxy"
         minSdk = 26
@@ -16,19 +15,12 @@ android {
         versionCode = 4
         versionName = "0.4.0"
     }
-
-    buildFeatures {
-        compose = true
-    }
-
+    buildFeatures { compose = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+    kotlinOptions { jvmTarget = "17" }
 }
 
 dependencies {
@@ -43,4 +35,7 @@ dependencies {
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
     ksp("androidx.room:room-compiler:$roomVersion")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
 }
