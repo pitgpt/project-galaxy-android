@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application\n        android:name=".GalaxyApplication"
+    <application
+        android:name=".GalaxyApplication"
         android:allowBackup="true"
         android:label="Galaxy"
         android:supportsRtl="true"
