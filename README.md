@@ -1,6 +1,6 @@
 # Galaxy
 
-Personal AI companion for Android.
+Personal AI companion platform for Android.
 
 ## Implemented foundation
 
@@ -9,6 +9,8 @@ Personal AI companion for Android.
 - Single Android application module: `app`
 - UI entry point: `MainActivity`
 - Home screen: `ui/GalaxyHome.kt`
+- Domain models for character profiles, conversation messages, and scoped memory items
+- Repository interfaces for character and memory storage
 - Package: `com.pitgpt.galaxy`
 - Minimum Android version: API 26
 - Java/Kotlin bytecode target: 17
@@ -24,16 +26,26 @@ gradle assembleDebug
 
 A Gradle Wrapper is a planned build-reproducibility improvement and is not yet committed.
 
-## Architecture direction
+## Architecture
 
-The project is intentionally kept as one Gradle module while its boundaries are established:
+The project currently remains a single Gradle module. Package boundaries are being established before splitting modules:
 
 - `MainActivity`: Android entry point and window setup
 - `ui`: Compose screens and reusable visual components
-- `core`: shared application state and domain models (next implementation step)
-- `data`: local persistence and remote data sources (future)
+- `core/model`: platform-independent character, conversation, and memory models
+- `core/repository`: storage contracts for characters and memories
+- `data`: Room persistence and remote data sources (next)
 - `voice`: realtime audio session and WebRTC integration (future)
 - `backend`: secure service integration for ephemeral credentials (future)
+
+## Product direction
+
+Galaxy is being designed as a character platform. Character profiles, conversation history, memory ownership, voice, and avatar identity must remain separate from the shared application engine.
+
+Memory scopes are explicit:
+- `USER`: user-level memory
+- `CHARACTER`: memory owned by one character
+- `SHARED`: memory intentionally available across characters
 
 ## Security
 
