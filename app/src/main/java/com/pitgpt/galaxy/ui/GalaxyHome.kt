@@ -76,7 +76,7 @@ fun GalaxyHome() {
                         .padding(horizontal = 12.dp, vertical = 7.dp)
                 ) {
                     Text(
-                        text = "●  SYSTEM ONLINE",
+                        text = "●  LOCAL PREVIEW",
                         color = Color(0xFF75E2BD),
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
