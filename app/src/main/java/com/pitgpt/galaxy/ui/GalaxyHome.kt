@@ -149,7 +149,7 @@ fun GalaxyHome() {
             )
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "Твоё личное пространство\\nдля мыслей, идей и разговоров.",
+                text = "Твоё личное пространство\nдля мыслей, идей и разговоров.",
                 color = Muted,
                 fontSize = 15.sp,
                 lineHeight = 23.sp,
