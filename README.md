@@ -9,8 +9,9 @@ Personal AI companion platform for Android.
 - Single Android application module: `app`
 - UI entry point: `MainActivity`
 - Home screen: `ui/GalaxyHome.kt`
-- Domain models for character profiles, conversation messages, and scoped memory items
-- Repository interfaces for character and memory storage
+- Character, conversation, and scoped-memory domain models
+- Room database with character, conversation, and memory tables
+- DAO and repository implementations for local persistence
 - Package: `com.pitgpt.galaxy`
 - Minimum Android version: API 26
 - Java/Kotlin bytecode target: 17
@@ -28,26 +29,29 @@ A Gradle Wrapper is a planned build-reproducibility improvement and is not yet c
 
 ## Architecture
 
-The project currently remains a single Gradle module. Package boundaries are being established before splitting modules:
+The project currently remains a single Gradle module. Package boundaries are established before considering separate Gradle modules:
 
 - `MainActivity`: Android entry point and window setup
 - `ui`: Compose screens and reusable visual components
 - `core/model`: platform-independent character, conversation, and memory models
-- `core/repository`: storage contracts for characters and memories
-- `data`: Room persistence and remote data sources (next)
+- `core/repository`: storage contracts
+- `data/local`: Room database, entities, and DAOs
+- `data/repository`: Room-backed repository implementations
 - `voice`: realtime audio session and WebRTC integration (future)
 - `backend`: secure service integration for ephemeral credentials (future)
 
-## Product direction
+## Memory ownership
 
-Galaxy is being designed as a character platform. Character profiles, conversation history, memory ownership, voice, and avatar identity must remain separate from the shared application engine.
-
-Memory scopes are explicit:
+Memory records carry an explicit scope:
 - `USER`: user-level memory
 - `CHARACTER`: memory owned by one character
 - `SHARED`: memory intentionally available across characters
 
-## Security
+Conversation messages are stored with a character ID, so each character's history can be retrieved independently.
+
+## Privacy and security
+
+The current Room database is local application storage and is not yet encrypted. Do not store passwords, payment credentials, or other highly sensitive secrets in it. User-facing memory review, export, and deletion controls must be implemented before treating memory as a finished feature.
 
 A permanent OpenAI API key must never be embedded in the Android application. The future voice connection will obtain short-lived credentials from a backend service.
 
