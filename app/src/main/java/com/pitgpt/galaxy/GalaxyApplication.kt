@@ -1,6 +1,7 @@
 package com.pitgpt.galaxy
 
 import android.app.Application
+import com.pitgpt.galaxy.core.model.DefaultCharacter
 import com.pitgpt.galaxy.core.repository.CharacterRepository
 import com.pitgpt.galaxy.core.repository.ConversationRepository
 import com.pitgpt.galaxy.core.repository.MemoryRepository
@@ -9,16 +10,9 @@ import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
 import com.pitgpt.galaxy.data.repository.RoomConversationRepository
 import com.pitgpt.galaxy.data.repository.RoomMemoryRepository
 
-/**
- * Application-level composition root.
- *
- * Repositories share one database instance and can be injected into
- * ViewModels or use cases as the app grows.
- */
+/** Application-level composition root for Galaxy's local data layer. */
 class GalaxyApplication : Application() {
-    val database by lazy {
-        GalaxyDatabaseFactory.get(this)
-    }
+    val database by lazy { GalaxyDatabaseFactory.get(this) }
 
     val characters: CharacterRepository by lazy {
         RoomCharacterRepository(database.characterDao())
@@ -30,5 +24,12 @@ class GalaxyApplication : Application() {
 
     val memories: MemoryRepository by lazy {
         RoomMemoryRepository(database.memoryDao())
+    }
+
+    /** Installs the built-in character once, without overwriting user changes. */
+    suspend fun initialize() {
+        if (characters.getById(DefaultCharacter.profile.id) == null) {
+            characters.save(DefaultCharacter.profile)
+        }
     }
 }

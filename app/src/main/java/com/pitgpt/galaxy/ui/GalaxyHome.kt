@@ -16,15 +16,22 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pitgpt.galaxy.GalaxyApplication
 
 private val Night = Color(0xFF080B18)
 private val Muted = Color(0xFF9AA8C5)
@@ -32,6 +39,15 @@ private val Ice = Color(0xFFB8D9FF)
 
 @Composable
 fun GalaxyHome() {
+    val context = LocalContext.current
+    var characterName by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        val app = context.applicationContext as GalaxyApplication
+        app.initialize()
+        characterName = app.characters.getById("galaxy.default")?.displayName
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -52,20 +68,10 @@ fun GalaxyHome() {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text(
-                        text = "PROJECT",
-                        color = Muted,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        letterSpacing = 3.sp
-                    )
-                    Text(
-                        text = "GALAXY",
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 2.sp
-                    )
+                    Text("PROJECT", color = Muted, fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
+                    Text("GALAXY", color = Color.White, fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 Box(
@@ -75,91 +81,46 @@ fun GalaxyHome() {
                         .border(1.dp, Color(0x5546D9AC), RoundedCornerShape(50))
                         .padding(horizontal = 12.dp, vertical = 7.dp)
                 ) {
-                    Text(
-                        text = "●  LOCAL PREVIEW",
-                        color = Color(0xFF75E2BD),
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
-                    )
+                    Text("●  LOCAL PREVIEW", color = Color(0xFF75E2BD),
+                        fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
                 }
             }
 
             Spacer(modifier = Modifier.weight(1f))
 
-            Box(
-                modifier = Modifier.size(238.dp),
-                contentAlignment = Alignment.Center
-            ) {
+            Box(modifier = Modifier.size(238.dp), contentAlignment = Alignment.Center) {
+                Box(modifier = Modifier.size(230.dp)
+                    .border(1.dp, Color(0x447C8DDB), CircleShape)
+                    .padding(13.dp).border(1.dp, Color(0x337FCBFF), CircleShape))
+                Box(modifier = Modifier.size(174.dp).background(
+                    Brush.radialGradient(colors = listOf(Color(0xFF7D83E8),
+                        Color(0xFF394A91), Color(0xFF172448), Color.Transparent)), CircleShape))
                 Box(
-                    modifier = Modifier
-                        .size(230.dp)
-                        .border(1.dp, Color(0x447C8DDB), CircleShape)
-                        .padding(13.dp)
-                        .border(1.dp, Color(0x337FCBFF), CircleShape)
-                )
-                Box(
-                    modifier = Modifier
-                        .size(174.dp)
-                        .background(
-                            Brush.radialGradient(
-                                colors = listOf(
-                                    Color(0xFF7D83E8),
-                                    Color(0xFF394A91),
-                                    Color(0xFF172448),
-                                    Color.Transparent
-                                )
-                            ),
-                            CircleShape
-                        )
-                )
-                Box(
-                    modifier = Modifier
-                        .size(112.dp)
-                        .background(
-                            Brush.radialGradient(
-                                colors = listOf(
-                                    Color(0xFFE2F4FF),
-                                    Ice,
-                                    Color(0xFF7589D8),
-                                    Color(0xFF28366D)
-                                )
-                            ),
-                            CircleShape
-                        )
+                    modifier = Modifier.size(112.dp).background(
+                        Brush.radialGradient(colors = listOf(Color(0xFFE2F4FF), Ice,
+                            Color(0xFF7589D8), Color(0xFF28366D))), CircleShape)
                         .border(1.dp, Color(0x99D8EEFF), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "G",
-                        color = Color(0xFF172448),
-                        fontSize = 54.sp,
-                        fontWeight = FontWeight.Light
-                    )
+                    Text("G", color = Color(0xFF172448), fontSize = 54.sp,
+                        fontWeight = FontWeight.Light)
                 }
             }
 
             Spacer(modifier = Modifier.height(34.dp))
-            Text(
-                text = "Я рядом.",
-                color = Color.White,
-                fontSize = 34.sp,
-                fontWeight = FontWeight.Light,
-                letterSpacing = 0.5.sp
-            )
+            Text("Я рядом.", color = Color.White, fontSize = 34.sp,
+                fontWeight = FontWeight.Light, letterSpacing = 0.5.sp)
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "Твоё личное пространство\nдля мыслей, идей и разговоров.",
-                color = Muted,
-                fontSize = 15.sp,
-                lineHeight = 23.sp,
+                text = characterName?.let { "$it • Твоё личное пространство" }
+                    ?: "Твоё личное пространство\nдля мыслей, идей и разговоров.",
+                color = Muted, fontSize = 15.sp, lineHeight = 23.sp,
                 textAlign = TextAlign.Center
             )
 
             Spacer(modifier = Modifier.weight(1f))
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
+                modifier = Modifier.fillMaxWidth()
                     .clip(RoundedCornerShape(22.dp))
                     .background(Color(0xAA18213B))
                     .border(1.dp, Color(0x334F6598), RoundedCornerShape(22.dp))
@@ -167,41 +128,28 @@ fun GalaxyHome() {
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 StatusLine("Приложение", "Базовая оболочка работает", Color(0xFF65DDB2))
+                StatusLine("Персонаж",
+                    if (characterName != null) "Профиль сохранён локально" else "Инициализация профиля",
+                    if (characterName != null) Color(0xFF65DDB2) else Color(0xFFE9BD70))
                 StatusLine("Голосовой модуль", "Следующий этап разработки", Color(0xFFE9BD70))
-                StatusLine("Память и персонализация", "Будут подключены позже", Color(0xFF8EA8F5))
+                StatusLine("Память и персонализация", "Локальная база подготовлена", Color(0xFF8EA8F5))
             }
 
             Spacer(modifier = Modifier.height(22.dp))
-            Text(
-                text = "MADE FOR ONE UNIVERSE",
-                color = Color(0x667F91B8),
-                fontSize = 9.sp,
-                letterSpacing = 2.5.sp
-            )
+            Text("MADE FOR ONE UNIVERSE", color = Color(0x667F91B8),
+                fontSize = 9.sp, letterSpacing = 2.5.sp)
         }
     }
 }
 
 @Composable
 private fun StatusLine(title: String, detail: String, dot: Color) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .background(dot, CircleShape)
-        )
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(modifier = Modifier.size(8.dp).background(dot, CircleShape))
         Spacer(modifier = Modifier.size(12.dp))
         Column {
-            Text(
-                text = title,
-                color = Color.White,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium
-            )
-            Text(text = detail, color = Muted, fontSize = 11.sp)
+            Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(detail, color = Muted, fontSize = 11.sp)
         }
     }
 }
