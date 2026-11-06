@@ -2,6 +2,7 @@ package com.pitgpt.galaxy.data.remote
 
 import com.pitgpt.galaxy.core.model.RealtimeSessionCredential
 import com.pitgpt.galaxy.core.repository.RealtimeSessionProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -72,6 +73,8 @@ class HttpRealtimeSessionProvider(
                 val responseText = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
                 if (responseText.isBlank()) JSONObject() else JSONObject(responseText)
             } catch (exception: GalaxyApiException) {
+                throw exception
+            } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
                 throw GalaxyApiException(null, "Could not reach the Galaxy service")
