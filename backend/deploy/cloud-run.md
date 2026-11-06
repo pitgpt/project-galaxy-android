@@ -66,7 +66,7 @@ Recommended initial Cloud Run settings:
 - Memory: 512 MiB
 - Billing: request-based
 - Minimum instances: 0
-- Maximum instances: 1 for the first private test
+- Maximum instances: 1 for the first controlled test
 - Concurrency: 40
 - Ingress: all
 - Authentication at Cloud Run layer: allow unauthenticated requests; Galaxy itself still requires and verifies the Supabase Bearer JWT on protected API routes.
