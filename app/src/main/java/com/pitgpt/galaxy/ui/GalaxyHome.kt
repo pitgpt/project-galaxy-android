@@ -61,22 +61,37 @@ fun GalaxyHome() {
     val app = context.applicationContext as GalaxyApplication
     var characterName by remember { mutableStateOf("Галактика") }
     var initialized by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(true) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var reloadKey by remember { mutableStateOf(0) }
     var showChat by remember { mutableStateOf(false) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
-    val scope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) {
-        app.initialize()
-        characterName = app.characters.getById(CHARACTER_ID)?.displayName ?: "Галактика"
-        messages.clear()
-        messages.addAll(app.conversations.getForCharacter(CHARACTER_ID))
-        initialized = true
+    LaunchedEffect(reloadKey) {
+        isLoading = true
+        loadError = null
+        try {
+            app.initialize()
+            val loadedName = app.characters.getById(CHARACTER_ID)?.displayName ?: "Галактика"
+            val loadedMessages = app.conversations.getForCharacter(CHARACTER_ID)
+            characterName = loadedName
+            messages.clear()
+            messages.addAll(loadedMessages)
+            initialized = true
+        } catch (error: Exception) {
+            loadError = "Не удалось загрузить данные Galaxy. Проверь хранилище и попробуй ещё раз."
+        } finally {
+            isLoading = false
+        }
     }
 
     if (showChat) {
         ConversationScreen(
             characterName = characterName,
             messages = messages,
+            isLoading = isLoading,
+            loadError = loadError,
+            onRetryLoad = { reloadKey += 1 },
             onBack = { showChat = false },
             onSend = { text ->
                 val message = SendMessage(app.conversations).invoke(CHARACTER_ID, text)
@@ -86,13 +101,22 @@ fun GalaxyHome() {
     } else {
         HomeScreen(
             characterName = if (initialized) characterName else null,
+            isLoading = isLoading,
+            loadError = loadError,
+            onRetry = { reloadKey += 1 },
             onOpenChat = { showChat = true }
         )
     }
 }
 
 @Composable
-private fun HomeScreen(characterName: String?, onOpenChat: () -> Unit) {
+private fun HomeScreen(
+    characterName: String?,
+    isLoading: Boolean,
+    loadError: String?,
+    onRetry: () -> Unit,
+    onOpenChat: () -> Unit
+) {
     Box(
         modifier = Modifier.fillMaxSize().background(
             Brush.verticalGradient(listOf(Color(0xFF111A35), Night, Color(0xFF100D25)))
@@ -161,8 +185,15 @@ private fun HomeScreen(characterName: String?, onOpenChat: () -> Unit) {
             ) {
                 StatusLine("Приложение", "Базовая оболочка работает", Color(0xFF65DDB2))
                 StatusLine("Персонаж", if (characterName != null) "Профиль сохранён локально"
-                    else "Инициализация профиля", Color(0xFF65DDB2))
-                StatusLine("Диалоги", "Локальная переписка доступна", Color(0xFF65DDB2))
+                    else if (isLoading) "Загрузка профиля…" else "Профиль недоступен",
+                    if (loadError == null) Color(0xFF65DDB2) else Color(0xFFFF9B9B))
+                StatusLine("Диалоги", if (loadError == null) "Локальная переписка доступна"
+                    else "Не удалось загрузить историю",
+                    if (loadError == null) Color(0xFF65DDB2) else Color(0xFFFF9B9B))
+                if (loadError != null) {
+                    Text(loadError, color = Color(0xFFFF9B9B), fontSize = 11.sp)
+                    TextButton(onClick = onRetry) { Text("ПОВТОРИТЬ", color = Ice) }
+                }
                 StatusLine("AI и голос", "Подключение на следующих этапах", Color(0xFFE9BD70))
             }
             Spacer(Modifier.height(18.dp))
@@ -185,6 +216,9 @@ private fun HomeScreen(characterName: String?, onOpenChat: () -> Unit) {
 private fun ConversationScreen(
     characterName: String,
     messages: List<ConversationMessage>,
+    isLoading: Boolean,
+    loadError: String?,
+    onRetryLoad: () -> Unit,
     onBack: () -> Unit,
     onSend: suspend (String) -> Unit
 ) {
@@ -230,7 +264,24 @@ private fun ConversationScreen(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            if (messages.isEmpty()) {
+            if (loadError != null) {
+                Column(
+                    Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("История пока недоступна", color = Color.White, fontSize = 22.sp,
+                        textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(10.dp))
+                    Text(loadError, color = Color(0xFFFF9B9B), fontSize = 13.sp,
+                        textAlign = TextAlign.Center)
+                    TextButton(onClick = onRetryLoad) { Text("ПОВТОРИТЬ ЗАГРУЗКУ", color = Ice) }
+                }
+            } else if (isLoading && messages.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    Text("Загружаю историю…", color = Muted, fontSize = 14.sp)
+                }
+            } else if (messages.isEmpty()) {
                 Column(
                     Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.Center,
