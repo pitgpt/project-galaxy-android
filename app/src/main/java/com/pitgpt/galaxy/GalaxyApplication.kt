@@ -13,6 +13,7 @@ import com.pitgpt.galaxy.data.remote.HttpRealtimeSessionProvider
 import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
 import com.pitgpt.galaxy.data.repository.RoomConversationRepository
 import com.pitgpt.galaxy.data.repository.RoomMemoryRepository
+import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
 
 /** Application-level composition root for Galaxy's local data and authentication layers. */
 class GalaxyApplication : Application() {
@@ -21,6 +22,7 @@ class GalaxyApplication : Application() {
     val conversations: ConversationRepository by lazy { RoomConversationRepository(database.conversationMessageDao()) }
     val memories: MemoryRepository by lazy { RoomMemoryRepository(database.memoryDao()) }
     val auth: SupabaseAuthService? by lazy { SupabaseClientFactory.createOrNull(this) }
+    val providerStore: EncryptedProviderStore by lazy { EncryptedProviderStore(this) }
     private val initializeGalaxy by lazy { InitializeGalaxy(characters) }
 
     fun realtimeSessionProvider(tokenProvider: GalaxyAccessTokenProvider): HttpRealtimeSessionProvider =
