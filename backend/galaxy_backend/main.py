@@ -1,12 +1,13 @@
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from redis.asyncio import Redis
 
 from .config import Settings
-from .security import InMemoryRateLimiter, JwtAuthenticator, safety_identifier
+from .security import InMemoryRateLimiter, JwtAuthenticator, RedisRateLimiter, safety_identifier
 
 SERVER_INSTRUCTIONS = (
     "You are Galaxy, a helpful conversational AI companion. "
@@ -29,6 +30,7 @@ def create_app(
     settings: Settings | None = None,
     http_client: httpx.AsyncClient | None = None,
     authenticator: JwtAuthenticator | None = None,
+    rate_limiter: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -36,14 +38,42 @@ def create_app(
         app.state.http_client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0))
         app.state.owns_http_client = http_client is None
         app.state.authenticator = authenticator or JwtAuthenticator(app.state.settings)
-        app.state.rate_limiter = InMemoryRateLimiter(
-            app.state.settings.per_user_requests_per_minute
-        )
+        app.state.redis = None
+
+        if rate_limiter is not None:
+            app.state.rate_limiter = rate_limiter
+        elif app.state.settings.redis_url:
+            redis_client = Redis.from_url(
+                app.state.settings.redis_url,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+                health_check_interval=30,
+            )
+            try:
+                await redis_client.ping()
+            except Exception:
+                await redis_client.aclose()
+                raise RuntimeError("Redis is required for the configured rate limiter but is unavailable")
+            app.state.redis = redis_client
+            app.state.rate_limiter = RedisRateLimiter(
+                redis_client, app.state.settings.per_user_requests_per_minute
+            )
+        elif app.state.settings.environment == "production":
+            raise RuntimeError("Production requires Redis-backed rate limiting")
+        else:
+            app.state.rate_limiter = InMemoryRateLimiter(
+                app.state.settings.per_user_requests_per_minute
+            )
+
         yield
+        if app.state.redis is not None:
+            await app.state.redis.aclose()
         if app.state.owns_http_client:
             await app.state.http_client.aclose()
 
-    app = FastAPI(title="Galaxy Backend", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Galaxy Backend", version="0.2.0", lifespan=lifespan)
 
     async def current_user(
         request: Request,
@@ -73,7 +103,7 @@ def create_app(
         if payload.voice_id not in config.allowed_voices:
             raise HTTPException(status_code=422, detail="Requested voice is not available")
 
-        request.app.state.rate_limiter.check(user_id)
+        await request.app.state.rate_limiter.check(user_id)
 
         provider_body = {
             "expires_after": {
@@ -110,7 +140,6 @@ def create_app(
             if not isinstance(secret, str) or not secret or not isinstance(expires_at, int) or not isinstance(session_id, str) or not session_id:
                 raise ValueError("Unexpected provider response")
         except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
-            # Never return or log provider response bodies: they may contain sensitive data.
             raise HTTPException(
                 status_code=502,
                 detail="Realtime session provider is temporarily unavailable",

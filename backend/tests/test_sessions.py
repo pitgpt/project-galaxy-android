@@ -1,16 +1,16 @@
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from galaxy_backend.config import Settings
 from galaxy_backend.main import create_app
-from galaxy_backend.security import safety_identifier
+from galaxy_backend.security import RedisRateLimiter, safety_identifier
 
 
 class FakeAuthenticator:
     def authenticate(self, token: str) -> str:
         if token != "valid-test-token":
-            from fastapi import HTTPException
             raise HTTPException(status_code=401, detail="Invalid or expired access token")
         return "user-123"
 
@@ -32,6 +32,22 @@ class FakeProvider:
         )
 
 
+class FakeRedis:
+    def __init__(self):
+        self.counts = {}
+
+    async def eval(self, script, number_of_keys, key, window_milliseconds):
+        assert number_of_keys == 1
+        assert "INCR" in script and "PEXPIRE" in script
+        self.counts[key] = self.counts.get(key, 0) + 1
+        return [self.counts[key], window_milliseconds]
+
+
+class UnavailableRedis:
+    async def eval(self, *args):
+        raise OSError("redis offline")
+
+
 @pytest.fixture
 def settings():
     return Settings(
@@ -47,8 +63,13 @@ def settings():
     )
 
 
-def client_for(settings, provider):
-    app = create_app(settings=settings, http_client=provider, authenticator=FakeAuthenticator())
+def client_for(settings, provider, rate_limiter=None):
+    app = create_app(
+        settings=settings,
+        http_client=provider,
+        authenticator=FakeAuthenticator(),
+        rate_limiter=rate_limiter,
+    )
     return TestClient(app)
 
 
@@ -133,3 +154,33 @@ def test_rejects_unapproved_character_without_calling_provider(settings):
         )
     assert response.status_code == 422
     assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_redis_limiter_allows_limit_then_rejects_excess():
+    limiter = RedisRateLimiter(FakeRedis(), limit=2)
+    await limiter.check("user-123")
+    await limiter.check("user-123")
+    with pytest.raises(HTTPException) as error:
+        await limiter.check("user-123")
+    assert error.value.status_code == 429
+    assert error.value.headers["Retry-After"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_redis_limiter_does_not_store_raw_user_id():
+    redis = FakeRedis()
+    limiter = RedisRateLimiter(redis, limit=5)
+    await limiter.check("sensitive-user-id")
+    key = next(iter(redis.counts))
+    assert "sensitive-user-id" not in key
+    assert key.startswith("galaxy:realtime:rate:")
+
+
+@pytest.mark.asyncio
+async def test_redis_failure_fails_closed():
+    limiter = RedisRateLimiter(UnavailableRedis(), limit=5)
+    with pytest.raises(HTTPException) as error:
+        await limiter.check("user-123")
+    assert error.value.status_code == 503
+    assert error.value.headers["Retry-After"] == "5"

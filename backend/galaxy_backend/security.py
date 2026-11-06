@@ -46,7 +46,7 @@ def safety_identifier(user_id: str, secret: str) -> str:
 
 
 class InMemoryRateLimiter:
-    """Single-process safety net. Production deployments must use shared Redis-backed limits."""
+    """Development/test limiter. Never use this for a production deployment."""
 
     def __init__(self, limit: int, window_seconds: int = 60):
         self.limit = limit
@@ -54,7 +54,7 @@ class InMemoryRateLimiter:
         self.events: dict[str, deque[float]] = defaultdict(deque)
         self.lock = Lock()
 
-    def check(self, key: str) -> None:
+    async def check(self, key: str) -> None:
         now = time.monotonic()
         with self.lock:
             events = self.events[key]
@@ -63,3 +63,43 @@ class InMemoryRateLimiter:
             if len(events) >= self.limit:
                 raise HTTPException(status_code=429, detail="Realtime session rate limit exceeded")
             events.append(now)
+
+
+class RedisRateLimiter:
+    """Atomic shared fixed-window limiter. Redis errors fail closed."""
+
+    _SCRIPT = """
+    local current = redis.call('INCR', KEYS[1])
+    if current == 1 then
+        redis.call('PEXPIRE', KEYS[1], ARGV[1])
+    end
+    local ttl = redis.call('PTTL', KEYS[1])
+    return {current, ttl}
+    """
+
+    def __init__(self, redis_client: Any, limit: int, window_seconds: int = 60):
+        self.redis = redis_client
+        self.limit = limit
+        self.window_milliseconds = window_seconds * 1000
+
+    async def check(self, user_id: str) -> None:
+        key_digest = sha256(user_id.encode("utf-8")).hexdigest()
+        redis_key = "galaxy:realtime:rate:" + key_digest
+        try:
+            result = await self.redis.eval(
+                self._SCRIPT, 1, redis_key, self.window_milliseconds
+            )
+            count = int(result[0])
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Realtime session service temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from exc
+
+        if count > self.limit:
+            raise HTTPException(
+                status_code=429,
+                detail="Realtime session rate limit exceeded",
+                headers={"Retry-After": "60"},
+            )
