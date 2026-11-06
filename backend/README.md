@@ -19,7 +19,7 @@ export SAFETY_IDENTIFIER_HMAC_KEY="$(python -c 'import secrets; print(secrets.to
 uvicorn galaxy_backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-The auth issuer, audience and JWKS URL must belong to the authentication provider selected for Galaxy. The service deliberately fails closed when those values or secrets are missing. Do not use a fake token verifier in production.
+The Android app currently uses Supabase Auth. For a Supabase project, set `AUTH_JWKS_URL=https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json`, `AUTH_ISSUER=https://<project-ref>.supabase.co/auth/v1`, and `AUTH_AUDIENCE=authenticated`. Use an asymmetric ES256 or RS256 signing key. Set `GALAXY_ALLOWED_CHARACTER_IDS=*` to permit authenticated users to use their locally created character profiles; otherwise list the allowed character IDs explicitly. Persona instructions are user-provided and capped at 8,000 characters. The service deliberately fails closed when required values or secrets are missing. Do not use a fake token verifier in production.
 
 ## API
 
