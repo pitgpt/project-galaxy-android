@@ -796,7 +796,7 @@ private fun CharacterEditorScreen(
     var description by remember(initialProfile?.id) { mutableStateOf(initialProfile?.description.orEmpty()) }
     var personaDefinition by remember(initialProfile?.id) { mutableStateOf(initialProfile?.personaDefinition.orEmpty()) }
     var avatarId by remember(initialProfile?.id) { mutableStateOf(initialProfile?.avatarId ?: "avatar.cosmic") }
-    var voiceId by remember(initialProfile?.id) { mutableStateOf(initialProfile?.voiceId ?: "voice.feminine_warm") }
+    var voiceId by remember(initialProfile?.id) { mutableStateOf(initialProfile?.voiceId ?: "coral") }
     var avatarImageUri by remember(initialProfile?.id) { mutableStateOf(initialProfile?.avatarImageUri) }
     val context = LocalContext.current
     var error by remember { mutableStateOf<String?>(null) }
@@ -891,13 +891,13 @@ private fun CharacterEditorScreen(
             PresetChoiceRow(
                 selectedId = voiceId,
                 options = listOf(
-                    "voice.feminine_warm" to "Тёплый",
-                    "voice.feminine_calm" to "Спокойный",
-                    "voice.neutral" to "Нейтральный"
+                    "coral" to "Тёплый",
+                    "shimmer" to "Спокойный",
+                    "alloy" to "Нейтральный"
                 ),
                 onSelect = { voiceId = it }
             )
-            Text("Аватар уже отображается в интерфейсе. Голосовой пресет пока хранится как настройка профиля.",
+            Text("Аватар уже отображается в интерфейсе. Голосовой пресет задаёт голос ответа в голосовом режиме.",
                 color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             OutlinedTextField(
                 value = personaDefinition,

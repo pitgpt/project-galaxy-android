@@ -63,7 +63,7 @@ def settings():
         auth_issuer="https://issuer.example/",
         auth_audience="galaxy-android",
         safety_identifier_hmac_key="test-hmac-secret-long-enough",
-        allowed_voices=frozenset({"alloy", "coral"}),
+        allowed_voices=frozenset({"alloy", "coral", "shimmer"}),
         allowed_character_ids=frozenset({"galaxy.default", "character.test"}),
         client_secret_ttl_seconds=600,
         per_user_requests_per_minute=5,
@@ -143,6 +143,30 @@ def test_creates_server_configured_session_and_returns_only_required_fields(sett
     assert headers["Authorization"] == "Bearer sk-server-only"
     assert headers["OpenAI-Safety-Identifier"] == safety_identifier("user-123", settings.safety_identifier_hmac_key)
     assert "sk-server-only" not in response.text
+
+
+
+@pytest.mark.parametrize(
+    ("profile_voice_id", "expected_provider_voice"),
+    [
+        ("voice.feminine_warm", "coral"),
+        ("voice.feminine_calm", "shimmer"),
+        ("voice.neutral", "alloy"),
+    ],
+)
+def test_legacy_profile_voice_ids_map_to_supported_provider_voices(
+    settings, profile_voice_id, expected_provider_voice
+):
+    provider = FakeProvider()
+    with client_for(settings, provider) as client:
+        response = client.post(
+            "/v1/realtime/sessions",
+            headers={"Authorization": "Bearer valid-test-token"},
+            json={"character_id": "galaxy.default", "voice_id": profile_voice_id},
+        )
+
+    assert response.status_code == 200
+    assert provider.calls[0][1]["session"]["audio"]["output"]["voice"] == expected_provider_voice
 
 
 def test_rejects_unapproved_voice_without_calling_provider(settings):

@@ -15,6 +15,13 @@ from .session_registry import InMemorySessionRegistry, RedisSessionRegistry
 
 logger = logging.getLogger("galaxy.request")
 
+VOICE_ID_ALIASES = {
+    "voice.feminine_warm": "coral",
+    "voice.feminine_calm": "shimmer",
+    "voice.neutral": "alloy",
+}
+
+
 SERVER_INSTRUCTIONS = (
     "You are Galaxy, a helpful conversational AI companion. "
     "Speak naturally, clearly, and respectfully. Follow safety requirements."
@@ -146,7 +153,8 @@ def create_app(
         config: Settings = request.app.state.settings
         if payload.character_id not in config.allowed_character_ids:
             raise HTTPException(status_code=422, detail="Requested character is not available")
-        if payload.voice_id not in config.allowed_voices:
+        provider_voice_id = VOICE_ID_ALIASES.get(payload.voice_id, payload.voice_id)
+        if provider_voice_id not in config.allowed_voices:
             raise HTTPException(status_code=422, detail="Requested voice is not available")
 
         await request.app.state.rate_limiter.check(user_id)
@@ -168,7 +176,7 @@ def create_app(
                 "model": config.realtime_model,
                 "instructions": SERVER_INSTRUCTIONS,
                 "output_modalities": ["audio"],
-                "audio": {"output": {"voice": payload.voice_id}},
+                "audio": {"output": {"voice": provider_voice_id}},
             },
         }
         headers = {
