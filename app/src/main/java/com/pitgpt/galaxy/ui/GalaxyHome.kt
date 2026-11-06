@@ -545,7 +545,24 @@ private fun CharacterProfileScreen(
     var displayName by remember(profile?.id) { mutableStateOf(profile?.displayName.orEmpty()) }
     var description by remember(profile?.id) { mutableStateOf(profile?.description.orEmpty()) }
     var personaDefinition by remember(profile?.id) { mutableStateOf(profile?.personaDefinition.orEmpty()) }
+    var avatarImageUri by remember(profile?.id) { mutableStateOf(profile?.avatarImageUri) }
     var error by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }.onSuccess {
+                avatarImageUri = uri.toString()
+                error = null
+            }.onFailure {
+                error = "Не удалось сохранить доступ к изображению. Выбери другой файл."
+            }
+        }
+    }
 
     Box(
         Modifier.fillMaxSize().background(
@@ -592,6 +609,35 @@ private fun CharacterProfileScreen(
                         focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
                     )
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AvatarPortrait(
+                        avatarId = profile.avatarId,
+                        modifier = Modifier.size(76.dp),
+                        imageUri = avatarImageUri
+                    )
+                    Spacer(Modifier.size(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("АВАТАР ГАЛАКТИКИ", color = Ice, fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Text(
+                            if (avatarImageUri != null) "Пользовательское изображение"
+                            else avatarVisualSpec(profile.avatarId ?: "avatar.cosmic").title,
+                            color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold
+                        )
+                        Text("Изображение будет использоваться в главном экране и списке персонажей.",
+                            color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { imagePicker.launch(arrayOf("image/*")) }) {
+                        Text("ВЫБРАТЬ ИЗОБРАЖЕНИЕ", color = Ice, fontSize = 11.sp)
+                    }
+                    if (avatarImageUri != null) {
+                        TextButton(onClick = { avatarImageUri = null }) {
+                            Text("УБРАТЬ", color = Color(0xFFFF9B9B), fontSize = 11.sp)
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = personaDefinition,
                     onValueChange = { personaDefinition = it; error = null },
@@ -618,7 +664,8 @@ private fun CharacterProfileScreen(
                             onSave(profile.copy(
                                 displayName = name,
                                 description = shortDescription,
-                                personaDefinition = persona
+                                personaDefinition = persona,
+                                avatarImageUri = avatarImageUri
                             ))
                         }
                     },
