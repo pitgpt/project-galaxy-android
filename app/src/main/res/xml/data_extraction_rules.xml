@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Never copy device-bound authentication material to cloud backup. -->
+        <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <!-- A transferred ciphertext cannot be decrypted by the source device's Keystore key. -->
+        <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
+    </device-transfer>
+</data-extraction-rules>
