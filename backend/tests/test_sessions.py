@@ -11,9 +11,13 @@ from galaxy_backend.session_registry import InMemorySessionRegistry
 
 class FakeAuthenticator:
     def authenticate(self, token: str) -> str:
-        if token != "valid-test-token":
+        identities = {
+            "valid-test-token": "user-123",
+            "another-user-token": "user-456",
+        }
+        if token not in identities:
             raise HTTPException(status_code=401, detail="Invalid or expired access token")
-        return "user-123"
+        return identities[token]
 
 
 class FakeProvider:
@@ -268,4 +272,87 @@ def test_session_id_is_scoped_to_authenticated_user(settings):
             f"/v1/realtime/sessions/{created.json()['session_id']}/heartbeat",
             headers={"Authorization": "Bearer another-user-token"},
         )
-    assert foreign.status_code == 401
+    assert foreign.status_code == 404
+
+class FakeSessionRedis:
+    def __init__(self):
+        self.sets = {}
+        self.calls = []
+
+    async def eval(self, script, number_of_keys, key, *args):
+        assert number_of_keys == 1
+        self.calls.append((script, key, args))
+        members = self.sets.setdefault(key, {})
+        if "ZREMRANGEBYSCORE" in script:
+            now, expires, maximum, session_id, ttl = args
+            assert "ZCARD" in script and "ZADD" in script
+            for sid, score in list(members.items()):
+                if score <= float(now):
+                    members.pop(sid, None)
+            if len(members) >= int(maximum):
+                return 0
+            members[session_id] = float(expires)
+            return 1
+        if "ZSCORE" in script:
+            session_id, now, expires, ttl = args
+            score = members.get(session_id)
+            if score is None:
+                return 0
+            if score <= float(now):
+                members.pop(session_id, None)
+                return 0
+            members[session_id] = float(expires)
+            return 1
+        if "ZREM" in script:
+            return int(members.pop(args[0], None) is not None)
+        raise AssertionError("Unexpected Redis Lua script")
+
+
+@pytest.mark.asyncio
+async def test_redis_session_registry_reserves_atomically_and_scopes_users():
+    from galaxy_backend.session_registry import RedisSessionRegistry
+    redis = FakeSessionRedis()
+    registry = RedisSessionRegistry(redis, max_active=1, lease_seconds=90)
+    assert await registry.reserve("user-123", "session-a") is True
+    assert await registry.reserve("user-123", "session-b") is False
+    assert await registry.reserve("user-456", "session-b") is True
+    script, key, _ = redis.calls[0]
+    assert "ZREMRANGEBYSCORE" in script and "ZCARD" in script and "ZADD" in script
+    assert "user-123" not in key
+    assert key.startswith("galaxy:realtime:sessions:")
+    assert len(redis.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_redis_session_registry_heartbeat_and_expired_lease():
+    from galaxy_backend.session_registry import RedisSessionRegistry
+    redis = FakeSessionRedis()
+    registry = RedisSessionRegistry(redis, max_active=2, lease_seconds=90)
+    assert await registry.reserve("user-123", "session-a") is True
+    assert await registry.heartbeat("user-123", "session-a") is True
+    assert await registry.heartbeat("user-123", "missing") is False
+    key = registry._key("user-123")
+    redis.sets[key]["expired"] = 0
+    assert await registry.heartbeat("user-123", "expired") is False
+    assert "expired" not in redis.sets[key]
+
+
+@pytest.mark.asyncio
+async def test_redis_session_registry_close_is_owner_scoped_and_idempotent():
+    from galaxy_backend.session_registry import RedisSessionRegistry
+    redis = FakeSessionRedis()
+    registry = RedisSessionRegistry(redis, max_active=2, lease_seconds=90)
+    assert await registry.reserve("user-123", "session-a") is True
+    await registry.close("user-456", "session-a")
+    assert await registry.heartbeat("user-123", "session-a") is True
+    await registry.close("user-123", "session-a")
+    await registry.close("user-123", "session-a")
+    assert await registry.heartbeat("user-123", "session-a") is False
+
+
+@pytest.mark.asyncio
+async def test_in_memory_session_registry_concurrent_reservations_respect_limit():
+    import asyncio
+    registry = InMemorySessionRegistry(max_active=2, lease_seconds=90)
+    results = await asyncio.gather(*(registry.reserve("user-123", f"session-{i}") for i in range(20)))
+    assert sum(results) == 2

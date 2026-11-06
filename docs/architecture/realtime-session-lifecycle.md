@@ -25,7 +25,7 @@ Galaxy tracks client-reported active Realtime sessions with short Redis leases. 
 6. Return the Galaxy session identifier with the ephemeral credential.
 7. Android starts WebRTC and renews the lease with an authenticated heartbeat every 30 seconds while connected.
 8. On disconnect, Android calls the authenticated close endpoint. If the app is killed or the network disappears, the 90-second lease expires.
-9. Heartbeat and close are idempotent with respect to a session owned by the caller. Unknown or expired sessions return a non-sensitive not-found response.
+9. Heartbeat returns a non-sensitive 404 for unknown, expired, or foreign sessions. DELETE is idempotent: it returns `closed` even when the lease is already absent, without revealing whether another account owns that ID.
 
 ## Redis representation
 
@@ -34,7 +34,7 @@ Use one sorted set per account. The key contains only a SHA-256 digest of the au
 Every mutation is atomic Lua:
 - Reserve removes expired members, checks the active count, then inserts the new lease if capacity remains.
 - Heartbeat verifies membership, then updates the expiry score.
-- Close removes the member.
+- Close removes the member; repeated close requests are harmless and do not disclose membership.
 - The sorted-set key receives an expiry longer than the lease so abandoned account keys are eventually reclaimed.
 
 No raw user ID, provider credential, SDP, or authorization header is stored in Redis.

@@ -193,7 +193,15 @@ def create_app(
             if not isinstance(secret, str) or not secret or not isinstance(expires_at, int) or not isinstance(provider_session_id, str) or not provider_session_id:
                 raise ValueError("Unexpected provider response")
         except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
-            await request.app.state.session_registry.close(user_id, galaxy_session_id)
+            try:
+                await request.app.state.session_registry.close(user_id, galaxy_session_id)
+            except Exception as cleanup_exc:
+                logger.error("realtime_session_cleanup_failed")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Realtime session service temporarily unavailable",
+                    headers={"Retry-After": "5"},
+                ) from cleanup_exc
             raise HTTPException(
                 status_code=502,
                 detail="Realtime session provider is temporarily unavailable",
