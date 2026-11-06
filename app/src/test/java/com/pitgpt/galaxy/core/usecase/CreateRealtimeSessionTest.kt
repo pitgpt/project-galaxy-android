@@ -11,7 +11,7 @@ import org.junit.Test
 class CreateRealtimeSessionTest {
     @Test
     fun requestsCredentialForSelectedCharacterAndVoice() = runBlocking {
-        val provider = FakeProvider(RealtimeSessionCredential("ephemeral-secret", 5_000L, "session-1"))
+        val provider = FakeProvider(RealtimeSessionCredential("ephemeral-secret", 61_000L, "session-1"))
         val useCase = CreateRealtimeSession(provider, now = { 1_000L })
 
         val result = useCase("galaxy.default", "voice.warm")
@@ -19,12 +19,12 @@ class CreateRealtimeSessionTest {
         assertEquals("galaxy.default", provider.characterId)
         assertEquals("voice.warm", provider.voiceId)
         assertEquals("ephemeral-secret", result.clientSecret)
-        assertEquals(5_000L, result.expiresAtEpochMillis)
+        assertEquals(61_000L, result.expiresAtEpochMillis)
     }
 
     @Test
     fun rejectsBlankCharacterBeforeCallingProvider() {
-        val provider = FakeProvider(RealtimeSessionCredential("secret", 5_000L))
+        val provider = FakeProvider(RealtimeSessionCredential("secret", 61_000L))
         val useCase = CreateRealtimeSession(provider, now = { 1_000L })
 
         assertThrows(IllegalArgumentException::class.java) {
@@ -44,8 +44,18 @@ class CreateRealtimeSessionTest {
     }
 
     @Test
+    fun rejectsCredentialWithInsufficientRemainingLifetime() {
+        val provider = FakeProvider(RealtimeSessionCredential("secret", 30_500L))
+        val useCase = CreateRealtimeSession(provider, now = { 1_000L })
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { useCase("galaxy.default", null) }
+        }
+    }
+
+    @Test
     fun credentialToStringRedactsSecret() {
-        val credential = RealtimeSessionCredential("do-not-log-this", 5_000L)
+        val credential = RealtimeSessionCredential("do-not-log-this", 61_000L)
 
         assertFalse(credential.toString().contains("do-not-log-this"))
         assert(credential.toString().contains("[REDACTED]"))
