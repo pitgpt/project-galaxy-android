@@ -44,6 +44,7 @@ class RealtimeWebRtcClient(
     private val appContext = context.applicationContext
     private val closed = AtomicBoolean(false)
     private val iceEverConnected = AtomicBoolean(false)
+    private val dataChannelEverOpened = AtomicBoolean(false)
     @Volatile private var state = State.NEW
     private var audioDeviceModule: JavaAudioDeviceModule? = null
     private var factory: PeerConnectionFactory? = null
@@ -75,13 +76,16 @@ class RealtimeWebRtcClient(
                         PeerConnection.IceConnectionState.COMPLETED -> {
                             iceEverConnected.set(true)
                             iceConnected.complete(Unit)
+                            if (dataChannelEverOpened.get() && state == State.DISCONNECTED) {
+                                updateState(State.CONNECTED)
+                            }
                         }
                         PeerConnection.IceConnectionState.FAILED -> {
                             iceConnected.completeExceptionally(
                                 IllegalStateException("Realtime ICE connection failed")
                             )
                             if (state == State.CONNECTED || iceEverConnected.get()) {
-                                updateState(State.DISCONNECTED)
+                                updateState(State.FAILED)
                             }
                         }
                         PeerConnection.IceConnectionState.DISCONNECTED -> {
@@ -117,7 +121,12 @@ class RealtimeWebRtcClient(
                 }
                 override fun onTrack(transceiver: org.webrtc.RtpTransceiver) = Unit
             }
-            val configuration = PeerConnection.RTCConfiguration(emptyList())
+            // STUN discovers the public-facing address for common NAT setups. A managed TURN
+            // service is still required for networks that block direct peer connectivity.
+            val iceServers = listOf(
+                PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
+            )
+            val configuration = PeerConnection.RTCConfiguration(iceServers)
             peer = requireNotNull(factory).createPeerConnection(configuration, observer)
                 ?: error("Could not create WebRTC peer connection")
 
@@ -131,10 +140,19 @@ class RealtimeWebRtcClient(
                 override fun onBufferedAmountChange(previousAmount: Long) = Unit
                 override fun onStateChange() {
                     when (events?.state()) {
-                        DataChannel.State.OPEN -> dataChannelOpened.complete(Unit)
-                        DataChannel.State.CLOSED -> dataChannelOpened.completeExceptionally(
-                            IllegalStateException("Realtime event channel closed before opening")
-                        )
+                        DataChannel.State.OPEN -> {
+                            dataChannelEverOpened.set(true)
+                            dataChannelOpened.complete(Unit)
+                            if (iceEverConnected.get() && state == State.DISCONNECTED) {
+                                updateState(State.CONNECTED)
+                            }
+                        }
+                        DataChannel.State.CLOSED -> {
+                            dataChannelOpened.completeExceptionally(
+                                IllegalStateException("Realtime event channel closed before opening")
+                            )
+                            if (dataChannelEverOpened.get()) updateState(State.DISCONNECTED)
+                        }
                         else -> Unit
                     }
                 }
@@ -164,7 +182,7 @@ class RealtimeWebRtcClient(
             updateState(State.CONNECTED)
         } catch (failure: Exception) {
             closeResources()
-            updateState(State.FAILED)
+            if (!closed.get()) updateState(State.FAILED)
             throw failure
         }
     }
