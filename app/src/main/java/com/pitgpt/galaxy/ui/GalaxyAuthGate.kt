@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,6 +35,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pitgpt.galaxy.data.auth.SupabaseAuthService
+import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.launch
 
 private val AuthNight = Color(0xFF080B18)
@@ -47,40 +49,67 @@ fun GalaxyAuthGate(auth: SupabaseAuthService?, content: @Composable () -> Unit) 
         return
     }
 
-    var initialized by remember { mutableStateOf(false) }
-    var authenticated by remember { mutableStateOf(false) }
-    var checking by remember { mutableStateOf(true) }
+    val sessionStatus by auth.sessionStatus.collectAsState()
+    var initializationFinished by remember(auth) { mutableStateOf(false) }
+    var initializationError by remember(auth) { mutableStateOf(false) }
+    var signOutError by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(auth) {
-        checking = true
-        runCatching {
+        initializationFinished = false
+        initializationError = false
+        try {
             auth.initialize()
-            authenticated = !auth.accessToken().isNullOrBlank()
+        } catch (error: Exception) {
+            initializationError = true
+        } finally {
+            initializationFinished = true
         }
-        initialized = true
-        checking = false
     }
 
     when {
-        checking || !initialized -> AuthLoadingScreen()
-        authenticated -> {
+        !initializationFinished || sessionStatus is SessionStatus.Initializing -> AuthLoadingScreen()
+        sessionStatus is SessionStatus.Authenticated -> {
             Box(Modifier.fillMaxSize()) {
                 content()
-                TextButton(
-                    onClick = {
-                        scope.launch {
-                            runCatching { auth.signOut() }
-                            authenticated = false
+                Column(
+                    modifier = Modifier.align(Alignment.TopEnd).padding(10.dp),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                signOutError = false
+                                try {
+                                    auth.signOut()
+                                } catch (error: Exception) {
+                                    signOutError = true
+                                }
+                            }
                         }
-                    },
-                    modifier = Modifier.align(Alignment.TopEnd).padding(10.dp)
-                ) { Text("ВЫЙТИ", color = AuthIce, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+                    ) {
+                        Text("ВЫЙТИ", color = AuthIce, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    }
+                    if (signOutError) {
+                        Text(
+                            "Не удалось завершить сеанс. Попробуй ещё раз.",
+                            color = Color(0xFFFFA0A0),
+                            fontSize = 10.sp
+                        )
+                    }
+                }
             }
         }
         else -> GalaxyAuthScreen(
             auth = auth,
-            onAuthenticated = { authenticated = true }
+            initialMessage = when {
+                sessionStatus is SessionStatus.RefreshFailure ->
+                    "Сессия истекла и не смогла обновиться. Войди снова."
+                initializationError ->
+                    "Не удалось восстановить сессию. Проверь соединение и войди снова."
+                else -> null
+            },
+            onAuthenticated = { signOutError = false }
         )
     }
 }
@@ -98,14 +127,15 @@ private fun AuthLoadingScreen() {
 @Composable
 private fun GalaxyAuthScreen(
     auth: SupabaseAuthService,
+    initialMessage: String?,
     onAuthenticated: () -> Unit
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var registering by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf<String?>(null) }
-    var isError by remember { mutableStateOf(false) }
+    var message by remember(initialMessage) { mutableStateOf(initialMessage) }
+    var isError by remember { mutableStateOf(initialMessage != null) }
     val scope = rememberCoroutineScope()
 
     Box(
@@ -171,8 +201,7 @@ private fun GalaxyAuthScreen(
                             try {
                                 if (registering) {
                                     auth.signUp(cleanEmail, password)
-                                    val token = auth.accessToken()
-                                    if (token.isNullOrBlank()) {
+                                    if (auth.accessToken().isNullOrBlank()) {
                                         message = "Аккаунт создан. Подтверди email по ссылке из письма, затем вернись и войди."
                                         isError = false
                                     } else {
