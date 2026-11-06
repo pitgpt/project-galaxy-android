@@ -76,3 +76,8 @@ Production uses a shared Redis-backed atomic minute and daily credential-issuanc
 Request logs include only request ID, method, path, status and duration. Authorization headers, request/response bodies, user IDs and provider secrets are deliberately excluded.
 
 Run tests with `pytest`.
+
+
+## Cloud Run deployment
+
+See [deploy/cloud-run.md](deploy/cloud-run.md) for the zero-budget-first Google Cloud Run + Upstash Redis deployment plan, Secret Manager setup, runtime configuration, verification checks, and shutdown steps.
