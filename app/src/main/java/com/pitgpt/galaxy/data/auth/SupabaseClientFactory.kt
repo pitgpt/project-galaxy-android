@@ -11,7 +11,10 @@ import io.github.jan.supabase.auth.FlowType
  * The publishable/anon key is public client configuration, never a service-role secret.
  */
 object SupabaseClientFactory {
-    fun createOrNull(context: Context) : SupabaseAuthService? {
+    const val DEEPLINK_SCHEME = "galaxy"
+    const val DEEPLINK_HOST = "auth"
+
+    fun createOrNull(context: Context): SupabaseAuthService? {
         val url = BuildConfig.SUPABASE_URL.trim()
         val key = BuildConfig.SUPABASE_PUBLISHABLE_KEY.trim()
         if (url.isBlank() || key.isBlank()) return null
@@ -25,6 +28,8 @@ object SupabaseClientFactory {
             install(Auth) {
                 sessionManager = AndroidKeystoreSessionManager(context)
                 flowType = FlowType.PKCE
+                host = DEEPLINK_HOST
+                scheme = DEEPLINK_SCHEME
                 alwaysAutoRefresh = true
                 autoLoadFromStorage = true
                 autoSaveToStorage = true

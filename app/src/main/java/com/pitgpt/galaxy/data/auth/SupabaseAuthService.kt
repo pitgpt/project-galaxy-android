@@ -1,10 +1,12 @@
 package com.pitgpt.galaxy.data.auth
 
+import android.content.Intent
 import com.pitgpt.galaxy.data.remote.GalaxyAccessTokenProvider
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.builtin.Email
 import io.github.jan.supabase.auth.status.SessionStatus
+import io.github.jan.supabase.handleDeeplinks
 import kotlinx.coroutines.flow.StateFlow
 
 /** Single application-facing entry point for Supabase email/password authentication. */
@@ -14,6 +16,10 @@ class SupabaseAuthService(private val client: SupabaseClient) : GalaxyAccessToke
 
     suspend fun initialize() {
         client.auth.awaitInitialization()
+    }
+
+    fun handleDeeplinks(intent: Intent) {
+        client.handleDeeplinks(intent)
     }
 
     suspend fun signUp(email: String, password: String) {
