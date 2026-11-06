@@ -6,6 +6,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CreateRealtimeSessionTest {
@@ -29,6 +30,17 @@ class CreateRealtimeSessionTest {
 
         assertThrows(IllegalArgumentException::class.java) {
             runBlocking { useCase("  ", null) }
+        }
+        assertEquals(null, provider.characterId)
+    }
+
+    @Test
+    fun rejectsBlankVoiceBeforeCallingProvider() {
+        val provider = FakeProvider(RealtimeSessionCredential("secret", 61_000L))
+        val useCase = CreateRealtimeSession(provider, now = { 1_000L })
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { useCase("galaxy.default", "  ") }
         }
         assertEquals(null, provider.characterId)
     }
@@ -58,7 +70,7 @@ class CreateRealtimeSessionTest {
         val credential = RealtimeSessionCredential("do-not-log-this", 61_000L)
 
         assertFalse(credential.toString().contains("do-not-log-this"))
-        assert(credential.toString().contains("[REDACTED]"))
+        assertTrue(credential.toString().contains("[REDACTED]"))
     }
 
     private class FakeProvider(
