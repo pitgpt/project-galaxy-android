@@ -31,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pitgpt.galaxy.BuildConfig
 import com.pitgpt.galaxy.GalaxyApplication
 
 private val Night = Color(0xFF080B18)
@@ -74,15 +75,30 @@ fun GalaxyHome() {
                         fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(Color(0x2227D7A0))
-                        .border(1.dp, Color(0x5546D9AC), RoundedCornerShape(50))
-                        .padding(horizontal = 12.dp, vertical = 7.dp)
-                ) {
-                    Text("●  LOCAL PREVIEW", color = Color(0xFF75E2BD),
-                        fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                Column(horizontalAlignment = Alignment.End) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0x2227D7A0))
+                            .border(1.dp, Color(0x5546D9AC), RoundedCornerShape(50))
+                            .padding(horizontal = 12.dp, vertical = 7.dp)
+                    ) {
+                        Text("●  LOCAL PREVIEW", color = Color(0xFF75E2BD),
+                            fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    }
+                    Spacer(modifier = Modifier.height(5.dp))
+                    Text(
+                        text = "v" + BuildConfig.VERSION_NAME + " · build " + BuildConfig.VERSION_CODE,
+                        color = Color(0xFF91A5CC),
+                        fontSize = 9.sp,
+                        letterSpacing = 0.4.sp
+                    )
+                    Text(
+                        text = BuildConfig.GIT_SHA,
+                        color = Color(0xFF657AAB),
+                        fontSize = 8.sp,
+                        letterSpacing = 0.6.sp
+                    )
                 }
             }
 
