@@ -1,3 +1,6 @@
+import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
@@ -8,6 +11,8 @@ from redis.asyncio import Redis
 
 from .config import Settings
 from .security import InMemoryRateLimiter, JwtAuthenticator, RedisRateLimiter, safety_identifier
+
+logger = logging.getLogger("galaxy.request")
 
 SERVER_INSTRUCTIONS = (
     "You are Galaxy, a helpful conversational AI companion. "
@@ -75,6 +80,25 @@ def create_app(
 
     app = FastAPI(title="Galaxy Backend", version="0.2.0", lifespan=lifespan)
 
+    @app.middleware("http")
+    async def request_logging(request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", "").strip()
+        if not request_id or len(request_id) > 128 or any(ord(c) < 33 or ord(c) > 126 for c in request_id):
+            request_id = uuid.uuid4().hex
+        started = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            logger.info(
+                "request_complete request_id=%s method=%s path=%s status=%s duration_ms=%s",
+                request_id, request.method, request.url.path, status_code,
+                round((time.perf_counter() - started) * 1000, 2),
+            )
+
     async def current_user(
         request: Request,
         authorization: Annotated[str | None, Header()] = None,
@@ -90,6 +114,16 @@ def create_app(
     @app.get("/health")
     async def health():
         return {"status": "ok"}
+
+    @app.get("/ready")
+    async def ready(request: Request):
+        redis_client = request.app.state.redis
+        if redis_client is not None:
+            try:
+                await redis_client.ping()
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail="Redis readiness check failed") from exc
+        return {"status": "ready"}
 
     @app.post("/v1/realtime/sessions", response_model=CreateSessionResponse)
     async def create_realtime_session(

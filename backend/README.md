@@ -23,6 +23,9 @@ The auth issuer, audience and JWKS URL must belong to the authentication provide
 
 ## API
 
+- `GET /health`: liveness probe.
+- `GET /ready`: readiness probe; returns 503 when configured Redis is unavailable.
+
 `POST /v1/realtime/sessions`
 
 Requires `Authorization: Bearer <JWT>`.
@@ -64,5 +67,7 @@ Create `.env` from the required configuration above. Never commit it. The image 
 ## Production hardening still required
 
 The included rate limiter is process-local and resets on restart. Replace it with a shared Redis-backed limiter before running multiple replicas or exposing the service publicly. Deploy behind HTTPS, add account/session concurrency and usage ceilings, configure secret rotation and monitoring, and choose a real identity provider before connecting Android. No production authentication provider or deployment is configured by this repository yet.
+
+Request logs include only request ID, method, path, status and duration. Authorization headers, request/response bodies, user IDs and provider secrets are deliberately excluded.
 
 Run tests with `pytest`.

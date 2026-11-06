@@ -80,6 +80,29 @@ def test_health_does_not_require_auth(settings):
     assert response.json() == {"status": "ok"}
 
 
+def test_readiness_is_available_without_auth(settings):
+    with client_for(settings, FakeProvider()) as client:
+        response = client.get("/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+def test_request_logs_exclude_credentials_and_response_secrets(settings, caplog):
+    provider = FakeProvider()
+    with client_for(settings, provider) as client:
+        response = client.post(
+            "/v1/realtime/sessions",
+            headers={"Authorization": "Bearer valid-test-token"},
+            json={"character_id": "galaxy.default", "voice_id": "alloy"},
+        )
+    assert response.status_code == 200
+    assert response.headers.get("X-Request-ID")
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "valid-test-token" not in messages
+    assert "ek_test_secret" not in messages
+    assert "sk-server-only" not in messages
+
+
 def test_session_requires_bearer_token(settings):
     with client_for(settings, FakeProvider()) as client:
         response = client.post("/v1/realtime/sessions", json={"character_id": "galaxy.default", "voice_id": "alloy"})
