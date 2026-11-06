@@ -176,7 +176,7 @@ def create_app(
                 "type": "realtime",
                 "model": config.realtime_model,
                 "instructions": SERVER_INSTRUCTIONS + (
-                    "\\n\\nCharacter-specific persona instructions:\\n" + payload.persona_instructions.strip()
+                    "\n\nCharacter-specific persona instructions:\n" + payload.persona_instructions.strip()
                     if payload.persona_instructions and payload.persona_instructions.strip()
                     else ""
                 ),
