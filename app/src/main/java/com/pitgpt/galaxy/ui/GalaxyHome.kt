@@ -1,5 +1,7 @@
 package com.pitgpt.galaxy.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -28,6 +30,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -52,6 +56,8 @@ import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
+import com.pitgpt.galaxy.data.voice.RealtimeVoiceController
+import com.pitgpt.galaxy.data.voice.RealtimeVoiceStatus
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -81,6 +87,29 @@ fun GalaxyHome() {
     var profile by remember { mutableStateOf<CharacterProfile?>(null) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
     val scope = rememberCoroutineScope()
+    val voiceController = remember(app, scope) {
+        RealtimeVoiceController(
+            context = context,
+            sessionProviderFactory = { app.authenticatedRealtimeSessionProvider() },
+            conversations = app.conversations,
+            scope = scope,
+            onTranscript = { message -> messages.add(message) }
+        )
+    }
+    val voiceState by voiceController.state.collectAsState()
+    val microphonePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val selectedProfile = profile
+        if (granted && selectedProfile != null) {
+            scope.launch { voiceController.connect(selectedProfile) }
+        } else if (!granted) {
+            voiceController.setPermissionDenied()
+        }
+    }
+    DisposableEffect(voiceController) {
+        onDispose { voiceController.disconnect() }
+    }
 
     LaunchedEffect(reloadKey) {
         isLoading = true
@@ -239,7 +268,17 @@ fun GalaxyHome() {
             isLoading = isLoading,
             loadError = loadError,
             onRetryLoad = { reloadKey += 1 },
-            onBack = { showChat = false },
+            voiceState = voiceState,
+            onStartVoice = {
+                if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    profile?.let { selected -> scope.launch { voiceController.connect(selected) } }
+                } else {
+                    microphonePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                }
+            },
+            onStopVoice = { voiceController.disconnect() },
+            onToggleMute = { voiceController.setMicrophoneEnabled(voiceState.muted) },
+            onBack = { voiceController.disconnect(); showChat = false },
             onSend = { text ->
                 val message = SendMessage(app.conversations).invoke(activeCharacterId, text)
                 messages.add(message)
@@ -384,6 +423,10 @@ private fun ConversationScreen(
     isLoading: Boolean,
     loadError: String?,
     onRetryLoad: () -> Unit,
+    voiceState: com.pitgpt.galaxy.data.voice.RealtimeVoiceUiState,
+    onStartVoice: () -> Unit,
+    onStopVoice: () -> Unit,
+    onToggleMute: () -> Unit,
     onBack: () -> Unit,
     onSend: suspend (String) -> Unit
 ) {
@@ -424,8 +467,14 @@ private fun ConversationScreen(
                 Column(horizontalAlignment = Alignment.End) {
                     Text(characterName, color = Color.White, fontSize = 18.sp,
                         fontWeight = FontWeight.SemiBold)
-                    Text("ЛОКАЛЬНЫЙ ДИАЛОГ · AI НЕ ПОДКЛЮЧЁН",
-                        color = Color(0xFFE9BD70), fontSize = 8.sp, letterSpacing = 0.7.sp)
+                    Text(when (voiceState.status) {
+                        RealtimeVoiceStatus.CONNECTED -> "ГОЛОСОВОЙ КАНАЛ ПОДКЛЮЧЁН"
+                        RealtimeVoiceStatus.CONNECTING -> "ПОДКЛЮЧАЮ ГОЛОС…"
+                        RealtimeVoiceStatus.DISCONNECTED -> "СВЯЗЬ ПРЕРВАНА"
+                        RealtimeVoiceStatus.FAILED -> "ОШИБКА ГОЛОСОВОГО КАНАЛА"
+                        else -> "ЛОКАЛЬНАЯ ИСТОРИЯ · AI НЕ ПОДКЛЮЧЁН"
+                    }, color = if (voiceState.status == RealtimeVoiceStatus.CONNECTED) Color(0xFF75E2BD) else Color(0xFFE9BD70),
+                        fontSize = 8.sp, letterSpacing = 0.7.sp)
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -491,7 +540,29 @@ private fun ConversationScreen(
                     }
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(voiceState.message ?: "Голосовой режим выключен", color = Muted, fontSize = 10.sp)
+                    if (voiceState.status == RealtimeVoiceStatus.CONNECTED) {
+                        Text("Аудио передаётся напрямую по WebRTC", color = Color(0xFF75E2BD), fontSize = 9.sp)
+                    }
+                }
+                when (voiceState.status) {
+                    RealtimeVoiceStatus.CONNECTED -> {
+                        TextButton(onClick = onToggleMute) {
+                            Text(if (voiceState.muted) "ВКЛ. МИКРОФОН" else "МИКРОФОН ВЫКЛ.", color = Ice, fontSize = 9.sp)
+                        }
+                        TextButton(onClick = onStopVoice) { Text("СТОП", color = Color(0xFFFFA0A0), fontSize = 9.sp) }
+                    }
+                    RealtimeVoiceStatus.CONNECTING -> Text("ПОДОЖДИ…", color = Ice, fontSize = 10.sp)
+                    else -> Button(onClick = onStartVoice, shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8))) {
+                        Text("ГОВОРИТЬ", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
                     .background(Color(0xFF1A2440)).padding(6.dp),
