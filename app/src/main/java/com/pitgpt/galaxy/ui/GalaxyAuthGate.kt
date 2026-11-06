@@ -68,7 +68,7 @@ fun GalaxyAuthGate(auth: SupabaseAuthService?, content: @Composable () -> Unit) 
     }
 
     when {
-        !initializationFinished || sessionStatus is SessionStatus.Initializing -> AuthLoadingScreen()
+        !initializationFinished || (sessionStatus is SessionStatus.Initializing && !initializationError) -> AuthLoadingScreen()
         sessionStatus is SessionStatus.Authenticated -> {
             Box(Modifier.fillMaxSize()) {
                 content()
