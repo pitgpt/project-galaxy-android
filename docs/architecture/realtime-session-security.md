@@ -18,7 +18,7 @@ The Android app must not receive, persist, log, or attempt to reconstruct the lo
 
 1. The app authenticates to the Galaxy backend using the application's own user/session authentication mechanism.
 2. The app requests a voice session from `POST /v1/realtime/sessions`.
-3. The backend validates the caller, applies per-user and global rate limits, validates the requested character/voice configuration against server policy, and creates a Realtime client credential using its server-side provider key.
+3. The backend validates the caller, applies per-user and global rate limits, resolves the requested character/voice against server-owned allow-lists, derives a stable privacy-preserving safety identifier for the authenticated user, and creates a Realtime client secret using its server-side provider key.
 4. The backend returns only the short-lived client credential and the minimum session metadata required by the client. It never returns the server key.
 5. Android uses the short-lived credential to establish the Realtime connection over WebRTC.
 6. When the credential expires or the session ends, the client requests a new session credential. It does not retry indefinitely.
@@ -33,16 +33,19 @@ Request:
 
 Successful response:
 
-- Short-lived client credential (sensitive; memory-only on Android).
-- Expiration timestamp.
-- Non-secret session metadata needed to configure the WebRTC client.
+- `client_secret`: the short-lived client secret (sensitive; memory-only on Android).
+- `expires_at`: Unix timestamp in seconds, converted to milliseconds at the Android boundary.
+- `session_id`: non-secret Realtime session identifier.
+- Only non-secret session metadata needed by the WebRTC client.
+
+The backend calls OpenAI `POST /v1/realtime/client_secrets` using its server-side API key. It sets an explicit short TTL with `expires_after` (`anchor: created_at`; `seconds` must be between 10 and 7200) and a server-controlled `session` object with `type: realtime`. The default TTL is 600 seconds, but Galaxy should choose the shortest TTL compatible with its connection setup. The secret expiry limits when a session can be created; it does not terminate a session that has already started. The Android app must treat the returned secret as single-session material even though the provider token may technically be reusable until expiry.
 
 Errors:
 
 - `401` unauthenticated, `403` not permitted, `429` rate limited, `5xx` temporary provider/backend failure.
 - Error bodies must be safe for display and must not include provider keys, raw authorization headers, or internal secrets.
 
-Exact provider request/response fields will be pinned to the selected Realtime API version when the backend implementation begins. Do not bake guessed provider payloads into the Android domain layer.
+Provider integration is pinned to the current GA Realtime client-secret endpoint (`POST /v1/realtime/client_secrets`), not the legacy beta session-token endpoint. Android should receive a Galaxy-owned response DTO, not the raw provider response. The backend must construct the provider session configuration from server-side policy; client-supplied model, instructions, tools, and arbitrary session fields are not forwarded.
 
 ## Security requirements
 
@@ -50,6 +53,7 @@ Exact provider request/response fields will be pinned to the selected Realtime A
 - Require TLS for app-to-backend and app-to-provider connections.
 - Authenticate every session-creation request; do not expose an unauthenticated token-minting proxy.
 - Apply per-account rate limits, concurrency limits, and usage ceilings before minting credentials.
+- Set `OpenAI-Safety-Identifier` on the server-side client-secret creation request using a stable, privacy-preserving value derived from the authenticated account. Never use raw email addresses or other directly identifying values.
 - Allow-list model, voice, tools, and session parameters on the backend. Never accept arbitrary provider configuration from the client.
 - Do not log client credentials, provider keys, authorization headers, or SDP bodies containing credentials.
 - Keep ephemeral credentials in memory only; do not write them to Room, preferences, analytics, crash reports, or debug logs.
