@@ -5,6 +5,8 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val gitSha = System.getenv("GITHUB_SHA")?.take(7) ?: "local"
+
 android {
     namespace = "com.pitgpt.galaxy"
     compileSdk = 35
@@ -14,8 +16,12 @@ android {
         targetSdk = 35
         versionCode = 4
         versionName = "0.4.0"
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
