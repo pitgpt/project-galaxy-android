@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -72,6 +73,8 @@ fun GalaxyHome() {
     var showProfile by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
+    var showEditCharacter by remember { mutableStateOf(false) }
+    var editorProfile by remember { mutableStateOf<CharacterProfile?>(null) }
     var editorError by remember { mutableStateOf<String?>(null) }
     var profile by remember { mutableStateOf<CharacterProfile?>(null) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
@@ -83,12 +86,16 @@ fun GalaxyHome() {
         try {
             app.initialize()
             val loadedCharacters = app.characters.getAll()
-            val activeProfile = loadedCharacters.firstOrNull { it.id == activeCharacterId }
+            val preferredId = context.getSharedPreferences("galaxy_preferences", 0)
+                .getString("active_character_id", activeCharacterId) ?: CHARACTER_ID
+            val activeProfile = loadedCharacters.firstOrNull { it.id == preferredId }
                 ?: loadedCharacters.firstOrNull { it.id == CHARACTER_ID }
                 ?: throw IllegalStateException("Built-in character is missing")
             val loadedMessages = app.conversations.getForCharacter(activeProfile.id)
             characters = loadedCharacters
             activeCharacterId = activeProfile.id
+            context.getSharedPreferences("galaxy_preferences", 0).edit()
+                .putString("active_character_id", activeProfile.id).apply()
             profile = activeProfile
             characterName = activeProfile.displayName
             messages.clear()
@@ -101,7 +108,32 @@ fun GalaxyHome() {
         }
     }
 
-    if (showCreateCharacter) {
+    if (showEditCharacter) {
+        CharacterEditorScreen(
+            initialProfile = editorProfile,
+            title = "РЕДАКТИРОВАТЬ ПЕРСОНАЖА",
+            saveLabel = "СОХРАНИТЬ ИЗМЕНЕНИЯ",
+            errorMessage = editorError,
+            onBack = { showEditCharacter = false; editorProfile = null },
+            onSave = { updated ->
+                scope.launch {
+                    try {
+                        app.characters.save(updated)
+                        characters = app.characters.getAll()
+                        if (activeCharacterId == updated.id) {
+                            profile = updated
+                            characterName = updated.displayName
+                        }
+                        editorError = null
+                        showEditCharacter = false
+                        editorProfile = null
+                    } catch (error: Exception) {
+                        editorError = "Не удалось сохранить изменения персонажа."
+                    }
+                }
+            }
+        )
+    } else if (showCreateCharacter) {
         CharacterEditorScreen(
             initialProfile = null,
             title = "НОВЫЙ ПЕРСОНАЖ",
@@ -115,6 +147,8 @@ fun GalaxyHome() {
                         app.characters.save(created)
                         characters = app.characters.getAll()
                         activeCharacterId = created.id
+                        context.getSharedPreferences("galaxy_preferences", 0).edit()
+                            .putString("active_character_id", created.id).apply()
                         profile = created
                         characterName = created.displayName
                         messages.clear()
@@ -131,7 +165,29 @@ fun GalaxyHome() {
             characters = characters,
             activeCharacterId = activeCharacterId,
             onBack = { showCharacters = false },
-            onCreate = { showCreateCharacter = true },
+            onCreate = { editorError = null; showCreateCharacter = true },
+            onEdit = { selected -> editorProfile = selected; editorError = null; showEditCharacter = true },
+            onDelete = { selected ->
+                scope.launch {
+                    try {
+                        app.characters.delete(selected.id)
+                        characters = app.characters.getAll()
+                        if (activeCharacterId == selected.id) {
+                            val fallback = app.characters.getById(CHARACTER_ID)
+                                ?: throw IllegalStateException("Built-in character is missing")
+                            activeCharacterId = fallback.id
+                            context.getSharedPreferences("galaxy_preferences", 0).edit()
+                                .putString("active_character_id", fallback.id).apply()
+                            profile = fallback
+                            characterName = fallback.displayName
+                            messages.clear()
+                            messages.addAll(app.conversations.getForCharacter(fallback.id))
+                        }
+                    } catch (error: Exception) {
+                        loadError = "Не удалось удалить персонажа. Данные не были изменены."
+                    }
+                }
+            },
             onSelect = { selected ->
                 scope.launch {
                     isLoading = true
@@ -141,6 +197,8 @@ fun GalaxyHome() {
                             ?: throw IllegalStateException("Character not found")
                         val selectedMessages = app.conversations.getForCharacter(selectedProfile.id)
                         activeCharacterId = selectedProfile.id
+                        context.getSharedPreferences("galaxy_preferences", 0).edit()
+                            .putString("active_character_id", selectedProfile.id).apply()
                         profile = selectedProfile
                         characterName = selectedProfile.displayName
                         messages.clear()
@@ -583,6 +641,8 @@ private fun CharacterListScreen(
     activeCharacterId: String,
     onBack: () -> Unit,
     onCreate: () -> Unit,
+    onEdit: (CharacterProfile) -> Unit,
+    onDelete: (CharacterProfile) -> Unit,
     onSelect: (CharacterProfile) -> Unit
 ) {
     Box(
@@ -590,6 +650,7 @@ private fun CharacterListScreen(
             Brush.verticalGradient(listOf(Color(0xFF111A35), Night, Color(0xFF100D25)))
         )
     ) {
+        var pendingDelete by remember { mutableStateOf<CharacterProfile?>(null) }
         Column(
             Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -628,10 +689,18 @@ private fun CharacterListScreen(
                             Text(character.description, color = Muted, fontSize = 12.sp,
                                 lineHeight = 17.sp)
                         }
-                        if (!selected) {
-                            Spacer(Modifier.height(8.dp))
-                            TextButton(onClick = { onSelect(character) }) {
-                                Text("ВЫБРАТЬ", color = Ice)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (!selected) {
+                                TextButton(onClick = { onSelect(character) }) {
+                                    Text("ВЫБРАТЬ", color = Ice)
+                                }
+                            }
+                            if (!character.isBuiltIn) {
+                                Spacer(Modifier.weight(1f))
+                                TextButton(onClick = { onEdit(character) }) { Text("ИЗМЕНИТЬ", color = Ice) }
+                                TextButton(onClick = { pendingDelete = character }) {
+                                    Text("УДАЛИТЬ", color = Color(0xFFFF9B9B))
+                                }
                             }
                         }
                     }
@@ -643,6 +712,21 @@ private fun CharacterListScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
                 shape = RoundedCornerShape(16.dp)
             ) { Text("＋  СОЗДАТЬ ПЕРСОНАЖА", fontWeight = FontWeight.Bold) }
+        }
+        pendingDelete?.let { character ->
+            AlertDialog(
+                onDismissRequest = { pendingDelete = null },
+                title = { Text("Удалить персонажа?") },
+                text = { Text("Профиль «" + character.displayName + "» будет удалён. История диалога останется в локальной базе.") },
+                confirmButton = {
+                    TextButton(onClick = { onDelete(character); pendingDelete = null }) {
+                        Text("УДАЛИТЬ", color = Color(0xFFFF7777))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingDelete = null }) { Text("ОТМЕНА") }
+                }
+            )
         }
     }
 }
@@ -656,9 +740,9 @@ private fun CharacterEditorScreen(
     onBack: () -> Unit,
     onSave: (CharacterProfile) -> Unit
 ) {
-    var displayName by remember { mutableStateOf(initialProfile?.displayName.orEmpty()) }
-    var description by remember { mutableStateOf(initialProfile?.description.orEmpty()) }
-    var personaDefinition by remember { mutableStateOf(initialProfile?.personaDefinition.orEmpty()) }
+    var displayName by remember(initialProfile?.id) { mutableStateOf(initialProfile?.displayName.orEmpty()) }
+    var description by remember(initialProfile?.id) { mutableStateOf(initialProfile?.description.orEmpty()) }
+    var personaDefinition by remember(initialProfile?.id) { mutableStateOf(initialProfile?.personaDefinition.orEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
 
     Box(
