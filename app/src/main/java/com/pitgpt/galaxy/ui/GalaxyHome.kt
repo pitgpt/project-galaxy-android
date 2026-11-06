@@ -47,8 +47,8 @@ import com.pitgpt.galaxy.BuildConfig
 import com.pitgpt.galaxy.GalaxyApplication
 import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
+import com.pitgpt.galaxy.core.usecase.SendMessage
 import kotlinx.coroutines.launch
-import java.util.UUID
 
 private val Night = Color(0xFF080B18)
 private val Muted = Color(0xFF9AA8C5)
@@ -79,17 +79,8 @@ fun GalaxyHome() {
             messages = messages,
             onBack = { showChat = false },
             onSend = { text ->
-                val message = ConversationMessage(
-                    id = UUID.randomUUID().toString(),
-                    characterId = CHARACTER_ID,
-                    role = MessageRole.USER,
-                    content = text,
-                    createdAtEpochMillis = System.currentTimeMillis()
-                )
-                scope.launch {
-                    app.conversations.append(message)
-                    messages.add(message)
-                }
+                val message = SendMessage(app.conversations).invoke(CHARACTER_ID, text)
+                messages.add(message)
             }
         )
     } else {
@@ -195,10 +186,30 @@ private fun ConversationScreen(
     characterName: String,
     messages: List<ConversationMessage>,
     onBack: () -> Unit,
-    onSend: (String) -> Unit
+    onSend: suspend (String) -> Unit
 ) {
     var draft by remember { mutableStateOf("") }
+    var isSending by remember { mutableStateOf(false) }
+    var sendError by remember { mutableStateOf<String?>(null) }
+    val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    fun submitDraft() {
+        val value = draft.trim()
+        if (value.isEmpty() || isSending) return
+        sendScope.launch {
+            isSending = true
+            sendError = null
+            try {
+                onSend(value)
+                draft = ""
+            } catch (error: Exception) {
+                sendError = "Не удалось сохранить сообщение. Текст остался в поле, попробуй ещё раз."
+            } finally {
+                isSending = false
+            }
+        }
+    }
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
     }
@@ -288,22 +299,22 @@ private fun ConversationScreen(
                         unfocusedPlaceholderColor = Muted
                     ),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = {
-                        val value = draft.trim()
-                        if (value.isNotEmpty()) { onSend(value); draft = "" }
-                    })
+                    keyboardActions = KeyboardActions(onSend = { submitDraft() }),
+                    enabled = !isSending
                 )
                 Spacer(Modifier.size(6.dp))
                 Button(
-                    onClick = {
-                        val value = draft.trim()
-                        if (value.isNotEmpty()) { onSend(value); draft = "" }
-                    },
-                    enabled = draft.isNotBlank(),
+                    onClick = { submitDraft() },
+                    enabled = draft.isNotBlank() && !isSending,
                     modifier = Modifier.height(52.dp),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8))
-                ) { Text("➤") }
+                ) { Text(if (isSending) "…" else "➤") }
+            }
+            sendError?.let { error ->
+                Spacer(Modifier.height(6.dp))
+                Text(error, color = Color(0xFFFF9B9B), fontSize = 11.sp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
             }
         }
     }
