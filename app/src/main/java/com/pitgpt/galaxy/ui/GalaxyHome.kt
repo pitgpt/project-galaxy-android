@@ -50,6 +50,7 @@ import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 private val Night = Color(0xFF080B18)
 private val Muted = Color(0xFF9AA8C5)
@@ -61,12 +62,17 @@ fun GalaxyHome() {
     val context = LocalContext.current
     val app = context.applicationContext as GalaxyApplication
     var characterName by remember { mutableStateOf("Галактика") }
+    var activeCharacterId by remember { mutableStateOf(CHARACTER_ID) }
+    var characters by remember { mutableStateOf<List<CharacterProfile>>(emptyList()) }
     var initialized by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
+    var showCharacters by remember { mutableStateOf(false) }
+    var showCreateCharacter by remember { mutableStateOf(false) }
+    var editorError by remember { mutableStateOf<String?>(null) }
     var profile by remember { mutableStateOf<CharacterProfile?>(null) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
     val scope = rememberCoroutineScope()
@@ -76,10 +82,15 @@ fun GalaxyHome() {
         loadError = null
         try {
             app.initialize()
-            val loadedName = app.characters.getById(CHARACTER_ID)?.displayName ?: "Галактика"
-            val loadedMessages = app.conversations.getForCharacter(CHARACTER_ID)
-            profile = app.characters.getById(CHARACTER_ID)
-            characterName = loadedName
+            val loadedCharacters = app.characters.getAll()
+            val activeProfile = loadedCharacters.firstOrNull { it.id == activeCharacterId }
+                ?: loadedCharacters.firstOrNull { it.id == CHARACTER_ID }
+                ?: throw IllegalStateException("Built-in character is missing")
+            val loadedMessages = app.conversations.getForCharacter(activeProfile.id)
+            characters = loadedCharacters
+            activeCharacterId = activeProfile.id
+            profile = activeProfile
+            characterName = activeProfile.displayName
             messages.clear()
             messages.addAll(loadedMessages)
             initialized = true
@@ -90,7 +101,60 @@ fun GalaxyHome() {
         }
     }
 
-    if (showProfile) {
+    if (showCreateCharacter) {
+        CharacterEditorScreen(
+            initialProfile = null,
+            title = "НОВЫЙ ПЕРСОНАЖ",
+            saveLabel = "СОЗДАТЬ ПЕРСОНАЖА",
+            errorMessage = editorError,
+            onBack = { showCreateCharacter = false },
+            onSave = { draft ->
+                scope.launch {
+                    try {
+                        val created = draft.copy(id = UUID.randomUUID().toString(), isBuiltIn = false)
+                        app.characters.save(created)
+                        characters = app.characters.getAll()
+                        activeCharacterId = created.id
+                        profile = created
+                        characterName = created.displayName
+                        messages.clear()
+                        loadError = null
+                        showCreateCharacter = false
+                    } catch (error: Exception) {
+                        editorError = "Не удалось создать персонажа. Проверь хранилище и повтори попытку."
+                    }
+                }
+            }
+        )
+    } else if (showCharacters) {
+        CharacterListScreen(
+            characters = characters,
+            activeCharacterId = activeCharacterId,
+            onBack = { showCharacters = false },
+            onCreate = { showCreateCharacter = true },
+            onSelect = { selected ->
+                scope.launch {
+                    isLoading = true
+                    loadError = null
+                    try {
+                        val selectedProfile = app.characters.getById(selected.id)
+                            ?: throw IllegalStateException("Character not found")
+                        val selectedMessages = app.conversations.getForCharacter(selectedProfile.id)
+                        activeCharacterId = selectedProfile.id
+                        profile = selectedProfile
+                        characterName = selectedProfile.displayName
+                        messages.clear()
+                        messages.addAll(selectedMessages)
+                        showCharacters = false
+                    } catch (error: Exception) {
+                        loadError = "Не удалось переключить персонажа. Попробуй ещё раз."
+                    } finally {
+                        isLoading = false
+                    }
+                }
+            }
+        )
+    } else if (showProfile) {
         CharacterProfileScreen(
             profile = profile,
             onBack = { showProfile = false },
@@ -98,6 +162,7 @@ fun GalaxyHome() {
                 scope.launch {
                     try {
                         app.characters.save(updated)
+                        characters = app.characters.getAll()
                         profile = updated
                         characterName = updated.displayName
                         showProfile = false
@@ -116,7 +181,7 @@ fun GalaxyHome() {
             onRetryLoad = { reloadKey += 1 },
             onBack = { showChat = false },
             onSend = { text ->
-                val message = SendMessage(app.conversations).invoke(CHARACTER_ID, text)
+                val message = SendMessage(app.conversations).invoke(activeCharacterId, text)
                 messages.add(message)
             }
         )
@@ -127,7 +192,8 @@ fun GalaxyHome() {
             loadError = loadError,
             onRetry = { reloadKey += 1 },
             onOpenChat = { showChat = true },
-            onOpenProfile = { showProfile = true }
+            onOpenProfile = { showProfile = true },
+            onOpenCharacters = { showCharacters = true }
         )
     }
 }
@@ -139,7 +205,8 @@ private fun HomeScreen(
     loadError: String?,
     onRetry: () -> Unit,
     onOpenChat: () -> Unit,
-    onOpenProfile: () -> Unit
+    onOpenProfile: () -> Unit,
+    onOpenCharacters: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -229,6 +296,15 @@ private fun HomeScreen(
             ) {
                 Text("ПРОФИЛЬ ПЕРСОНАЖА", fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.8.sp)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onOpenCharacters,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("ПЕРСОНАЖИ И ПРОФИЛИ", fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(10.dp))
             Button(
@@ -499,6 +575,175 @@ private fun CharacterProfileScreen(
         }
     }
 }
+
+
+@Composable
+private fun CharacterListScreen(
+    characters: List<CharacterProfile>,
+    activeCharacterId: String,
+    onBack: () -> Unit,
+    onCreate: () -> Unit,
+    onSelect: (CharacterProfile) -> Unit
+) {
+    Box(
+        Modifier.fillMaxSize().background(
+            Brush.verticalGradient(listOf(Color(0xFF111A35), Night, Color(0xFF100D25)))
+        )
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("‹  НАЗАД", color = Ice) }
+                Spacer(Modifier.weight(1f))
+                Text("ПЕРСОНАЖИ", color = Color.White, fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+            }
+            Text("У каждого персонажа своя личность и отдельная история диалога.",
+                color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(characters, key = { it.id }) { character ->
+                    val selected = character.id == activeCharacterId
+                    Column(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
+                            .background(if (selected) Color(0xFF29385F) else Color(0xAA18213B))
+                            .border(1.dp, if (selected) Color(0xFF8DAEFF) else Color(0x334F6598),
+                                RoundedCornerShape(18.dp))
+                            .padding(15.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(character.displayName, color = Color.White, fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            if (selected) Text("АКТИВЕН", color = Color(0xFF9EDCCB),
+                                fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            else if (character.isBuiltIn) Text("ВСТРОЕННЫЙ", color = Ice,
+                                fontSize = 9.sp)
+                        }
+                        if (character.description.isNotBlank()) {
+                            Spacer(Modifier.height(5.dp))
+                            Text(character.description, color = Muted, fontSize = 12.sp,
+                                lineHeight = 17.sp)
+                        }
+                        if (!selected) {
+                            Spacer(Modifier.height(8.dp))
+                            TextButton(onClick = { onSelect(character) }) {
+                                Text("ВЫБРАТЬ", color = Ice)
+                            }
+                        }
+                    }
+                }
+            }
+            Button(
+                onClick = onCreate,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
+                shape = RoundedCornerShape(16.dp)
+            ) { Text("＋  СОЗДАТЬ ПЕРСОНАЖА", fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
+@Composable
+private fun CharacterEditorScreen(
+    initialProfile: CharacterProfile?,
+    title: String,
+    saveLabel: String,
+    errorMessage: String?,
+    onBack: () -> Unit,
+    onSave: (CharacterProfile) -> Unit
+) {
+    var displayName by remember { mutableStateOf(initialProfile?.displayName.orEmpty()) }
+    var description by remember { mutableStateOf(initialProfile?.description.orEmpty()) }
+    var personaDefinition by remember { mutableStateOf(initialProfile?.personaDefinition.orEmpty()) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    Box(
+        Modifier.fillMaxSize().background(
+            Brush.verticalGradient(listOf(Color(0xFF111A35), Night, Color(0xFF100D25)))
+        )
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("‹  НАЗАД", color = Ice) }
+                Spacer(Modifier.weight(1f))
+                Text(title, color = Color.White, fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+            }
+            Text("Имя и описание будут видны в списке. Инструкции задают основу личности персонажа.",
+                color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            OutlinedTextField(
+                value = displayName,
+                onValueChange = { displayName = it; error = null },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Имя персонажа") },
+                singleLine = true,
+                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                    focusedLabelColor = Ice, unfocusedLabelColor = Muted,
+                    focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
+                )
+            )
+            OutlinedTextField(
+                value = description,
+                onValueChange = { description = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Краткое описание") },
+                minLines = 2, maxLines = 3,
+                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                    focusedLabelColor = Ice, unfocusedLabelColor = Muted,
+                    focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
+                )
+            )
+            OutlinedTextField(
+                value = personaDefinition,
+                onValueChange = { personaDefinition = it; error = null },
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                label = { Text("Личность и инструкции персонажа") },
+                minLines = 5,
+                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                    focusedLabelColor = Ice, unfocusedLabelColor = Muted,
+                    focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
+                )
+            )
+            errorMessage?.let { Text(it, color = Color(0xFFFF9B9B), fontSize = 12.sp) }
+            error?.let { Text(it, color = Color(0xFFFF9B9B), fontSize = 12.sp) }
+            Button(
+                onClick = {
+                    val name = displayName.trim()
+                    val persona = personaDefinition.trim()
+                    if (name.isEmpty()) error = "Укажи имя персонажа."
+                    else if (persona.isEmpty()) error = "Опиши личность и инструкции персонажа."
+                    else onSave(
+                        (initialProfile ?: CharacterProfile(
+                            id = "",
+                            displayName = name,
+                            description = description.trim(),
+                            personaDefinition = persona
+                        )).copy(
+                            displayName = name,
+                            description = description.trim(),
+                            personaDefinition = persona,
+                            isBuiltIn = initialProfile?.isBuiltIn ?: false
+                        )
+                    )
+                },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
+                shape = RoundedCornerShape(16.dp)
+            ) { Text(saveLabel, fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
 
 @Composable
 private fun StatusLine(title: String, detail: String, dot: Color) {
