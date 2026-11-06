@@ -277,6 +277,16 @@ private fun ConversationScreen(
                     placeholder = { Text("Написать сообщение…", color = Muted) },
                     maxLines = 4,
                     shape = RoundedCornerShape(14.dp),
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        disabledTextColor = Color.White,
+                        cursorColor = Ice,
+                        focusedBorderColor = Color(0xFF8060C8),
+                        unfocusedBorderColor = Color(0xFF536A9E),
+                        focusedPlaceholderColor = Muted,
+                        unfocusedPlaceholderColor = Muted
+                    ),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = {
                         val value = draft.trim()
