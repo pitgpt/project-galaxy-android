@@ -3,7 +3,6 @@ package com.pitgpt.galaxy.data.voice
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import org.json.JSONObject
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.DataChannel
@@ -44,6 +43,7 @@ class RealtimeWebRtcClient(
 
     private val appContext = context.applicationContext
     private val closed = AtomicBoolean(false)
+    private val iceEverConnected = AtomicBoolean(false)
     @Volatile private var state = State.NEW
     private var audioDeviceModule: JavaAudioDeviceModule? = null
     private var factory: PeerConnectionFactory? = null
@@ -65,16 +65,29 @@ class RealtimeWebRtcClient(
         try {
             initializeFactory()
             val iceComplete = CompletableDeferred<Unit>()
-            val remoteState = CompletableDeferred<Unit>()
+            val iceConnected = CompletableDeferred<Unit>()
+            val dataChannelOpened = CompletableDeferred<Unit>()
             val observer = object : PeerConnection.Observer {
                 override fun onSignalingChange(value: PeerConnection.SignalingState) = Unit
                 override fun onIceConnectionChange(value: PeerConnection.IceConnectionState) {
-                    if (value == PeerConnection.IceConnectionState.FAILED ||
-                        value == PeerConnection.IceConnectionState.DISCONNECTED) {
-                        if (!remoteState.isCompleted) remoteState.completeExceptionally(
-                            IllegalStateException("Realtime network connection was interrupted")
-                        )
-                        if (state == State.CONNECTED) updateState(State.DISCONNECTED)
+                    when (value) {
+                        PeerConnection.IceConnectionState.CONNECTED,
+                        PeerConnection.IceConnectionState.COMPLETED -> {
+                            iceEverConnected.set(true)
+                            iceConnected.complete(Unit)
+                        }
+                        PeerConnection.IceConnectionState.FAILED -> {
+                            iceConnected.completeExceptionally(
+                                IllegalStateException("Realtime ICE connection failed")
+                            )
+                            if (state == State.CONNECTED || iceEverConnected.get()) {
+                                updateState(State.DISCONNECTED)
+                            }
+                        }
+                        PeerConnection.IceConnectionState.DISCONNECTED -> {
+                            if (iceEverConnected.get()) updateState(State.DISCONNECTED)
+                        }
+                        else -> Unit
                     }
                 }
                 override fun onIceConnectionReceivingChange(value: Boolean) = Unit
@@ -91,9 +104,15 @@ class RealtimeWebRtcClient(
                 override fun onRenegotiationNeeded() = Unit
                 override fun onAddTrack(receiver: RtpReceiver, streams: Array<out org.webrtc.MediaStream>) = Unit
                 override fun onConnectionChange(value: PeerConnection.PeerConnectionState) {
-                    if (value == PeerConnection.PeerConnectionState.FAILED ||
-                        value == PeerConnection.PeerConnectionState.CLOSED) {
-                        if (state == State.CONNECTED) updateState(State.DISCONNECTED)
+                    if (value == PeerConnection.PeerConnectionState.FAILED) {
+                        iceConnected.completeExceptionally(
+                            IllegalStateException("Realtime peer connection failed")
+                        )
+                        if (state == State.CONNECTED || iceEverConnected.get()) {
+                            updateState(State.DISCONNECTED)
+                        }
+                    } else if (value == PeerConnection.PeerConnectionState.CONNECTED) {
+                        iceEverConnected.set(true)
                     }
                 }
                 override fun onTrack(transceiver: org.webrtc.RtpTransceiver) = Unit
@@ -110,7 +129,15 @@ class RealtimeWebRtcClient(
                 ?: error("Could not create Realtime event channel")
             events?.registerObserver(object : DataChannel.Observer {
                 override fun onBufferedAmountChange(previousAmount: Long) = Unit
-                override fun onStateChange() = Unit
+                override fun onStateChange() {
+                    when (events?.state()) {
+                        DataChannel.State.OPEN -> dataChannelOpened.complete(Unit)
+                        DataChannel.State.CLOSED -> dataChannelOpened.completeExceptionally(
+                            IllegalStateException("Realtime event channel closed before opening")
+                        )
+                        else -> Unit
+                    }
+                }
                 override fun onMessage(buffer: DataChannel.Buffer) {
                     if (!buffer.binary) {
                         val bytes = ByteArray(buffer.data.remaining())
@@ -119,6 +146,7 @@ class RealtimeWebRtcClient(
                     }
                 }
             })
+            if (events?.state() == DataChannel.State.OPEN) dataChannelOpened.complete(Unit)
 
             val offer = createOffer(requireNotNull(peer))
             setLocalDescription(requireNotNull(peer), offer)
@@ -128,6 +156,11 @@ class RealtimeWebRtcClient(
             }
             val answerSdp = exchangeSdp(clientSecret, localSdp)
             setRemoteDescription(requireNotNull(peer), SessionDescription(SessionDescription.Type.ANSWER, answerSdp))
+            withTimeout(PEER_CONNECTION_TIMEOUT_MS) {
+                iceConnected.await()
+                dataChannelOpened.await()
+            }
+            check(state == State.CONNECTING) { "Realtime connection closed before becoming ready" }
             updateState(State.CONNECTED)
         } catch (failure: Exception) {
             closeResources()
@@ -270,6 +303,7 @@ class RealtimeWebRtcClient(
         const val REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
         const val HTTP_TIMEOUT_MS = 20_000
         const val ICE_GATHERING_TIMEOUT_MS = 20_000L
+        const val PEER_CONNECTION_TIMEOUT_MS = 30_000L
         const val MINIMUM_TOKEN_LIFETIME_MS = 20_000L
         val FACTORY_LOCK = Any()
         @Volatile var initialized = false
