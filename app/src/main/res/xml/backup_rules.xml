@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <!-- Supabase session ciphertext is device-bound to an Android Keystore key. -->
+    <!-- Device-bound secrets must never be copied to cloud backup. -->
     <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
+    <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
 </full-backup-content>
