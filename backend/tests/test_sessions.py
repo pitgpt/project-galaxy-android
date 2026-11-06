@@ -126,7 +126,7 @@ def test_creates_server_configured_session_and_returns_only_required_fields(sett
         response = client.post(
             "/v1/realtime/sessions",
             headers={"Authorization": "Bearer valid-test-token"},
-            json={"character_id": "galaxy.default", "voice_id": "coral"},
+            json={"character_id": "galaxy.default", "voice_id": "coral", "persona_instructions": "You are a warm, thoughtful companion."},
         )
 
     assert response.status_code == 200
@@ -139,6 +139,9 @@ def test_creates_server_configured_session_and_returns_only_required_fields(sett
     assert body["session"]["type"] == "realtime"
     assert body["session"]["model"] == "gpt-realtime"
     assert body["session"]["audio"]["output"]["voice"] == "coral"
+    assert "You are a warm, thoughtful companion." in body["session"]["instructions"]
+    assert body["session"]["audio"]["input"]["transcription"]["model"] == "gpt-4o-mini-transcribe"
+    assert body["session"]["audio"]["input"]["turn_detection"]["type"] == "server_vad"
     assert "instructions" in body["session"]
     assert headers["Authorization"] == "Bearer sk-server-only"
     assert headers["OpenAI-Safety-Identifier"] == safety_identifier("user-123", settings.safety_identifier_hmac_key)
@@ -167,6 +170,22 @@ def test_legacy_profile_voice_ids_map_to_supported_provider_voices(
 
     assert response.status_code == 200
     assert provider.calls[0][1]["session"]["audio"]["output"]["voice"] == expected_provider_voice
+
+
+def test_rejects_oversized_persona_instructions_before_provider_call(settings):
+    provider = FakeProvider()
+    with client_for(settings, provider) as client:
+        response = client.post(
+            "/v1/realtime/sessions",
+            headers={"Authorization": "Bearer valid-test-token"},
+            json={
+                "character_id": "galaxy.default",
+                "voice_id": "alloy",
+                "persona_instructions": "x" * 8001,
+            },
+        )
+    assert response.status_code == 422
+    assert provider.calls == []
 
 
 def test_rejects_unapproved_voice_without_calling_provider(settings):
