@@ -24,8 +24,27 @@ jobs:
       - name: Run unit tests
         run: gradle testDebugUnitTest
 
+  backend-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run backend tests
+        run: pytest -q
+
   build:
-    needs: test
+    needs: [test, backend-test]
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
