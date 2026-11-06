@@ -138,6 +138,13 @@ class RealtimeVoiceController(
         }
     }
 
+    fun setPermissionDenied() {
+        mutableState.value = RealtimeVoiceUiState(
+            status = RealtimeVoiceStatus.FAILED,
+            message = "Для голосового режима нужен доступ к микрофону. Разреши его в настройках Android."
+        )
+    }
+
     fun setMicrophoneEnabled(enabled: Boolean) {
         client?.setMicrophoneEnabled(enabled)
         mutableState.value = mutableState.value.copy(muted = !enabled)
