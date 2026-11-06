@@ -31,6 +31,7 @@ private val ProviderAccent = Color(0xFFB8D9FF)
 fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
     var settings by remember { mutableStateOf(store.load()) }
     var editingId by remember { mutableStateOf<String?>(null) }
+    var isEditing by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var baseUrl by remember { mutableStateOf("https://api.example.com/v1") }
     var apiKey by remember { mutableStateOf("") }
@@ -40,6 +41,7 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
 
     fun startEdit(provider: AiProviderConfig?) {
+        isEditing = true
         editingId = provider?.id
         name = provider?.name.orEmpty()
         baseUrl = provider?.baseUrl ?: "https://api.example.com/v1"
@@ -61,7 +63,7 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
         Text("Ключи хранятся локально в зашифрованном виде с помощью Android Keystore. Не отправляй их в чат и не делись скриншотами с открытым ключом.",
             color = ProviderMuted, fontSize = 12.sp, lineHeight = 18.sp)
         Spacer(Modifier.height(14.dp))
-        if (editingId == null) {
+        if (!isEditing) {
             Button(onClick = { startEdit(null) }, modifier = Modifier.fillMaxWidth()) {
                 Text("＋ ДОБАВИТЬ ПРОВАЙДЕРА")
             }
@@ -120,7 +122,7 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
             status?.let { Text(it, color = ProviderAccent, fontSize = 12.sp) }
             Spacer(Modifier.height(8.dp))
             Row {
-                TextButton(onClick = { editingId = null; status = null }) { Text("ОТМЕНА") }
+                TextButton(onClick = { editingId = null; isEditing = false; status = null }) { Text("ОТМЕНА") }
                 Spacer(Modifier.weight(1f))
                 Button(onClick = {
                     val cleanName = name.trim()
@@ -141,7 +143,7 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                 }) { Text("СОХРАНИТЬ") }
             }
         }
-        status?.takeIf { editingId == null }?.let { Text(it, color = ProviderAccent, fontSize = 11.sp) }
+        status?.takeIf { !isEditing }?.let { Text(it, color = ProviderAccent, fontSize = 11.sp) }
     }
 }
 
