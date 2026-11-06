@@ -87,5 +87,9 @@ class CreateRealtimeSessionTest {
             this.voiceId = voiceId
             return credential
         }
+
+        override suspend fun heartbeat(sessionId: String) = Unit
+
+        override suspend fun closeSession(sessionId: String) = Unit
     }
 }
