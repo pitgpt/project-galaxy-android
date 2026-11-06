@@ -11,7 +11,7 @@ val galaxyApiBaseUrl = providers.gradleProperty("galaxyApiBaseUrl").orElse(provi
 
 android {
     namespace = "com.pitgpt.galaxy"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.pitgpt.galaxy"
         minSdk = 26
