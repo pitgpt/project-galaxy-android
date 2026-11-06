@@ -23,7 +23,7 @@ class JwtAuthenticator:
             claims: dict[str, Any] = jwt.decode(
                 token,
                 signing_key.key,
-                algorithms=["RS256"],
+                algorithms=["RS256", "ES256"],
                 audience=self.settings.auth_audience,
                 issuer=self.settings.auth_issuer,
                 options={"require": ["exp", "iat", "sub"]},
