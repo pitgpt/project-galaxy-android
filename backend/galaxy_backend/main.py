@@ -63,13 +63,15 @@ def create_app(
                 raise RuntimeError("Redis is required for the configured rate limiter but is unavailable")
             app.state.redis = redis_client
             app.state.rate_limiter = RedisRateLimiter(
-                redis_client, app.state.settings.per_user_requests_per_minute
+                redis_client, app.state.settings.per_user_requests_per_minute,
+                app.state.settings.per_user_sessions_per_day
             )
         elif app.state.settings.environment == "production":
             raise RuntimeError("Production requires Redis-backed rate limiting")
         else:
             app.state.rate_limiter = InMemoryRateLimiter(
-                app.state.settings.per_user_requests_per_minute
+                app.state.settings.per_user_requests_per_minute,
+                app.state.settings.per_user_sessions_per_day
             )
 
         yield

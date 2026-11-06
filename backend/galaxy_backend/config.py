@@ -14,6 +14,7 @@ class Settings:
     realtime_model: str = "gpt-realtime"
     client_secret_ttl_seconds: int = 600
     per_user_requests_per_minute: int = 5
+    per_user_sessions_per_day: int = 100
     environment: str = "development"
     redis_url: str | None = None
 
@@ -37,6 +38,10 @@ class Settings:
         request_limit = int(os.getenv("REALTIME_REQUESTS_PER_MINUTE", "5"))
         if request_limit < 1:
             raise RuntimeError("REALTIME_REQUESTS_PER_MINUTE must be at least 1")
+
+        daily_limit = int(os.getenv("REALTIME_SESSIONS_PER_DAY", "100"))
+        if daily_limit < 1:
+            raise RuntimeError("REALTIME_SESSIONS_PER_DAY must be at least 1")
 
         environment = os.getenv("GALAXY_ENVIRONMENT", "development").strip().lower()
         if environment not in {"development", "test", "production"}:
@@ -73,6 +78,7 @@ class Settings:
             realtime_model=os.getenv("REALTIME_MODEL", "gpt-realtime"),
             client_secret_ttl_seconds=ttl,
             per_user_requests_per_minute=request_limit,
+            per_user_sessions_per_day=daily_limit,
             environment=environment,
             redis_url=redis_url,
         )

@@ -36,11 +36,13 @@ class FakeRedis:
     def __init__(self):
         self.counts = {}
 
-    async def eval(self, script, number_of_keys, key, window_milliseconds):
-        assert number_of_keys == 1
+    async def eval(self, script, number_of_keys, *args):
+        assert number_of_keys == 2
         assert "INCR" in script and "PEXPIRE" in script
-        self.counts[key] = self.counts.get(key, 0) + 1
-        return [self.counts[key], window_milliseconds]
+        minute_key, daily_key, minute_ttl, daily_ttl = args
+        self.counts[minute_key] = self.counts.get(minute_key, 0) + 1
+        self.counts[daily_key] = self.counts.get(daily_key, 0) + 1
+        return [self.counts[minute_key], self.counts[daily_key]]
 
 
 class UnavailableRedis:
@@ -60,6 +62,7 @@ def settings():
         allowed_character_ids=frozenset({"galaxy.default", "character.test"}),
         client_secret_ttl_seconds=600,
         per_user_requests_per_minute=5,
+        per_user_sessions_per_day=100,
     )
 
 
@@ -180,8 +183,8 @@ def test_rejects_unapproved_character_without_calling_provider(settings):
 
 
 @pytest.mark.asyncio
-async def test_redis_limiter_allows_limit_then_rejects_excess():
-    limiter = RedisRateLimiter(FakeRedis(), limit=2)
+async def test_redis_limiter_allows_minute_limit_then_rejects_excess():
+    limiter = RedisRateLimiter(FakeRedis(), limit=2, daily_limit=10)
     await limiter.check("user-123")
     await limiter.check("user-123")
     with pytest.raises(HTTPException) as error:
@@ -191,13 +194,25 @@ async def test_redis_limiter_allows_limit_then_rejects_excess():
 
 
 @pytest.mark.asyncio
+async def test_redis_limiter_enforces_daily_credential_quota():
+    limiter = RedisRateLimiter(FakeRedis(), limit=10, daily_limit=2)
+    await limiter.check("user-123")
+    await limiter.check("user-123")
+    with pytest.raises(HTTPException) as error:
+        await limiter.check("user-123")
+    assert error.value.status_code == 429
+    assert error.value.detail == "Daily realtime session credential limit exceeded"
+    assert error.value.headers["Retry-After"] == "86400"
+
+
+@pytest.mark.asyncio
 async def test_redis_limiter_does_not_store_raw_user_id():
     redis = FakeRedis()
     limiter = RedisRateLimiter(redis, limit=5)
     await limiter.check("sensitive-user-id")
     key = next(iter(redis.counts))
     assert "sensitive-user-id" not in key
-    assert key.startswith("galaxy:realtime:rate:")
+    assert key.startswith("galaxy:realtime:rate:") or key.startswith("galaxy:realtime:daily:")
 
 
 @pytest.mark.asyncio

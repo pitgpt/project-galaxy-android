@@ -36,7 +36,7 @@ Request body:
 {"character_id":"galaxy.default","voice_id":"alloy"}
 ```
 
-The backend verifies the JWT signature (RS256), issuer, audience, expiry and subject. It then applies a per-user request limit, validates the character against `GALAXY_ALLOWED_CHARACTER_IDS` and the voice against `GALAXY_ALLOWED_VOICES`, and creates a short-lived client secret using the server-only OpenAI API key.
+The backend verifies the JWT signature (RS256), issuer, audience, expiry and subject. It then applies per-user minute and daily credential-issuance quotas, validates the character against `GALAXY_ALLOWED_CHARACTER_IDS` and the voice against `GALAXY_ALLOWED_VOICES`, and creates a short-lived client secret using the server-only OpenAI API key.
 
 The client cannot choose the model, instructions, tools, or arbitrary provider session fields. The character ID is currently an opaque application identifier; character-to-instruction policy is server-owned and must be added before custom character instructions are supported.
 
@@ -51,7 +51,8 @@ Response contains only `client_secret`, `expires_at_epoch_millis`, and `session_
 - `GALAXY_ALLOWED_CHARACTER_IDS`: comma-separated character ID allow-list; defaults to `galaxy.default`.
 - `REALTIME_MODEL`: server-selected model; defaults to `gpt-realtime`.
 - `REALTIME_CLIENT_SECRET_TTL_SECONDS`: 10–7200 seconds; defaults to 600.
-- `REALTIME_REQUESTS_PER_MINUTE`: per-process limit; defaults to 5.
+- `REALTIME_REQUESTS_PER_MINUTE`: per-user fixed-window limit; defaults to 5 per minute.
+- `REALTIME_SESSIONS_PER_DAY`: per-user credential-issuance limit; defaults to 100 in a fixed 24-hour Redis window. This limits issued credentials, not concurrent live WebRTC sessions.
 
 ## Container
 
@@ -66,7 +67,7 @@ Create `.env` from the required configuration above. Never commit it. The image 
 
 ## Production hardening still required
 
-The included rate limiter is process-local and resets on restart. Replace it with a shared Redis-backed limiter before running multiple replicas or exposing the service publicly. Deploy behind HTTPS, add account/session concurrency and usage ceilings, configure secret rotation and monitoring, and choose a real identity provider before connecting Android. No production authentication provider or deployment is configured by this repository yet.
+Production uses a shared Redis-backed atomic minute and daily credential-issuance limiter. Development/test fallback is process-local and resets on restart. Deploy behind HTTPS, add account/session concurrency and usage ceilings, configure secret rotation and monitoring, and choose a real identity provider before connecting Android. No production authentication provider or deployment is configured by this repository yet.
 
 Request logs include only request ID, method, path, status and duration. Authorization headers, request/response bodies, user IDs and provider secrets are deliberately excluded.
 
