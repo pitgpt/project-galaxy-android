@@ -152,7 +152,7 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         config: Settings = request.app.state.settings
-        if payload.character_id not in config.allowed_character_ids:
+        if "*" not in config.allowed_character_ids and payload.character_id not in config.allowed_character_ids:
             raise HTTPException(status_code=422, detail="Requested character is not available")
         provider_voice_id = VOICE_ID_ALIASES.get(payload.voice_id, payload.voice_id)
         if provider_voice_id not in config.allowed_voices:
