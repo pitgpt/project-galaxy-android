@@ -10,6 +10,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import com.pitgpt.galaxy.ui.GalaxyAuthGate
 import com.pitgpt.galaxy.ui.GalaxyHome
 
 class MainActivity : ComponentActivity() {
@@ -30,7 +31,10 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF080B18)
                 ) {
-                    GalaxyHome()
+                    val auth = (application as GalaxyApplication).auth
+                    GalaxyAuthGate(auth = auth) {
+                        GalaxyHome()
+                    }
                 }
             }
         }
