@@ -47,6 +47,7 @@ import com.pitgpt.galaxy.BuildConfig
 import com.pitgpt.galaxy.GalaxyApplication
 import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
+import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import kotlinx.coroutines.launch
 
@@ -65,6 +66,8 @@ fun GalaxyHome() {
     var loadError by remember { mutableStateOf<String?>(null) }
     var reloadKey by remember { mutableStateOf(0) }
     var showChat by remember { mutableStateOf(false) }
+    var showProfile by remember { mutableStateOf(false) }
+    var profile by remember { mutableStateOf<CharacterProfile?>(null) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
 
     LaunchedEffect(reloadKey) {
@@ -74,6 +77,7 @@ fun GalaxyHome() {
             app.initialize()
             val loadedName = app.characters.getById(CHARACTER_ID)?.displayName ?: "Галактика"
             val loadedMessages = app.conversations.getForCharacter(CHARACTER_ID)
+            profile = app.characters.getById(CHARACTER_ID)
             characterName = loadedName
             messages.clear()
             messages.addAll(loadedMessages)
@@ -85,7 +89,18 @@ fun GalaxyHome() {
         }
     }
 
-    if (showChat) {
+    if (showProfile) {
+        CharacterProfileScreen(
+            profile = profile,
+            onBack = { showProfile = false },
+            onSave = { updated ->
+                app.characters.save(updated)
+                profile = updated
+                characterName = updated.displayName
+                showProfile = false
+            }
+        )
+    } else if (showChat) {
         ConversationScreen(
             characterName = characterName,
             messages = messages,
@@ -104,7 +119,8 @@ fun GalaxyHome() {
             isLoading = isLoading,
             loadError = loadError,
             onRetry = { reloadKey += 1 },
-            onOpenChat = { showChat = true }
+            onOpenChat = { showChat = true },
+            onOpenProfile = { showProfile = true }
         )
     }
 }
@@ -115,7 +131,8 @@ private fun HomeScreen(
     isLoading: Boolean,
     loadError: String?,
     onRetry: () -> Unit,
-    onOpenChat: () -> Unit
+    onOpenChat: () -> Unit,
+    onOpenProfile: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -197,6 +214,16 @@ private fun HomeScreen(
                 StatusLine("AI и голос", "Подключение на следующих этапах", Color(0xFFE9BD70))
             }
             Spacer(Modifier.height(18.dp))
+            Button(
+                onClick = onOpenProfile,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("ПРОФИЛЬ ПЕРСОНАЖА", fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.8.sp)
+            }
+            Spacer(Modifier.height(10.dp))
             Button(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth().height(54.dp),
@@ -366,6 +393,101 @@ private fun ConversationScreen(
                 Spacer(Modifier.height(6.dp))
                 Text(error, color = Color(0xFFFF9B9B), fontSize = 11.sp,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun CharacterProfileScreen(
+    profile: CharacterProfile?,
+    onBack: () -> Unit,
+    onSave: (CharacterProfile) -> Unit
+) {
+    var displayName by remember(profile?.id) { mutableStateOf(profile?.displayName.orEmpty()) }
+    var description by remember(profile?.id) { mutableStateOf(profile?.description.orEmpty()) }
+    var personaDefinition by remember(profile?.id) { mutableStateOf(profile?.personaDefinition.orEmpty()) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    Box(
+        Modifier.fillMaxSize().background(
+            Brush.verticalGradient(listOf(Color(0xFF111A35), Night, Color(0xFF100D25)))
+        )
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onBack) { Text("‹  НАЗАД", color = Ice) }
+                Spacer(Modifier.weight(1f))
+                Text("ПРОФИЛЬ", color = Color.White, fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+            }
+            if (profile == null) {
+                Text("Профиль пока недоступен. Вернись назад и повтори загрузку.",
+                    color = Color(0xFFFF9B9B), fontSize = 14.sp)
+            } else {
+                Text("Эти настройки принадлежат персонажу и сохраняются локально.",
+                    color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+                OutlinedTextField(
+                    value = displayName,
+                    onValueChange = { displayName = it; error = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Имя персонажа") },
+                    singleLine = true,
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                        focusedLabelColor = Ice, unfocusedLabelColor = Muted,
+                        focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
+                    )
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it; error = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Краткое описание") },
+                    minLines = 2, maxLines = 3,
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                        focusedLabelColor = Ice, unfocusedLabelColor = Muted,
+                        focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
+                    )
+                )
+                OutlinedTextField(
+                    value = personaDefinition,
+                    onValueChange = { personaDefinition = it; error = null },
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    label = { Text("Личность и инструкции персонажа") },
+                    minLines = 5,
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color.White, unfocusedTextColor = Color.White,
+                        focusedLabelColor = Ice, unfocusedLabelColor = Muted,
+                        focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
+                    )
+                )
+                error?.let { Text(it, color = Color(0xFFFF9B9B), fontSize = 12.sp) }
+                Button(
+                    onClick = {
+                        val name = displayName.trim()
+                        val shortDescription = description.trim()
+                        val persona = personaDefinition.trim()
+                        if (name.isEmpty()) {
+                            error = "Укажи имя персонажа."
+                        } else if (persona.isEmpty()) {
+                            error = "Опиши личность и инструкции персонажа."
+                        } else {
+                            onSave(profile.copy(
+                                displayName = name,
+                                description = shortDescription,
+                                personaDefinition = persona
+                            ))
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
+                    shape = RoundedCornerShape(16.dp)
+                ) { Text("СОХРАНИТЬ ПРОФИЛЬ", fontWeight = FontWeight.Bold) }
             }
         }
     }
