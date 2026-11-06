@@ -113,7 +113,7 @@ class RealtimeWebRtcClient(
                             IllegalStateException("Realtime peer connection failed")
                         )
                         if (state == State.CONNECTED || iceEverConnected.get()) {
-                            updateState(State.DISCONNECTED)
+                            updateState(State.FAILED)
                         }
                     } else if (value == PeerConnection.PeerConnectionState.CONNECTED) {
                         iceEverConnected.set(true)
