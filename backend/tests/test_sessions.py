@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from galaxy_backend.config import Settings
 from galaxy_backend.main import create_app
 from galaxy_backend.security import RedisRateLimiter, safety_identifier
+from galaxy_backend.session_registry import InMemorySessionRegistry
 
 
 class FakeAuthenticator:
@@ -63,15 +64,18 @@ def settings():
         client_secret_ttl_seconds=600,
         per_user_requests_per_minute=5,
         per_user_sessions_per_day=100,
+        max_active_sessions=2,
+        session_lease_seconds=90,
     )
 
 
-def client_for(settings, provider, rate_limiter=None):
+def client_for(settings, provider, rate_limiter=None, session_registry=None):
     app = create_app(
         settings=settings,
         http_client=provider,
         authenticator=FakeAuthenticator(),
         rate_limiter=rate_limiter,
+        session_registry=session_registry,
     )
     return TestClient(app)
 
@@ -122,11 +126,9 @@ def test_creates_server_configured_session_and_returns_only_required_fields(sett
         )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "client_secret": "ek_test_secret",
-        "expires_at_epoch_millis": 1_800_000_000_000,
-        "session_id": "sess_test",
-    }
+    assert response.json()["client_secret"] == "ek_test_secret"
+    assert response.json()["expires_at_epoch_millis"] == 1_800_000_000_000
+    assert len(response.json()["session_id"]) == 32
     url, body, headers = provider.calls[0]
     assert url == "https://api.openai.com/v1/realtime/client_secrets"
     assert body["expires_after"]["seconds"] == 600
@@ -151,15 +153,22 @@ def test_rejects_unapproved_voice_without_calling_provider(settings):
     assert provider.calls == []
 
 
-def test_provider_errors_are_sanitized(settings):
+def test_provider_errors_are_sanitized_and_release_reservation(settings):
     provider = FakeProvider(status_code=500)
-    with client_for(settings, provider) as client:
+    registry = InMemorySessionRegistry(max_active=1, lease_seconds=90)
+    with client_for(settings, provider, session_registry=registry) as client:
         response = client.post(
             "/v1/realtime/sessions",
             headers={"Authorization": "Bearer valid-test-token"},
             json={"character_id": "galaxy.default", "voice_id": "alloy"},
         )
+        retry = client.post(
+            "/v1/realtime/sessions",
+            headers={"Authorization": "Bearer valid-test-token"},
+            json={"character_id": "galaxy.default", "voice_id": "alloy"},
+        )
     assert response.status_code == 502
+    assert retry.status_code == 502
     assert "sensitive provider detail" not in response.text
 
 
@@ -222,3 +231,41 @@ async def test_redis_failure_fails_closed():
         await limiter.check("user-123")
     assert error.value.status_code == 503
     assert error.value.headers["Retry-After"] == "5"
+
+
+
+def test_active_session_limit_and_heartbeat_and_close(settings):
+    provider = FakeProvider()
+    registry = InMemorySessionRegistry(max_active=1, lease_seconds=90)
+    headers = {"Authorization": "Bearer valid-test-token"}
+    payload = {"character_id": "galaxy.default", "voice_id": "alloy"}
+    with client_for(settings, provider, session_registry=registry) as client:
+        first = client.post("/v1/realtime/sessions", headers=headers, json=payload)
+        first_id = first.json()["session_id"]
+        blocked = client.post("/v1/realtime/sessions", headers=headers, json=payload)
+        heartbeat = client.post(f"/v1/realtime/sessions/{first_id}/heartbeat", headers=headers)
+        closed = client.delete(f"/v1/realtime/sessions/{first_id}", headers=headers)
+        second = client.post("/v1/realtime/sessions", headers=headers, json=payload)
+    assert first.status_code == 200
+    assert blocked.status_code == 429
+    assert len(provider.calls) == 2
+    assert heartbeat.json()["status"] == "active"
+    assert closed.json()["status"] == "closed"
+    assert second.status_code == 200
+
+
+def test_session_id_is_scoped_to_authenticated_user(settings):
+    provider = FakeProvider()
+    registry = InMemorySessionRegistry(max_active=2, lease_seconds=90)
+    app = create_app(settings=settings, http_client=provider, authenticator=FakeAuthenticator(), session_registry=registry)
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/realtime/sessions",
+            headers={"Authorization": "Bearer valid-test-token"},
+            json={"character_id": "galaxy.default", "voice_id": "alloy"},
+        )
+        foreign = client.post(
+            f"/v1/realtime/sessions/{created.json()['session_id']}/heartbeat",
+            headers={"Authorization": "Bearer another-user-token"},
+        )
+    assert foreign.status_code == 401

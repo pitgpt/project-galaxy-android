@@ -15,6 +15,8 @@ class Settings:
     client_secret_ttl_seconds: int = 600
     per_user_requests_per_minute: int = 5
     per_user_sessions_per_day: int = 100
+    max_active_sessions: int = 2
+    session_lease_seconds: int = 90
     environment: str = "development"
     redis_url: str | None = None
 
@@ -42,6 +44,13 @@ class Settings:
         daily_limit = int(os.getenv("REALTIME_SESSIONS_PER_DAY", "100"))
         if daily_limit < 1:
             raise RuntimeError("REALTIME_SESSIONS_PER_DAY must be at least 1")
+
+        max_active = int(os.getenv("REALTIME_MAX_ACTIVE_SESSIONS", "2"))
+        if max_active < 1:
+            raise RuntimeError("REALTIME_MAX_ACTIVE_SESSIONS must be at least 1")
+        lease_seconds = int(os.getenv("REALTIME_SESSION_LEASE_SECONDS", "90"))
+        if lease_seconds < 30:
+            raise RuntimeError("REALTIME_SESSION_LEASE_SECONDS must be at least 30")
 
         environment = os.getenv("GALAXY_ENVIRONMENT", "development").strip().lower()
         if environment not in {"development", "test", "production"}:
@@ -79,6 +88,8 @@ class Settings:
             client_secret_ttl_seconds=ttl,
             per_user_requests_per_minute=request_limit,
             per_user_sessions_per_day=daily_limit,
+            max_active_sessions=max_active,
+            session_lease_seconds=lease_seconds,
             environment=environment,
             redis_url=redis_url,
         )

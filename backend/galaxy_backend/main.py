@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 
 from .config import Settings
 from .security import InMemoryRateLimiter, JwtAuthenticator, RedisRateLimiter, safety_identifier
+from .session_registry import InMemorySessionRegistry, RedisSessionRegistry
 
 logger = logging.getLogger("galaxy.request")
 
@@ -36,6 +37,7 @@ def create_app(
     http_client: httpx.AsyncClient | None = None,
     authenticator: JwtAuthenticator | None = None,
     rate_limiter: Any | None = None,
+    session_registry: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -66,12 +68,20 @@ def create_app(
                 redis_client, app.state.settings.per_user_requests_per_minute,
                 app.state.settings.per_user_sessions_per_day
             )
+            app.state.session_registry = session_registry or RedisSessionRegistry(
+                redis_client, app.state.settings.max_active_sessions,
+                app.state.settings.session_lease_seconds
+            )
         elif app.state.settings.environment == "production":
             raise RuntimeError("Production requires Redis-backed rate limiting")
         else:
             app.state.rate_limiter = InMemoryRateLimiter(
                 app.state.settings.per_user_requests_per_minute,
                 app.state.settings.per_user_sessions_per_day
+            )
+            app.state.session_registry = session_registry or InMemorySessionRegistry(
+                app.state.settings.max_active_sessions,
+                app.state.settings.session_lease_seconds
             )
 
         yield
@@ -140,6 +150,13 @@ def create_app(
             raise HTTPException(status_code=422, detail="Requested voice is not available")
 
         await request.app.state.rate_limiter.check(user_id)
+        galaxy_session_id = uuid.uuid4().hex
+        try:
+            reserved = await request.app.state.session_registry.reserve(user_id, galaxy_session_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Realtime session service temporarily unavailable", headers={"Retry-After": "5"}) from exc
+        if not reserved:
+            raise HTTPException(status_code=429, detail="Maximum active realtime sessions reached", headers={"Retry-After": str(config.session_lease_seconds)})
 
         provider_body = {
             "expires_after": {
@@ -172,10 +189,11 @@ def create_app(
             data = response.json()
             secret = data.get("value")
             expires_at = data.get("expires_at")
-            session_id = (data.get("session") or {}).get("id")
-            if not isinstance(secret, str) or not secret or not isinstance(expires_at, int) or not isinstance(session_id, str) or not session_id:
+            provider_session_id = (data.get("session") or {}).get("id")
+            if not isinstance(secret, str) or not secret or not isinstance(expires_at, int) or not isinstance(provider_session_id, str) or not provider_session_id:
                 raise ValueError("Unexpected provider response")
         except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+            await request.app.state.session_registry.close(user_id, galaxy_session_id)
             raise HTTPException(
                 status_code=502,
                 detail="Realtime session provider is temporarily unavailable",
@@ -184,8 +202,32 @@ def create_app(
         return CreateSessionResponse(
             client_secret=secret,
             expires_at_epoch_millis=expires_at * 1000,
-            session_id=session_id,
+            session_id=galaxy_session_id,
         )
+
+    @app.post("/v1/realtime/sessions/{session_id}/heartbeat")
+    async def heartbeat_realtime_session(
+        session_id: str, request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        try:
+            renewed = await request.app.state.session_registry.heartbeat(user_id, session_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Realtime session service temporarily unavailable", headers={"Retry-After": "5"}) from exc
+        if not renewed:
+            raise HTTPException(status_code=404, detail="Realtime session not found")
+        return {"status": "active", "lease_seconds": request.app.state.settings.session_lease_seconds}
+
+    @app.delete("/v1/realtime/sessions/{session_id}")
+    async def close_realtime_session(
+        session_id: str, request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        try:
+            await request.app.state.session_registry.close(user_id, session_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Realtime session service temporarily unavailable", headers={"Retry-After": "5"}) from exc
+        return {"status": "closed"}
 
     return app
 
