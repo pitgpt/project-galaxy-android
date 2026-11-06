@@ -10,6 +10,7 @@ class Settings:
     auth_audience: str
     safety_identifier_hmac_key: str
     allowed_voices: frozenset[str]
+    allowed_character_ids: frozenset[str]
     realtime_model: str = "gpt-realtime"
     client_secret_ttl_seconds: int = 600
     per_user_requests_per_minute: int = 5
@@ -46,6 +47,11 @@ class Settings:
             auth_audience=os.environ["AUTH_AUDIENCE"],
             safety_identifier_hmac_key=os.environ["SAFETY_IDENTIFIER_HMAC_KEY"],
             allowed_voices=voices,
+            allowed_character_ids=frozenset(
+                item.strip()
+                for item in os.getenv("GALAXY_ALLOWED_CHARACTER_IDS", "galaxy.default").split(",")
+                if item.strip()
+            ),
             realtime_model=os.getenv("REALTIME_MODEL", "gpt-realtime"),
             client_secret_ttl_seconds=ttl,
             per_user_requests_per_minute=int(os.getenv("REALTIME_REQUESTS_PER_MINUTE", "5")),

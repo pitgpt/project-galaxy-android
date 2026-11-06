@@ -68,6 +68,8 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         config: Settings = request.app.state.settings
+        if payload.character_id not in config.allowed_character_ids:
+            raise HTTPException(status_code=422, detail="Requested character is not available")
         if payload.voice_id not in config.allowed_voices:
             raise HTTPException(status_code=422, detail="Requested voice is not available")
 

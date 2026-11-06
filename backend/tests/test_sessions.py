@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -43,6 +41,7 @@ def settings():
         auth_audience="galaxy-android",
         safety_identifier_hmac_key="test-hmac-secret-long-enough",
         allowed_voices=frozenset({"alloy", "coral"}),
+        allowed_character_ids=frozenset({"galaxy.default", "character.test"}),
         client_secret_ttl_seconds=600,
         per_user_requests_per_minute=5,
     )
@@ -122,3 +121,15 @@ def test_safety_identifier_is_stable_and_does_not_expose_user_id(settings):
     assert first == safety_identifier("user-123", settings.safety_identifier_hmac_key)
     assert first != safety_identifier("user-456", settings.safety_identifier_hmac_key)
     assert "user-123" not in first
+
+
+def test_rejects_unapproved_character_without_calling_provider(settings):
+    provider = FakeProvider()
+    with client_for(settings, provider) as client:
+        response = client.post(
+            "/v1/realtime/sessions",
+            headers={"Authorization": "Bearer valid-test-token"},
+            json={"character_id": "admin.override", "voice_id": "alloy"},
+        )
+    assert response.status_code == 422
+    assert provider.calls == []

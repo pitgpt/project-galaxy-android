@@ -33,7 +33,7 @@ Request body:
 {"character_id":"galaxy.default","voice_id":"alloy"}
 ```
 
-The backend verifies the JWT signature (RS256), issuer, audience, expiry and subject. It then applies a per-user request limit, validates the voice against `GALAXY_ALLOWED_VOICES`, and creates a short-lived client secret using the server-only OpenAI API key.
+The backend verifies the JWT signature (RS256), issuer, audience, expiry and subject. It then applies a per-user request limit, validates the character against `GALAXY_ALLOWED_CHARACTER_IDS` and the voice against `GALAXY_ALLOWED_VOICES`, and creates a short-lived client secret using the server-only OpenAI API key.
 
 The client cannot choose the model, instructions, tools, or arbitrary provider session fields. The character ID is currently an opaque application identifier; character-to-instruction policy is server-owned and must be added before custom character instructions are supported.
 
@@ -45,9 +45,21 @@ Response contains only `client_secret`, `expires_at_epoch_millis`, and `session_
 - `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`: selected identity provider's JWT validation settings.
 - `SAFETY_IDENTIFIER_HMAC_KEY`: independent random secret used to derive privacy-preserving OpenAI safety identifiers.
 - `GALAXY_ALLOWED_VOICES`: comma-separated voice allow-list.
+- `GALAXY_ALLOWED_CHARACTER_IDS`: comma-separated character ID allow-list; defaults to `galaxy.default`.
 - `REALTIME_MODEL`: server-selected model; defaults to `gpt-realtime`.
 - `REALTIME_CLIENT_SECRET_TTL_SECONDS`: 10–7200 seconds; defaults to 600.
 - `REALTIME_REQUESTS_PER_MINUTE`: per-process limit; defaults to 5.
+
+## Container
+
+Build and run with Docker:
+
+```bash
+docker build -t galaxy-backend .
+docker run --rm -p 8000:8000 --env-file .env galaxy-backend
+```
+
+Create `.env` from the required configuration above. Never commit it. The image runs as a non-root user and exposes the service on port 8000. Put it behind a TLS-terminating reverse proxy or managed HTTPS ingress.
 
 ## Production hardening still required
 
