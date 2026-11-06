@@ -8,6 +8,9 @@ plugins {
 
 val gitSha = System.getenv("GITHUB_SHA")?.take(7) ?: "local"
 val galaxyApiBaseUrl = providers.gradleProperty("galaxyApiBaseUrl").orElse(providers.environmentVariable("GALAXY_API_BASE_URL")).getOrElse("https://api.galaxy.invalid")
+val supabaseUrl = providers.gradleProperty("supabaseUrl").orElse(providers.environmentVariable("SUPABASE_URL")).getOrElse("")
+val supabasePublishableKey = providers.gradleProperty("supabasePublishableKey").orElse(providers.environmentVariable("SUPABASE_PUBLISHABLE_KEY")).getOrElse("")
+fun buildConfigString(value: String) = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
 android {
     namespace = "com.pitgpt.galaxy"
@@ -18,8 +21,10 @@ android {
         targetSdk = 35
         versionCode = 4
         versionName = "0.4.0"
-        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
-        buildConfigField("String", "GALAXY_API_BASE_URL", "\"$galaxyApiBaseUrl\"")
+        buildConfigField("String", "GIT_SHA", buildConfigString(gitSha))
+        buildConfigField("String", "GALAXY_API_BASE_URL", buildConfigString(galaxyApiBaseUrl))
+        buildConfigField("String", "SUPABASE_URL", buildConfigString(supabaseUrl))
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", buildConfigString(supabasePublishableKey))
     }
     buildFeatures {
         compose = true
