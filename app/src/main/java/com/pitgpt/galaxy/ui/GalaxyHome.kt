@@ -246,6 +246,7 @@ fun GalaxyHome() {
     } else {
         HomeScreen(
             characterName = if (initialized) characterName else null,
+            avatarId = profile?.avatarId,
             isLoading = isLoading,
             loadError = loadError,
             onRetry = { reloadKey += 1 },
@@ -259,6 +260,7 @@ fun GalaxyHome() {
 @Composable
 private fun HomeScreen(
     characterName: String?,
+    avatarId: String?,
     isLoading: Boolean,
     loadError: String?,
     onRetry: () -> Unit,
@@ -305,16 +307,7 @@ private fun HomeScreen(
                 Box(Modifier.size(174.dp).background(
                     Brush.radialGradient(listOf(Color(0xFF7D83E8), Color(0xFF394A91),
                         Color(0xFF172448), Color.Transparent)), CircleShape))
-                Box(
-                    Modifier.size(112.dp).background(
-                        Brush.radialGradient(listOf(Color(0xFFE2F4FF), Ice,
-                            Color(0xFF7589D8), Color(0xFF28366D))), CircleShape
-                    ).border(1.dp, Color(0x99D8EEFF), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("G", color = Color(0xFF172448), fontSize = 54.sp,
-                        fontWeight = FontWeight.Light)
-                }
+                AvatarPortrait(avatarId = avatarId, modifier = Modifier.size(112.dp))
             }
             Spacer(Modifier.height(34.dp))
             Text("Я рядом.", color = Color.White, fontSize = 34.sp,
@@ -677,17 +670,24 @@ private fun CharacterListScreen(
                             .padding(15.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(character.displayName, color = Color.White, fontSize = 17.sp,
-                                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            AvatarPortrait(
+                                avatarId = character.avatarId,
+                                modifier = Modifier.size(52.dp)
+                            )
+                            Spacer(Modifier.size(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(character.displayName, color = Color.White, fontSize = 17.sp,
+                                    fontWeight = FontWeight.SemiBold)
+                                if (character.description.isNotBlank()) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(character.description, color = Muted, fontSize = 12.sp,
+                                        lineHeight = 17.sp, maxLines = 2)
+                                }
+                            }
                             if (selected) Text("АКТИВЕН", color = Color(0xFF9EDCCB),
                                 fontSize = 9.sp, fontWeight = FontWeight.Bold)
                             else if (character.isBuiltIn) Text("ВСТРОЕННЫЙ", color = Ice,
                                 fontSize = 9.sp)
-                        }
-                        if (character.description.isNotBlank()) {
-                            Spacer(Modifier.height(5.dp))
-                            Text(character.description, color = Muted, fontSize = 12.sp,
-                                lineHeight = 17.sp)
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (!selected) {
@@ -788,6 +788,18 @@ private fun CharacterEditorScreen(
                     focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
                 )
             )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AvatarPortrait(avatarId = avatarId, modifier = Modifier.size(76.dp))
+                Spacer(Modifier.size(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("ПРЕДПРОСМОТР АВАТАРА", color = Ice, fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    Text(avatarVisualSpec(avatarId).title, color = Color.White, fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold)
+                    Text(avatarVisualSpec(avatarId).description, color = Muted, fontSize = 11.sp,
+                        lineHeight = 15.sp)
+                }
+            }
             Text("ВНЕШНОСТЬ АВАТАРА", color = Ice, fontSize = 11.sp,
                 fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
             PresetChoiceRow(
@@ -810,7 +822,7 @@ private fun CharacterEditorScreen(
                 ),
                 onSelect = { voiceId = it }
             )
-            Text("Это сохранённые предпочтения профиля. Реальный аватар и голос подключим на следующих этапах.",
+            Text("Аватар уже отображается в интерфейсе. Голосовой пресет пока хранится как настройка профиля.",
                 color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             OutlinedTextField(
                 value = personaDefinition,
@@ -895,6 +907,59 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
         Column {
             Text(title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             Text(detail, color = Muted, fontSize = 11.sp)
+        }
+    }
+}
+
+
+private data class AvatarVisualSpec(
+    val title: String,
+    val description: String,
+    val symbol: String,
+    val colors: List<Color>,
+    val foreground: Color
+)
+
+private fun avatarVisualSpec(id: String?): AvatarVisualSpec = when (id) {
+    "avatar.cyber" -> AvatarVisualSpec(
+        title = "Кибер",
+        description = "Холодный неоновый техно-образ",
+        symbol = "⌁",
+        colors = listOf(Color(0xFF45D6E8), Color(0xFF3453A5), Color(0xFF171D3B)),
+        foreground = Color(0xFFE4FFFF)
+    )
+    "avatar.minimal" -> AvatarVisualSpec(
+        title = "Минимал",
+        description = "Чистые формы и мягкое свечение",
+        symbol = "◉",
+        colors = listOf(Color(0xFFE7EAF4), Color(0xFF8795B8), Color(0xFF3A4566)),
+        foreground = Color(0xFF202A45)
+    )
+    else -> AvatarVisualSpec(
+        title = "Космос",
+        description = "Звёздное сияние и глубокий синий",
+        symbol = "✦",
+        colors = listOf(Color(0xFFE2F4FF), Color(0xFF7589D8), Color(0xFF28366D)),
+        foreground = Color(0xFF172448)
+    )
+}
+
+@Composable
+private fun AvatarPortrait(avatarId: String?, modifier: Modifier = Modifier) {
+    val visual = avatarVisualSpec(avatarId)
+    Box(
+        modifier = modifier
+            .clip(CircleShape)
+            .background(Brush.radialGradient(visual.colors))
+            .border(1.dp, Color(0x99D8EEFF), CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            Modifier.fillMaxSize(0.76f).border(1.dp, visual.foreground.copy(alpha = 0.38f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(visual.symbol, color = visual.foreground, fontSize = 38.sp,
+                fontWeight = FontWeight.Light)
         }
     }
 }
