@@ -69,6 +69,7 @@ fun GalaxyHome() {
     var showProfile by remember { mutableStateOf(false) }
     var profile by remember { mutableStateOf<CharacterProfile?>(null) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(reloadKey) {
         isLoading = true
@@ -94,10 +95,16 @@ fun GalaxyHome() {
             profile = profile,
             onBack = { showProfile = false },
             onSave = { updated ->
-                app.characters.save(updated)
-                profile = updated
-                characterName = updated.displayName
-                showProfile = false
+                scope.launch {
+                    try {
+                        app.characters.save(updated)
+                        profile = updated
+                        characterName = updated.displayName
+                        showProfile = false
+                    } catch (error: Exception) {
+                        loadError = "Не удалось сохранить профиль. Изменения не применены."
+                    }
+                }
             }
         )
     } else if (showChat) {
