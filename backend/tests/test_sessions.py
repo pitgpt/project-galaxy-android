@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -224,6 +226,23 @@ def test_safety_identifier_is_stable_and_does_not_expose_user_id(settings):
     assert first == safety_identifier("user-123", settings.safety_identifier_hmac_key)
     assert first != safety_identifier("user-456", settings.safety_identifier_hmac_key)
     assert "user-123" not in first
+
+
+def test_wildcard_character_policy_allows_user_created_profiles(settings):
+    custom_settings = replace(settings, allowed_character_ids=frozenset({"*"}))
+    provider = FakeProvider()
+    with client_for(custom_settings, provider) as client:
+        response = client.post(
+            "/v1/realtime/sessions",
+            headers={"Authorization": "Bearer valid-test-token"},
+            json={
+                "character_id": "user-created-character-123",
+                "voice_id": "coral",
+                "persona_instructions": "A distinct, user-created character.",
+            },
+        )
+    assert response.status_code == 200
+    assert "A distinct, user-created character." in provider.calls[0][1]["session"]["instructions"]
 
 
 def test_rejects_unapproved_character_without_calling_provider(settings):
