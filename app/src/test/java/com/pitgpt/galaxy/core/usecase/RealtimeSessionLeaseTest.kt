@@ -102,7 +102,7 @@ class RealtimeSessionLeaseTest {
         override suspend fun createSession(
             characterId: String,
             voiceId: String?
-        ) = this@RealtimeSessionLeaseTest.credential()
+        ) = RealtimeSessionCredential("ephemeral-secret", 100_000L, "session-1")
 
         override suspend fun heartbeat(sessionId: String) {
             heartbeats += 1
