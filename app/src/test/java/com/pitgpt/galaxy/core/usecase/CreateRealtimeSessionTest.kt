@@ -67,6 +67,17 @@ class CreateRealtimeSessionTest {
     }
 
     @Test
+    fun rejectsOversizedPersonaBeforeCallingProvider() {
+        val provider = FakeProvider(RealtimeSessionCredential("secret", 61_000L))
+        val useCase = CreateRealtimeSession(provider, now = { 1_000L })
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { useCase("galaxy.default", "voice.warm", "x".repeat(8_001)) }
+        }
+        assertEquals(null, provider.characterId)
+    }
+
+    @Test
     fun credentialToStringRedactsSecret() {
         val credential = RealtimeSessionCredential("do-not-log-this", 61_000L)
 
