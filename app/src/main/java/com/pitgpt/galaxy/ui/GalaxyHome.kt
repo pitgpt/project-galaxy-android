@@ -743,6 +743,8 @@ private fun CharacterEditorScreen(
     var displayName by remember(initialProfile?.id) { mutableStateOf(initialProfile?.displayName.orEmpty()) }
     var description by remember(initialProfile?.id) { mutableStateOf(initialProfile?.description.orEmpty()) }
     var personaDefinition by remember(initialProfile?.id) { mutableStateOf(initialProfile?.personaDefinition.orEmpty()) }
+    var avatarId by remember(initialProfile?.id) { mutableStateOf(initialProfile?.avatarId ?: "avatar.cosmic") }
+    var voiceId by remember(initialProfile?.id) { mutableStateOf(initialProfile?.voiceId ?: "voice.feminine_warm") }
     var error by remember { mutableStateOf<String?>(null) }
 
     Box(
@@ -752,7 +754,7 @@ private fun CharacterEditorScreen(
     ) {
         Column(
             Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(9.dp)
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = onBack) { Text("‹  НАЗАД", color = Ice) }
@@ -779,19 +781,43 @@ private fun CharacterEditorScreen(
                 onValueChange = { description = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Краткое описание") },
-                minLines = 2, maxLines = 3,
+                minLines = 2, maxLines = 2,
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White, unfocusedTextColor = Color.White,
                     focusedLabelColor = Ice, unfocusedLabelColor = Muted,
                     focusedBorderColor = Ice, unfocusedBorderColor = Color(0xFF536A9E)
                 )
             )
+            Text("ВНЕШНОСТЬ АВАТАРА", color = Ice, fontSize = 11.sp,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            PresetChoiceRow(
+                selectedId = avatarId,
+                options = listOf(
+                    "avatar.cosmic" to "Космос",
+                    "avatar.cyber" to "Кибер",
+                    "avatar.minimal" to "Минимал"
+                ),
+                onSelect = { avatarId = it }
+            )
+            Text("ГОЛОС ПЕРСОНАЖА", color = Ice, fontSize = 11.sp,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+            PresetChoiceRow(
+                selectedId = voiceId,
+                options = listOf(
+                    "voice.feminine_warm" to "Тёплый",
+                    "voice.feminine_calm" to "Спокойный",
+                    "voice.neutral" to "Нейтральный"
+                ),
+                onSelect = { voiceId = it }
+            )
+            Text("Это сохранённые предпочтения профиля. Реальный аватар и голос подключим на следующих этапах.",
+                color = Muted, fontSize = 11.sp, lineHeight = 15.sp)
             OutlinedTextField(
                 value = personaDefinition,
                 onValueChange = { personaDefinition = it; error = null },
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 label = { Text("Личность и инструкции персонажа") },
-                minLines = 5,
+                minLines = 3,
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White, unfocusedTextColor = Color.White,
                     focusedLabelColor = Ice, unfocusedLabelColor = Muted,
@@ -816,6 +842,8 @@ private fun CharacterEditorScreen(
                             displayName = name,
                             description = description.trim(),
                             personaDefinition = persona,
+                            avatarId = avatarId,
+                            voiceId = voiceId,
                             isBuiltIn = initialProfile?.isBuiltIn ?: false
                         )
                     )
@@ -824,6 +852,36 @@ private fun CharacterEditorScreen(
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
                 shape = RoundedCornerShape(16.dp)
             ) { Text(saveLabel, fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
+@Composable
+private fun PresetChoiceRow(
+    selectedId: String,
+    options: List<Pair<String, String>>,
+    onSelect: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        options.forEach { (id, label) ->
+            val selected = id == selectedId
+            TextButton(
+                onClick = { onSelect(id) },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = if (selected) Color.White else Muted
+                )
+            ) {
+                Text(
+                    label,
+                    fontSize = 11.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                )
+            }
         }
     }
 }
