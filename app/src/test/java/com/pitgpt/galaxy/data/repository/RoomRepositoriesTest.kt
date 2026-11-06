@@ -49,7 +49,8 @@ class RoomRepositoriesTest {
             id = "custom.one",
             displayName = "Nova",
             description = "Test character",
-            personaDefinition = "Be concise"
+            personaDefinition = "Be concise",
+            avatarImageUri = "content://media/external/images/42"
         )
 
         characters.save(builtIn)

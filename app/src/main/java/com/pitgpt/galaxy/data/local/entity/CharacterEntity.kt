@@ -13,7 +13,8 @@ data class CharacterEntity(
     val avatarId: String?,
     val voiceId: String?,
     val modelProviderId: String?,
-    val isBuiltIn: Boolean
+    val isBuiltIn: Boolean,
+    val avatarImageUri: String?
 )
 
 fun CharacterEntity.toDomain() = CharacterProfile(
@@ -24,7 +25,8 @@ fun CharacterEntity.toDomain() = CharacterProfile(
     avatarId = avatarId,
     voiceId = voiceId,
     modelProviderId = modelProviderId,
-    isBuiltIn = isBuiltIn
+    isBuiltIn = isBuiltIn,
+    avatarImageUri = avatarImageUri
 )
 
 fun CharacterProfile.toEntity() = CharacterEntity(
@@ -35,5 +37,6 @@ fun CharacterProfile.toEntity() = CharacterEntity(
     avatarId = avatarId,
     voiceId = voiceId,
     modelProviderId = modelProviderId,
-    isBuiltIn = isBuiltIn
+    isBuiltIn = isBuiltIn,
+    avatarImageUri = avatarImageUri
 )

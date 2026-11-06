@@ -14,5 +14,6 @@ data class CharacterProfile(
     val avatarId: String? = null,
     val voiceId: String? = null,
     val modelProviderId: String? = null,
-    val isBuiltIn: Boolean = false
+    val isBuiltIn: Boolean = false,
+    val avatarImageUri: String? = null
 )

@@ -1,5 +1,7 @@
 package com.pitgpt.galaxy.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -247,6 +249,7 @@ fun GalaxyHome() {
         HomeScreen(
             characterName = if (initialized) characterName else null,
             avatarId = profile?.avatarId,
+            avatarImageUri = profile?.avatarImageUri,
             isLoading = isLoading,
             loadError = loadError,
             onRetry = { reloadKey += 1 },
@@ -261,6 +264,7 @@ fun GalaxyHome() {
 private fun HomeScreen(
     characterName: String?,
     avatarId: String?,
+    avatarImageUri: String?,
     isLoading: Boolean,
     loadError: String?,
     onRetry: () -> Unit,
@@ -307,7 +311,7 @@ private fun HomeScreen(
                 Box(Modifier.size(174.dp).background(
                     Brush.radialGradient(listOf(Color(0xFF7D83E8), Color(0xFF394A91),
                         Color(0xFF172448), Color.Transparent)), CircleShape))
-                AvatarPortrait(avatarId = avatarId, modifier = Modifier.size(112.dp))
+                AvatarPortrait(avatarId = avatarId, modifier = Modifier.size(112.dp), imageUri = avatarImageUri)
             }
             Spacer(Modifier.height(34.dp))
             Text("Я рядом.", color = Color.White, fontSize = 34.sp,
@@ -672,7 +676,8 @@ private fun CharacterListScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             AvatarPortrait(
                                 avatarId = character.avatarId,
-                                modifier = Modifier.size(52.dp)
+                                modifier = Modifier.size(52.dp),
+                                imageUri = character.avatarImageUri
                             )
                             Spacer(Modifier.size(12.dp))
                             Column(Modifier.weight(1f)) {
@@ -745,7 +750,20 @@ private fun CharacterEditorScreen(
     var personaDefinition by remember(initialProfile?.id) { mutableStateOf(initialProfile?.personaDefinition.orEmpty()) }
     var avatarId by remember(initialProfile?.id) { mutableStateOf(initialProfile?.avatarId ?: "avatar.cosmic") }
     var voiceId by remember(initialProfile?.id) { mutableStateOf(initialProfile?.voiceId ?: "voice.feminine_warm") }
+    var avatarImageUri by remember(initialProfile?.id) { mutableStateOf(initialProfile?.avatarImageUri) }
+    val context = LocalContext.current
     var error by remember { mutableStateOf<String?>(null) }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }.onSuccess { avatarImageUri = uri.toString() }
+                .onFailure { error = "Не удалось сохранить доступ к изображению. Выбери другой файл." }
+        }
+    }
 
     Box(
         Modifier.fillMaxSize().background(
@@ -789,7 +807,7 @@ private fun CharacterEditorScreen(
                 )
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                AvatarPortrait(avatarId = avatarId, modifier = Modifier.size(76.dp))
+                AvatarPortrait(avatarId = avatarId, modifier = Modifier.size(76.dp), imageUri = avatarImageUri)
                 Spacer(Modifier.size(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("ПРЕДПРОСМОТР АВАТАРА", color = Ice, fontSize = 11.sp,
@@ -798,6 +816,16 @@ private fun CharacterEditorScreen(
                         fontWeight = FontWeight.SemiBold)
                     Text(avatarVisualSpec(avatarId).description, color = Muted, fontSize = 11.sp,
                         lineHeight = 15.sp)
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { imagePicker.launch(arrayOf("image/*")) }) {
+                    Text("ВЫБРАТЬ ИЗОБРАЖЕНИЕ", color = Ice, fontSize = 11.sp)
+                }
+                if (avatarImageUri != null) {
+                    TextButton(onClick = { avatarImageUri = null }) {
+                        Text("УБРАТЬ", color = Color(0xFFFF9B9B), fontSize = 11.sp)
+                    }
                 }
             }
             Text("ВНЕШНОСТЬ АВАТАРА", color = Ice, fontSize = 11.sp,
@@ -856,7 +884,8 @@ private fun CharacterEditorScreen(
                             personaDefinition = persona,
                             avatarId = avatarId,
                             voiceId = voiceId,
-                            isBuiltIn = initialProfile?.isBuiltIn ?: false
+                            isBuiltIn = initialProfile?.isBuiltIn ?: false,
+                            avatarImageUri = avatarImageUri
                         )
                     )
                 },

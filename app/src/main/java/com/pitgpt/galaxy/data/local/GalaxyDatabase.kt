@@ -15,7 +15,7 @@ import com.pitgpt.galaxy.data.local.entity.MemoryEntity
         ConversationMessageEntity::class,
         MemoryEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class GalaxyDatabase : RoomDatabase() {
