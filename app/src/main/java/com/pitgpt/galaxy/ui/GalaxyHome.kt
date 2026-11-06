@@ -379,7 +379,7 @@ private fun HomeScreen(
                     Text(loadError, color = Color(0xFFFF9B9B), fontSize = 11.sp)
                     TextButton(onClick = onRetry) { Text("ПОВТОРИТЬ", color = Ice) }
                 }
-                StatusLine("AI и голос", "Подключение на следующих этапах", Color(0xFFE9BD70))
+                StatusLine("AI и голос", "Голосовой режим — в диалоге", Color(0xFFE9BD70))
             }
             Spacer(Modifier.height(18.dp))
             Button(
