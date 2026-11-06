@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URI
 
 class HttpRealtimeSessionProvider(
     baseUrl: String,
@@ -18,10 +19,14 @@ class HttpRealtimeSessionProvider(
     private val normalizedBaseUrl = baseUrl.trim().trimEnd('/')
 
     init {
-        require(normalizedBaseUrl.startsWith("https://") ||
-            normalizedBaseUrl.startsWith("http://127.0.0.1") ||
-            normalizedBaseUrl.startsWith("http://10.0.2.2")) {
-            "Galaxy API base URL must use HTTPS except for local development"
+        val uri = try { URI(normalizedBaseUrl) } catch (exception: Exception) {
+            throw IllegalArgumentException("Galaxy API base URL is invalid", exception)
+        }
+        val localHost = uri.host in setOf("127.0.0.1", "10.0.2.2", "localhost")
+        require(uri.isAbsolute && uri.host != null && uri.userInfo == null &&
+            uri.query == null && uri.fragment == null &&
+            (uri.scheme == "https" || (uri.scheme == "http" && localHost))) {
+            "Galaxy API base URL must use HTTPS except for exact local development hosts"
         }
         require(connectTimeoutMillis > 0 && readTimeoutMillis > 0)
     }
@@ -59,6 +64,7 @@ class HttpRealtimeSessionProvider(
             val connection = URL(normalizedBaseUrl + path).openConnection() as HttpURLConnection
             try {
                 connection.requestMethod = method
+                connection.instanceFollowRedirects = false
                 connection.connectTimeout = connectTimeoutMillis
                 connection.readTimeout = readTimeoutMillis
                 connection.setRequestProperty("Accept", "application/json")

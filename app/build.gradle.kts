@@ -6,6 +6,7 @@ plugins {
 }
 
 val gitSha = System.getenv("GITHUB_SHA")?.take(7) ?: "local"
+val galaxyApiBaseUrl = providers.gradleProperty("galaxyApiBaseUrl").orElse(providers.environmentVariable("GALAXY_API_BASE_URL")).getOrElse("https://api.galaxy.invalid")
 
 android {
     namespace = "com.pitgpt.galaxy"
@@ -17,6 +18,7 @@ android {
         versionCode = 4
         versionName = "0.4.0"
         buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        buildConfigField("String", "GALAXY_API_BASE_URL", "\"$galaxyApiBaseUrl\"")
     }
     buildFeatures {
         compose = true

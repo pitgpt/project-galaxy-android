@@ -5,6 +5,8 @@ import com.pitgpt.galaxy.core.repository.CharacterRepository
 import com.pitgpt.galaxy.core.repository.ConversationRepository
 import com.pitgpt.galaxy.core.repository.MemoryRepository
 import com.pitgpt.galaxy.core.usecase.InitializeGalaxy
+import com.pitgpt.galaxy.data.remote.GalaxyAccessTokenProvider
+import com.pitgpt.galaxy.data.remote.HttpRealtimeSessionProvider
 import com.pitgpt.galaxy.data.local.GalaxyDatabaseFactory
 import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
 import com.pitgpt.galaxy.data.repository.RoomConversationRepository
@@ -17,6 +19,9 @@ class GalaxyApplication : Application() {
     val conversations: ConversationRepository by lazy { RoomConversationRepository(database.conversationMessageDao()) }
     val memories: MemoryRepository by lazy { RoomMemoryRepository(database.memoryDao()) }
     private val initializeGalaxy by lazy { InitializeGalaxy(characters) }
+
+    fun realtimeSessionProvider(tokenProvider: GalaxyAccessTokenProvider): HttpRealtimeSessionProvider =
+        HttpRealtimeSessionProvider(BuildConfig.GALAXY_API_BASE_URL, tokenProvider)
 
     /** Installs the built-in character once, without overwriting user changes. */
     suspend fun initialize() {
