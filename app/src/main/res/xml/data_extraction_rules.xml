@@ -1,29 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
-        <!-- Device-bound secrets and private Galaxy data stay on this device. -->
+        <!-- Device-bound credentials and the complete local database are intentionally device-only. -->
         <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
         <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
         <exclude domain="sharedpref" path="galaxy_database_key.xml" />
-        <exclude domain="database" path="galaxy.db" />
-        <exclude domain="database" path="galaxy.db-wal" />
-        <exclude domain="database" path="galaxy.db-shm" />
-        <exclude domain="database" path="galaxy.db-journal" />
-        <exclude domain="sharedpref" path="galaxy_database_key.xml" />
-        <exclude domain="database" path="galaxy.db" />
-        <exclude domain="database" path="galaxy.db-wal" />
-        <exclude domain="database" path="galaxy.db-shm" />
-        <exclude domain="database" path="galaxy.db-journal" />
         <exclude domain="database" path="." />
-        <exclude domain="sharedpref" path="galaxy_database_key.xml" />
-        <exclude domain="file" path="galaxy-db-migration/" />
     </cloud-backup>
     <device-transfer>
-        <!-- Apply the same device-only policy to direct Android device transfers. -->
+        <!-- Never transfer an encrypted database without its non-exportable device key. -->
         <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
         <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
-        <exclude domain="database" path="." />
         <exclude domain="sharedpref" path="galaxy_database_key.xml" />
-        <exclude domain="file" path="galaxy-db-migration/" />
+        <exclude domain="database" path="." />
     </device-transfer>
 </data-extraction-rules>
