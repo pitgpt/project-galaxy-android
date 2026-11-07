@@ -21,6 +21,7 @@ android {
         targetSdk = 35
         versionCode = 4
         versionName = "0.4.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GIT_SHA", buildConfigString(gitSha))
         buildConfigField("String", "GALAXY_API_BASE_URL", buildConfigString(galaxyApiBaseUrl))
         buildConfigField("String", "SUPABASE_URL", buildConfigString(supabaseUrl))
@@ -62,4 +63,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
     testImplementation("org.robolectric:robolectric:4.14.1")
+
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
