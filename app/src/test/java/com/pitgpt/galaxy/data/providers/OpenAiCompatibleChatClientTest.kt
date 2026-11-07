@@ -17,7 +17,7 @@ class OpenAiCompatibleChatClientTest {
             capturedUrl = url; capturedKey = key; capturedBody = body
             ProviderHttpResponse(200, """{"model":"test-model","choices":[{"message":{"role":"assistant","content":"Hello from test"}}]}""")
         }
-        val result = OpenAiCompatibleChatClient(transport).complete(provider, listOf(ChatTurn("user", "Hello")))
+        val result = OpenAiCompatibleChatClient(transport).complete(provider, listOf(ChatTurn("user", "Hello")), temperature = null)
         assertEquals("https://api.example.test/v1/chat/completions", capturedUrl)
         assertEquals("test-key", capturedKey)
         assertEquals("test-model", org.json.JSONObject(capturedBody).getString("model"))
@@ -29,7 +29,7 @@ class OpenAiCompatibleChatClientTest {
         val transport = ProviderHttpTransport { _, _, _ -> called = true; ProviderHttpResponse(200, "{}") }
         val insecure = provider.copy(baseUrl = "http://api.example.test/v1")
         assertThrows(IllegalArgumentException::class.java) {
-            runBlocking { OpenAiCompatibleChatClient(transport).complete(insecure, listOf(ChatTurn("user", "Hi"))) }
+            runBlocking { OpenAiCompatibleChatClient(transport).complete(insecure, listOf(ChatTurn("user", "Hi")), temperature = null) }
         }
         assertEquals(false, called)
     }
@@ -37,7 +37,7 @@ class OpenAiCompatibleChatClientTest {
     @Test fun doesNotExposeProviderBodyInHttpErrors() {
         val transport = ProviderHttpTransport { _, _, _ -> ProviderHttpResponse(401, """{"error":"secret diagnostic"}""") }
         val error = assertThrows(ProviderRequestException::class.java) {
-            runBlocking { OpenAiCompatibleChatClient(transport).complete(provider, listOf(ChatTurn("user", "Hi"))) }
+            runBlocking { OpenAiCompatibleChatClient(transport).complete(provider, listOf(ChatTurn("user", "Hi")), temperature = null) }
         }
         assertEquals(401, error.statusCode)
         assertEquals("Provider rejected the credentials or access (HTTP 401)", error.message)
