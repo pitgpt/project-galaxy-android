@@ -59,9 +59,13 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
         status = null
     }
     fun persist(next: ProviderSettings) {
-        store.save(next)
-        settings = next
-        status = "Настройки сохранены на этом устройстве."
+        try {
+            store.save(next)
+            settings = next
+            status = "Настройки сохранены на этом устройстве."
+        } catch (_: Exception) {
+            status = "Не удалось сохранить настройки. Проверь доступность Android Keystore и повтори попытку."
+        }
     }
 
     Column(Modifier.fillMaxSize().background(ProviderNight).padding(18.dp)) {
