@@ -83,19 +83,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: |
-            set +e
-            gradle connectedDebugAndroidTest
-            test_status=$?
-            if [ "$test_status" -ne 0 ]; then
-              mkdir -p emulator-diagnostics
-              timeout 10s adb devices -l > emulator-diagnostics/adb-devices.txt 2>&1 || true
-              timeout 15s adb logcat -b crash -d -v brief 2>/dev/null \
-                | grep -E 'FATAL EXCEPTION|AndroidRuntime|Fatal signal|SIGSEGV|SIGABRT|UnsatisfiedLinkError|dlopen failed|Process:|backtrace:' \
-                | sed -E 's/(Bearer[[:space:]]+)[^[:space:]]+/\1[REDACTED]/Ig; s/(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})/[REDACTED]/g; s/((api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["= :]+)[^ ,"]+/\1[REDACTED]/Ig' \
-                | tail -n 200 > emulator-diagnostics/crash-buffer.txt || true
-            fi
-            exit "$test_status"
+          script: gradle connectedDebugAndroidTest
 
       - name: Upload emulator diagnostics
         if: always()
