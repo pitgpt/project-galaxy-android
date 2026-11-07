@@ -132,7 +132,8 @@ internal class PlaintextDatabaseEncryptor {
         val source = SQLiteDatabase.openDatabase(
             sourceFile.absolutePath,
             null,
-            SQLiteDatabase.OPEN_READWRITE
+            // SQLCipher applies this flag to ATTACH targets too, allowing the encrypted temp DB to be created.
+            SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.CREATE_IF_NECESSARY
         )
         try {
             checkpoint(source)
