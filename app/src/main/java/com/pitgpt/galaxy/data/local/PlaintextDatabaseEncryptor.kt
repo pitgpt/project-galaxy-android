@@ -90,11 +90,14 @@ internal class PlaintextDatabaseEncryptor {
 
     fun complete(pending: PendingMigration?) {
         if (pending == null) return
+        listOf(sidecar(pending.backup, "-wal"), sidecar(pending.backup, "-shm")).forEach { file ->
+            check(!file.exists() || file.delete()) {
+                "Could not remove a plaintext Galaxy database sidecar."
+            }
+        }
         check(pending.backup.delete()) {
             "The encrypted Galaxy database is active, but its plaintext rollback copy could not be removed."
         }
-        sidecar(pending.backup, "-wal").delete()
-        sidecar(pending.backup, "-shm").delete()
     }
 
     fun rollback(pending: PendingMigration?) {
@@ -105,6 +108,8 @@ internal class PlaintextDatabaseEncryptor {
             check(pending.original.renameTo(failedEncrypted)) {
                 "Could not preserve the failed encrypted database during rollback."
             }
+            moveSidecar(sidecar(pending.original, "-wal"), sidecar(failedEncrypted, "-wal"))
+            moveSidecar(sidecar(pending.original, "-shm"), sidecar(failedEncrypted, "-shm"))
         }
         check(pending.backup.renameTo(pending.original)) {
             "Could not restore the original plaintext Galaxy database."
@@ -112,6 +117,8 @@ internal class PlaintextDatabaseEncryptor {
         restoreSidecar(sidecar(pending.backup, "-wal"), sidecar(pending.original, "-wal"))
         restoreSidecar(sidecar(pending.backup, "-shm"), sidecar(pending.original, "-shm"))
         failedEncrypted.delete()
+        sidecar(failedEncrypted, "-wal").delete()
+        sidecar(failedEncrypted, "-shm").delete()
     }
 
     private fun exportPlaintext(sourceFile: File, encryptedFile: File, databaseKey: ByteArray): Map<String, Long> {
