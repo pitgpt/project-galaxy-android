@@ -92,7 +92,7 @@ jobs:
           adb devices -l
           adb logcat -b crash -d -v brief 2>/dev/null \
             | grep -E 'FATAL EXCEPTION|AndroidRuntime|Fatal signal|SIGSEGV|SIGABRT|UnsatisfiedLinkError|dlopen failed|Process:|backtrace:' \
-            | sed -E 's/(Bearer[[:space:]]+)[^[:space:]]+/\\1[REDACTED]/Ig; s/(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})/[REDACTED]/g; s/((api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["= :]+)[^ ,"]+/\\1[REDACTED]/Ig' \
+            | sed -E 's/(Bearer[[:space:]]+)[^[:space:]]+/\1[REDACTED]/Ig; s/(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})/[REDACTED]/g; s/((api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["= :]+)[^ ,"]+/\1[REDACTED]/Ig' \
             | tail -n 200 || true
 
   build:
