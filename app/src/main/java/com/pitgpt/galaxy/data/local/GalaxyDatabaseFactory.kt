@@ -13,45 +13,64 @@ object GalaxyDatabaseFactory {
         }
     }
 
+    private val encryptor = PlaintextDatabaseEncryptor()
+
     @Volatile
     private var instance: GalaxyDatabase? = null
 
-    // Retain the passphrase for the lifetime of the Room helper: SQLCipher may need it
-    // if the helper closes and reopens its connection later in the process.
-    @Volatile
-    private var databasePassphrase: ByteArray? = null
-
     fun get(context: Context): GalaxyDatabase =
         instance ?: synchronized(this) {
-            instance ?: run {
-                val passphrase = EncryptedDatabaseBootstrap.prepare(context)
-                try {
-                    val database = Room.databaseBuilder(
-                        context.applicationContext,
-                        GalaxyDatabase::class.java,
-                        "galaxy.db"
-                    )
-                        .openHelperFactory(SupportOpenHelperFactory(passphrase))
-                        .addMigrations(MIGRATION_1_2)
-                        .build()
-                    try {
-                        // Force Room's schema validation and any Room migrations before the
-                        // plaintext rollback copy is retired.
-                        database.openHelper.writableDatabase
-                        EncryptedDatabaseBootstrap.completeMigration(context)
-                        databasePassphrase = passphrase
-                        instance = database
-                    } catch (failure: Exception) {
-                        database.close()
-                        runCatching { EncryptedDatabaseBootstrap.rollbackMigration(context) }
-                            .exceptionOrNull()?.let(failure::addSuppressed)
-                        throw failure
-                    }
-                    database
-                } catch (failure: Exception) {
-                    passphrase.fill(0)
-                    throw failure
-                }
-            }
+            instance ?: openEncryptedDatabase(context.applicationContext).also { instance = it }
         }
+
+    private fun openEncryptedDatabase(context: Context): GalaxyDatabase {
+        System.loadLibrary("sqlcipher")
+        val databaseFile = context.getDatabasePath(DATABASE_NAME)
+        check(databaseFile.parentFile?.exists() == true || databaseFile.parentFile?.mkdirs() == true) {
+            "Could not create the Galaxy database directory."
+        }
+
+        val databaseExists = databaseFile.exists()
+        val databaseIsPlaintext = encryptor.isPlaintextDatabase(databaseFile)
+        val databaseKey = EncryptedDatabaseKeyStore(context)
+            .getOrCreateDatabaseKey(databaseExists, databaseIsPlaintext)
+        val pendingMigration = try {
+            encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        } catch (failure: Exception) {
+            databaseKey.fill(0)
+            throw IllegalStateException(
+                "Galaxy could not safely encrypt its local database. The original data has been preserved.",
+                failure
+            )
+        }
+
+        val passphrase = android.util.Base64.encodeToString(databaseKey, android.util.Base64.NO_WRAP)
+        databaseKey.fill(0)
+        val passphraseBytes = passphrase.toByteArray(Charsets.UTF_8)
+        val database = Room.databaseBuilder(
+            context,
+            GalaxyDatabase::class.java,
+            DATABASE_NAME
+        )
+            .openHelperFactory(SupportOpenHelperFactory(passphraseBytes, null, true))
+            .addMigrations(MIGRATION_1_2)
+            .build()
+
+        try {
+            // Room opens lazily. Force the encrypted connection before retiring the plaintext backup.
+            database.openHelper.writableDatabase
+            encryptor.complete(pendingMigration)
+            return database
+        } catch (failure: Exception) {
+            runCatching { database.close() }
+            runCatching { encryptor.rollback(pendingMigration) }
+            passphraseBytes.fill(0)
+            throw IllegalStateException(
+                "Galaxy could not open its encrypted local database. The original data was retained where possible.",
+                failure
+            )
+        }
+    }
+
+    private const val DATABASE_NAME = "galaxy.db"
 }
