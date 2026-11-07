@@ -34,9 +34,19 @@ internal object EncryptedDatabaseBootstrap {
             check(backup.renameTo(database)) {
                 "Galaxy database recovery could not restore the original local database."
             }
+            listOf("-wal", "-shm", "-journal").forEach { suffix ->
+                val savedSidecar = File(backup.path + suffix)
+                val originalSidecar = File(database.path + suffix)
+                if (savedSidecar.exists()) check(savedSidecar.renameTo(originalSidecar)) {
+                    "Galaxy database recovery could not restore a journal file."
+                }
+            }
         }
 
         if (!database.exists()) {
+            if (temporary.exists()) check(temporary.delete()) {
+                "Could not remove an incomplete encrypted staging database."
+            }
             val key = keyStore.loadOrCreateDatabaseKey(databaseAlreadyExists = false)
             return encodePassphrase(key)
         }
@@ -187,7 +197,6 @@ internal object EncryptedDatabaseBootstrap {
             null
         )
         try {
-            if (expectedVersion != null) database.version = expectedVersion
             verifyDatabaseContents(database, expectedVersion, expectedCounts)
         } finally {
             database.close()
@@ -222,7 +231,7 @@ internal object EncryptedDatabaseBootstrap {
 
     private fun rowCounts(database: SQLiteDatabase): Map<String, Long> =
         TABLES.associateWith { table ->
-            database.rawQuery("SELECT COUNT(*) FROM $table", emptyArray()).use(Cursor::countFirst)
+            database.rawQuery("SELECT COUNT(*) FROM $table", emptyArray()).use { cursor -> cursor.countFirst() }
         }
 
     private fun Cursor.countFirst(): Long {
