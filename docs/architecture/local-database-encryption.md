@@ -114,3 +114,15 @@ Do not ship a state where Android silently backs up the encrypted database but o
 - Verify the plaintext rollback file is removed after successful Room open and remains recoverable on every failure path.
 
 Do not remove the Draft status until the above checks have passed.
+
+
+## Android instrumentation coverage
+
+The PR adds an Android emulator test suite in `app/src/androidTest` that uses the actual SQLCipher native library and the framework SQLite implementation:
+
+- Encrypts a populated plaintext database and verifies table row counts, `user_version`, `application_id`, and SQLCipher integrity.
+- Re-enters migration after encrypted-file promotion to simulate a process restart before rollback-file cleanup.
+- Rolls back to the original plaintext database and verifies its rows and schema version.
+- Supplies a wrong key after promotion and verifies that the encrypted database and plaintext rollback copy remain present.
+
+The shared CI workflow on the PR base branch now includes an API 35 x86_64 Android emulator stage running `connectedDebugAndroidTest`; APK assembly waits for that stage as well as unit and backend tests.
