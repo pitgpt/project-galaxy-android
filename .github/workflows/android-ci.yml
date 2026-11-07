@@ -77,7 +77,28 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: gradle connectedDebugAndroidTest
+          script: |
+            set +e
+            gradle connectedDebugAndroidTest
+            test_status=$?
+            if [ "$test_status" -ne 0 ]; then
+              mkdir -p emulator-diagnostics
+              adb devices -l > emulator-diagnostics/adb-devices.txt 2>&1 || true
+              adb logcat -b all -d -v threadtime > emulator-diagnostics/logcat.txt 2>&1 || true
+              adb shell getprop > emulator-diagnostics/getprop.txt 2>&1 || true
+              adb shell dumpsys activity processes > emulator-diagnostics/activity-processes.txt 2>&1 || true
+              adb shell dumpsys package com.pitgpt.galaxy > emulator-diagnostics/app-package.txt 2>&1 || true
+            fi
+            exit "$test_status"
+
+      - name: Upload emulator diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: galaxy-emulator-diagnostics
+          path: emulator-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
 
   build:
     needs: [test, backend-test, instrumented-test]
