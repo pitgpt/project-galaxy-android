@@ -106,7 +106,11 @@ class EncryptedProviderStore(context: Context) {
     }
 
     private fun getOrCreateKey(): SecretKey {
-        runCatching { existingKey() }.getOrNull()?.let { return it }
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (store.containsAlias(KEY_ALIAS)) {
+            return store.getKey(KEY_ALIAS, null) as? SecretKey
+                ?: throw IllegalStateException("The provider encryption key exists but is unavailable.")
+        }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
             init(KeyGenParameterSpec.Builder(KEY_ALIAS,
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
