@@ -47,6 +47,7 @@ object GalaxyDatabaseFactory {
                             .exceptionOrNull()?.let(failure::addSuppressed)
                         throw failure
                     }
+                    database
                 } catch (failure: Exception) {
                     passphrase.fill(0)
                     throw failure
