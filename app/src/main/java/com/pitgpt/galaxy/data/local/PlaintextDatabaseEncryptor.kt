@@ -16,6 +16,12 @@ internal class PlaintextDatabaseEncryptor {
         internal val backup: File
     )
 
+    private data class DatabaseSnapshot(
+        val rowCounts: Map<String, Long>,
+        val userVersion: Int,
+        val applicationId: Int
+    )
+
     fun isPlaintextDatabase(database: File): Boolean = hasSqliteHeader(database)
 
     fun migrateIfNeeded(database: File, databaseKey: ByteArray): PendingMigration? {
@@ -31,7 +37,7 @@ internal class PlaintextDatabaseEncryptor {
 
         if (backup.exists() && !database.exists()) {
             if (temporary.exists()) {
-                verifyEncrypted(temporary, databaseKey, readPlaintextRowCounts(backup))
+                verifyEncrypted(temporary, databaseKey, readPlaintextSnapshot(backup))
                 check(temporary.renameTo(database)) { "Could not promote verified encrypted database." }
                 return PendingMigration(database, backup)
             }
@@ -40,7 +46,8 @@ internal class PlaintextDatabaseEncryptor {
         }
 
         if (database.exists() && !plaintext) {
-            verifyEncrypted(database, databaseKey, null)
+            val snapshot = if (backup.exists()) readPlaintextSnapshot(backup) else null
+            verifyEncrypted(database, databaseKey, snapshot)
             if (backup.exists()) return PendingMigration(database, backup)
             sidecar(backup, "-wal").delete()
             sidecar(backup, "-shm").delete()
@@ -56,8 +63,8 @@ internal class PlaintextDatabaseEncryptor {
             check(temporary.delete()) { "Could not remove an incomplete encrypted migration file." }
         }
 
-        val expectedCounts = exportPlaintext(database, temporary, databaseKey)
-        verifyEncrypted(temporary, databaseKey, expectedCounts)
+        val expectedSnapshot = exportPlaintext(database, temporary, databaseKey)
+        verifyEncrypted(temporary, databaseKey, expectedSnapshot)
 
         val backupWal = sidecar(backup, "-wal")
         val backupShm = sidecar(backup, "-shm")
@@ -121,7 +128,7 @@ internal class PlaintextDatabaseEncryptor {
         sidecar(failedEncrypted, "-shm").delete()
     }
 
-    private fun exportPlaintext(sourceFile: File, encryptedFile: File, databaseKey: ByteArray): Map<String, Long> {
+    private fun exportPlaintext(sourceFile: File, encryptedFile: File, databaseKey: ByteArray): DatabaseSnapshot {
         val source = SQLiteDatabase.openDatabase(
             sourceFile.absolutePath,
             null,
@@ -129,7 +136,7 @@ internal class PlaintextDatabaseEncryptor {
         )
         try {
             checkpoint(source)
-            val rowCounts = readRowCounts(source)
+            val snapshot = readSnapshot(source)
             val passphrase = Base64.encodeToString(databaseKey, Base64.NO_WRAP)
             source.execSQL(
                 "ATTACH DATABASE ? AS encrypted KEY ?;",
@@ -137,16 +144,18 @@ internal class PlaintextDatabaseEncryptor {
             )
             try {
                 source.rawExecSQL("SELECT sqlcipher_export('encrypted');")
+                source.rawExecSQL("PRAGMA encrypted.user_version = ${snapshot.userVersion};")
+                source.rawExecSQL("PRAGMA encrypted.application_id = ${snapshot.applicationId};")
             } finally {
                 source.execSQL("DETACH DATABASE encrypted;")
             }
-            return rowCounts
+            return snapshot
         } finally {
             source.close()
         }
     }
 
-    private fun readPlaintextRowCounts(file: File): Map<String, Long> {
+    private fun readPlaintextSnapshot(file: File): DatabaseSnapshot {
         val database = SQLiteDatabase.openDatabase(
             file.absolutePath,
             null,
@@ -154,7 +163,7 @@ internal class PlaintextDatabaseEncryptor {
         )
         return try {
             checkpoint(database)
-            readRowCounts(database)
+            readSnapshot(database)
         } finally {
             database.close()
         }
@@ -163,7 +172,7 @@ internal class PlaintextDatabaseEncryptor {
     private fun verifyEncrypted(
         file: File,
         databaseKey: ByteArray,
-        expectedCounts: Map<String, Long>?
+        expectedSnapshot: DatabaseSnapshot?
     ) {
         val passphrase = Base64.encodeToString(databaseKey, Base64.NO_WRAP)
         val database = SQLiteDatabase.openDatabase(
@@ -179,9 +188,9 @@ internal class PlaintextDatabaseEncryptor {
                     "Encrypted Galaxy database failed its integrity check."
                 }
             }
-            expectedCounts?.let { expected ->
-                check(readRowCounts(database) == expected) {
-                    "Encrypted Galaxy database row counts do not match the original database."
+            expectedSnapshot?.let { expected ->
+                check(readSnapshot(database) == expected) {
+                    "Encrypted Galaxy database metadata or row counts do not match the original database."
                 }
             }
         } finally {
@@ -196,6 +205,18 @@ internal class PlaintextDatabaseEncryptor {
             }
         }
     }
+
+    private fun readSnapshot(database: SQLiteDatabase) = DatabaseSnapshot(
+        rowCounts = readRowCounts(database),
+        userVersion = readPragmaInt(database, "user_version"),
+        applicationId = readPragmaInt(database, "application_id")
+    )
+
+    private fun readPragmaInt(database: SQLiteDatabase, pragma: String): Int =
+        database.rawQuery("PRAGMA $pragma;", null).use { cursor ->
+            check(cursor.moveToFirst())
+            cursor.getInt(0)
+        }
 
     private fun readRowCounts(database: SQLiteDatabase): Map<String, Long> {
         val tables = mutableListOf<String>()
