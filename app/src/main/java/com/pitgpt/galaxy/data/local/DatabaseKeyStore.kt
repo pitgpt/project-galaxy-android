@@ -23,11 +23,14 @@ class DatabaseKeyStore(context: Context) {
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
     @Synchronized
-    fun loadOrCreateDatabaseKey(databaseAlreadyExists: Boolean): ByteArray {
+    fun loadOrCreateDatabaseKey(
+        databaseAlreadyExists: Boolean,
+        allowExistingPlaintextDatabase: Boolean = false
+    ): ByteArray {
         val encoded = preferences.getString(WRAPPED_KEY, null)
         if (encoded != null) return unwrapDatabaseKey(encoded)
 
-        if (databaseAlreadyExists) {
+        if (databaseAlreadyExists && !allowExistingPlaintextDatabase) {
             throw DatabaseKeyUnavailableException(
                 "The encrypted Galaxy database exists, but its wrapped key is missing."
             )
