@@ -64,10 +64,12 @@ Build and run with Docker:
 
 ```bash
 docker build -t galaxy-backend .
-docker run --rm -p 8000:8000 --env-file .env galaxy-backend
+docker run --rm -p 8000:8080 --env-file .env galaxy-backend
 ```
 
-Create `.env` from the required configuration above. Never commit it. The image runs as a non-root user and exposes the service on port 8000. Put it behind a TLS-terminating reverse proxy or managed HTTPS ingress.
+The container listens on port 8080 by default, or on the Cloud Run-provided `PORT` value. The image runs as a non-root user. Put it behind a TLS-terminating reverse proxy or managed HTTPS ingress. The Docker Compose configuration maps host port 8000 to the container's port 8080 and starts the local Redis service.
+
+Create `.env` from the required configuration above. Never commit it.
 
 ## Production hardening still required
 
@@ -76,3 +78,7 @@ Production uses a shared Redis-backed atomic minute and daily credential-issuanc
 Request logs include only request ID, method, path, status and duration. Authorization headers, request/response bodies, user IDs and provider secrets are deliberately excluded.
 
 Run tests with `pytest`.
+
+## Cloud Run deployment
+
+See [deploy/cloud-run.md](deploy/cloud-run.md) for the zero-budget-first Google Cloud Run + Upstash Redis deployment plan, Secret Manager setup, runtime configuration, verification checks, and shutdown steps.
