@@ -55,6 +55,8 @@ dependencies {
     val roomVersion = "2.7.0"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
+    implementation("androidx.sqlite:sqlite:2.7.0")
+    implementation("net.zetetic:sqlcipher-android:4.20.0@aar")
     ksp("androidx.room:room-compiler:$roomVersion")
 
     testImplementation("junit:junit:4.13.2")
