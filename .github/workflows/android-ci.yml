@@ -70,6 +70,12 @@ jobs:
         uses: gradle/actions/setup-gradle@v6.4.1
         with:
           gradle-version: '8.11.1'
+      - name: Enable KVM group permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=/dev/kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Run SQLCipher migration tests on Android emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -83,11 +89,11 @@ jobs:
             test_status=$?
             if [ "$test_status" -ne 0 ]; then
               mkdir -p emulator-diagnostics
-              adb devices -l > emulator-diagnostics/adb-devices.txt 2>&1 || true
-              adb logcat -b all -d -v threadtime > emulator-diagnostics/logcat.txt 2>&1 || true
-              adb shell getprop > emulator-diagnostics/getprop.txt 2>&1 || true
-              adb shell dumpsys activity processes > emulator-diagnostics/activity-processes.txt 2>&1 || true
-              adb shell dumpsys package com.pitgpt.galaxy > emulator-diagnostics/app-package.txt 2>&1 || true
+              timeout 10s adb devices -l > emulator-diagnostics/adb-devices.txt 2>&1 || true
+              timeout 15s adb logcat -b crash -d -v brief 2>/dev/null \
+                | grep -E 'FATAL EXCEPTION|AndroidRuntime|Fatal signal|SIGSEGV|SIGABRT|UnsatisfiedLinkError|dlopen failed|Process:|backtrace:' \
+                | sed -E 's/(Bearer[[:space:]]+)[^[:space:]]+/\1[REDACTED]/Ig; s/(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})/[REDACTED]/g; s/((api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)["= :]+)[^ ,"]+/\1[REDACTED]/Ig' \
+                | tail -n 200 > emulator-diagnostics/crash-buffer.txt || true
             fi
             exit "$test_status"
 
