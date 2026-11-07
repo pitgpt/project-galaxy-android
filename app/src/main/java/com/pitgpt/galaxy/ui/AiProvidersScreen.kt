@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.util.UUID
 
@@ -158,8 +159,8 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                     val cleanModel = model.trim()
                     if (cleanName.isBlank() || cleanUrl.isBlank() || apiKey.isBlank() || cleanModel.isBlank()) {
                         status = "Заполни все поля."
-                    } else if (!cleanUrl.startsWith("https://")) {
-                        status = "Для защиты ключа разрешён только HTTPS."
+                    } else if (!isSafeProviderBaseUrl(cleanUrl)) {
+                        status = "Укажи корректный HTTPS Base URL без логина, пароля, query-параметров или fragment."
                     } else {
                         val item = AiProviderConfig(editingId ?: UUID.randomUUID().toString(),
                             cleanName, cleanUrl, apiKey.trim(), cleanModel)
@@ -218,11 +219,19 @@ private fun ProviderField(value: String, onValueChange: (String) -> Unit, label:
     )
 }
 
+private fun isSafeProviderBaseUrl(value: String): Boolean = runCatching {
+    val uri = URI(value.trim().trimEnd('/'))
+    uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrBlank() &&
+        uri.userInfo == null && uri.rawQuery == null && uri.rawFragment == null
+}.getOrDefault(false)
+
 private fun checkProvider(baseUrl: String, apiKey: String): String {
     var connection: HttpURLConnection? = null
     return try {
+        if (!isSafeProviderBaseUrl(baseUrl)) return "Некорректный адрес. Разрешён только безопасный HTTPS Base URL."
         val endpoint = baseUrl.trimEnd('/') + "/models"
         connection = URL(endpoint).openConnection() as HttpURLConnection
+        connection.instanceFollowRedirects = false
         connection.connectTimeout = 10_000
         connection.readTimeout = 10_000
         connection.requestMethod = "GET"
