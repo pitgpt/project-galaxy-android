@@ -26,7 +26,7 @@ object GalaxyDatabaseFactory {
             instance ?: run {
                 val passphrase = EncryptedDatabaseBootstrap.prepare(context)
                 try {
-                    Room.databaseBuilder(
+                    val database = Room.databaseBuilder(
                         context.applicationContext,
                         GalaxyDatabase::class.java,
                         "galaxy.db"
@@ -34,10 +34,19 @@ object GalaxyDatabaseFactory {
                         .openHelperFactory(SupportOpenHelperFactory(passphrase))
                         .addMigrations(MIGRATION_1_2)
                         .build()
-                        .also {
-                            databasePassphrase = passphrase
-                            instance = it
-                        }
+                    try {
+                        // Force Room's schema validation and any Room migrations before the
+                        // plaintext rollback copy is retired.
+                        database.openHelper.writableDatabase
+                        EncryptedDatabaseBootstrap.completeMigration(context)
+                        databasePassphrase = passphrase
+                        instance = database
+                    } catch (failure: Exception) {
+                        database.close()
+                        runCatching { EncryptedDatabaseBootstrap.rollbackMigration(context) }
+                            .exceptionOrNull()?.let(failure::addSuppressed)
+                        throw failure
+                    }
                 } catch (failure: Exception) {
                     passphrase.fill(0)
                     throw failure
