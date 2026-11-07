@@ -16,6 +16,7 @@ import com.pitgpt.galaxy.data.providers.AiProviderConfig
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
 import com.pitgpt.galaxy.data.providers.ProviderSettings
 import com.pitgpt.galaxy.data.providers.ProviderSettingsLoadException
+import com.pitgpt.galaxy.data.providers.withProviderRemoved
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -39,6 +40,7 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
         })
     }
     var showResetConfirmation by remember { mutableStateOf(false) }
+    var pendingDeleteProvider by remember { mutableStateOf<AiProviderConfig?>(null) }
     var editingId by remember { mutableStateOf<String?>(null) }
     var isEditing by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
@@ -117,11 +119,9 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                                     Text("ВЫБРАТЬ")
                                 }
                                 TextButton(onClick = { startEdit(provider) }) { Text("ИЗМЕНИТЬ") }
-                                TextButton(onClick = {
-                                    val remaining = settings.providers.filterNot { it.id == provider.id }
-                                    persist(settings.copy(providers = remaining,
-                                        activeProviderId = if (settings.activeProviderId == provider.id) remaining.firstOrNull()?.id else settings.activeProviderId))
-                                }) { Text("УДАЛИТЬ", color = Color(0xFFFF9B9B)) }
+                                TextButton(onClick = { pendingDeleteProvider = provider }) {
+                                    Text("УДАЛИТЬ", color = Color(0xFFFF9B9B))
+                                }
                             }
                         }
                     }
@@ -207,6 +207,25 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
             },
             dismissButton = {
                 TextButton(onClick = { showResetConfirmation = false }) { Text("ОТМЕНА") }
+            }
+        )
+    }
+    pendingDeleteProvider?.let { provider ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteProvider = null },
+            title = { Text("Удалить провайдера?") },
+            text = {
+                Text("Провайдер «${provider.name}» и сохранённый локальный API-ключ будут удалены. Это действие нельзя отменить.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (persist(settings.withProviderRemoved(provider.id))) {
+                        pendingDeleteProvider = null
+                    }
+                }) { Text("УДАЛИТЬ", color = Color(0xFFFF7777)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteProvider = null }) { Text("ОТМЕНА") }
             }
         )
     }
