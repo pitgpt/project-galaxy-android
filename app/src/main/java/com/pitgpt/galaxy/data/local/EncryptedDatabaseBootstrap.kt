@@ -159,11 +159,21 @@ internal object EncryptedDatabaseBootstrap {
             }
             verifyEncryptedDatabase(sourceFile, passphrase, sourceVersion, sourceCounts)
         } catch (failure: Exception) {
-            if (sourceFile.exists()) sourceFile.delete()
+            // Never silently ignore a failed rollback step. The backup is the last known-good
+            // copy; keep it in place unless every restoration operation succeeds.
+            if (sourceFile.exists()) {
+                check(sourceFile.delete()) {
+                    "Migration failed and the incomplete encrypted database could not be removed."
+                }
+            }
             check(plaintextBackupFile.renameTo(sourceFile)) {
                 "Migration failed and automatic rollback could not restore the original database."
             }
-            movedSidecars.forEach { (original, saved) -> if (saved.exists()) saved.renameTo(original) }
+            movedSidecars.forEach { (original, saved) ->
+                if (saved.exists()) check(saved.renameTo(original)) {
+                    "Migration failed and an original database journal could not be restored."
+                }
+            }
             throw failure
         }
 
@@ -183,6 +193,8 @@ internal object EncryptedDatabaseBootstrap {
         val backup = File(database.parentFile, DATABASE_NAME + BACKUP_SUFFIX)
         if (!backup.exists()) return
 
+        // Delete the failed encrypted database and its sidecars before restoring the
+        // plaintext backup. Every operation is checked; a partial rollback must fail closed.
         listOf("", "-wal", "-shm", "-journal").forEach { suffix ->
             val current = File(database.path + suffix)
             if (current.exists()) check(current.delete()) {
