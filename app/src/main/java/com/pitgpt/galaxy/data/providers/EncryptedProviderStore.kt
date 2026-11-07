@@ -37,11 +37,11 @@ class ProviderSettingsLoadException(cause: Throwable) :
     IllegalStateException("Saved provider settings could not be decrypted or parsed.", cause)
 
 /** Device-local encrypted provider settings. The ciphertext is excluded from Android backup. */
-class EncryptedProviderStore(context: Context) {
+class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
     private val prefs = context.applicationContext.getSharedPreferences("galaxy_provider_vault", Context.MODE_PRIVATE)
 
     @Synchronized
-    fun load(): ProviderSettings {
+    override fun load(): ProviderSettings {
         val encoded = prefs.getString(DATA_KEY, null) ?: return ProviderSettings()
         return try {
             val payload = Base64.decode(encoded, Base64.NO_WRAP)
@@ -79,7 +79,7 @@ class EncryptedProviderStore(context: Context) {
     }
 
     @Synchronized
-    fun save(settings: ProviderSettings) {
+    override fun save(settings: ProviderSettings) {
         val root = JSONObject().put("providers", JSONArray().apply {
             settings.providers.forEach { provider ->
                 put(JSONObject().put("id", provider.id).put("name", provider.name)
@@ -95,7 +95,7 @@ class EncryptedProviderStore(context: Context) {
 
     /** Removes unreadable saved data only after an explicit user confirmation in the UI. */
     @Synchronized
-    fun clear() {
+    override fun clear() {
         // The user has explicitly confirmed a destructive reset. Remove the ciphertext first,
         // then retire even an invalidated Keystore key so a fresh key can be generated.
         check(prefs.edit().remove(DATA_KEY).commit()) { "Could not clear provider settings." }
