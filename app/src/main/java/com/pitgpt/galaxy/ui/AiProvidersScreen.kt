@@ -58,13 +58,15 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
         model = provider?.model.orEmpty()
         status = null
     }
-    fun persist(next: ProviderSettings) {
-        try {
+    fun persist(next: ProviderSettings): Boolean {
+        return try {
             store.save(next)
             settings = next
             status = "Настройки сохранены на этом устройстве."
+            true
         } catch (_: Exception) {
             status = "Не удалось сохранить настройки. Проверь доступность Android Keystore и повтори попытку."
+            false
         }
     }
 
@@ -169,9 +171,10 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                         val item = AiProviderConfig(editingId ?: UUID.randomUUID().toString(),
                             cleanName, cleanUrl, apiKey.trim(), cleanModel)
                         val updated = settings.providers.filterNot { it.id == item.id } + item
-                        persist(settings.copy(providers = updated,
-                            activeProviderId = settings.activeProviderId ?: item.id))
-                        editingId = null
+                        if (persist(settings.copy(providers = updated,
+                                activeProviderId = settings.activeProviderId ?: item.id))) {
+                            editingId = null
+                        }
                     }
                 }) { Text("СОХРАНИТЬ") }
             }
