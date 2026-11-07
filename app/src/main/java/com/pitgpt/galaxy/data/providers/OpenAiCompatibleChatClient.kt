@@ -52,7 +52,7 @@ fun interface TextChatProvider {
     suspend fun complete(
         provider: AiProviderConfig,
         turns: List<ChatTurn>,
-        temperature: Double? = null
+        temperature: Double?
     ): ChatCompletion
 }
 
