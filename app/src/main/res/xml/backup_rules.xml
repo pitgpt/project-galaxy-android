@@ -3,4 +3,8 @@
     <!-- Device-bound secrets must never be copied to cloud backup. -->
     <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
     <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
+    <!-- Galaxy conversations, memories, and device-bound database keys are device-only. -->
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+    <exclude domain="file" path="galaxy-db-migration/" />
 </full-backup-content>
