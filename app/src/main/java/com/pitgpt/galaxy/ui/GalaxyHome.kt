@@ -56,6 +56,7 @@ import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
+import com.pitgpt.galaxy.core.usecase.GenerateCharacterReply
 import com.pitgpt.galaxy.data.voice.RealtimeVoiceController
 import com.pitgpt.galaxy.data.voice.RealtimeVoiceStatus
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
@@ -284,8 +285,21 @@ fun GalaxyHome() {
             onToggleMute = { voiceController.setMicrophoneEnabled(voiceState.muted) },
             onBack = { voiceController.disconnect(); showChat = false },
             onSend = { text ->
-                val message = SendMessage(app.conversations).invoke(activeCharacterId, text)
-                messages.add(message)
+                val userMessage = SendMessage(app.conversations).invoke(activeCharacterId, text)
+                messages.add(userMessage)
+                try {
+                    val selectedProfile = requireNotNull(profile) { "Active character profile is missing" }
+                    val reply = GenerateCharacterReply(
+                        conversations = app.conversations,
+                        providerStore = app.providerStore
+                    ).invoke(
+                        characterId = activeCharacterId,
+                        systemPrompt = selectedProfile.personaDefinition
+                    )
+                    messages.add(reply)
+                } catch (error: Exception) {
+                    throw CharacterReplyGenerationException(error)
+                }
             }
         )
     } else {
@@ -314,7 +328,8 @@ private fun HomeScreen(
     onRetry: () -> Unit,
     onOpenChat: () -> Unit,
     onOpenProfile: () -> Unit,
-    onOpenCharacters: () -> Unit
+    onOpenCharacters: () -> Unit,
+    onOpenProviders: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -407,6 +422,15 @@ private fun HomeScreen(
             }
             Spacer(Modifier.height(10.dp))
             Button(
+                onClick = onOpenProviders,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("AI-ПРОВАЙДЕРЫ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth().height(54.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
@@ -451,7 +475,12 @@ private fun ConversationScreen(
                 onSend(value)
                 draft = ""
             } catch (error: Exception) {
-                sendError = "Не удалось сохранить сообщение. Текст остался в поле, попробуй ещё раз."
+                sendError = if (error is CharacterReplyGenerationException) {
+                    draft = ""
+                    "Сообщение сохранено, но ответ AI не получен. Проверь провайдера и повтори позже."
+                } else {
+                    "Не удалось сохранить сообщение. Текст остался в поле, попробуй ещё раз."
+                }
             } finally {
                 isSending = false
             }
@@ -1062,3 +1091,6 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
         }
     }
 }
+
+
+private class CharacterReplyGenerationException(cause: Throwable) : Exception(cause)
