@@ -4,6 +4,14 @@
         <!-- Device-bound secrets cannot be decrypted on another device. -->
         <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
         <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
+        <!-- Device-only local database, wrapped key, and migration staging files. -->
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+        <exclude domain="file" path="galaxy-db-migration/" />
+        <!-- Device-only local database, wrapped key, and migration staging files. -->
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+        <exclude domain="file" path="galaxy-db-migration/" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
