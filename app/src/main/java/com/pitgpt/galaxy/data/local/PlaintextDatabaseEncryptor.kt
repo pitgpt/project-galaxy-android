@@ -16,6 +16,8 @@ internal class PlaintextDatabaseEncryptor {
         internal val backup: File
     )
 
+    fun isPlaintextDatabase(database: File): Boolean = hasSqliteHeader(database)
+
     fun migrateIfNeeded(database: File, databaseKey: ByteArray): PendingMigration? {
         val backup = File(database.parentFile, "${database.name}.plaintext-backup")
         val temporary = File(database.parentFile, "${database.name}.encrypted-tmp")
