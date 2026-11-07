@@ -83,6 +83,7 @@ fun GalaxyHome() {
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showMemory by remember { mutableStateOf(false) }
     var showProviders by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
@@ -266,12 +267,19 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showMemory) {
+        MemoryManagementScreen(
+            repository = app.memories,
+            activeCharacterId = activeCharacterId,
+            onBack = { showMemory = false; showSettings = true }
+        )
     } else if (showProviders) {
         AiProvidersScreen(store = app.providerStore, onBack = { showProviders = false; showSettings = true })
     } else if (showSettings) {
         AppSettingsScreen(
             onBack = { showSettings = false },
-            onOpenProviders = { showSettings = false; showProviders = true }
+            onOpenProviders = { showSettings = false; showProviders = true },
+            onOpenMemory = { showSettings = false; showMemory = true }
         )
     } else if (showChat) {
         ConversationScreen(
