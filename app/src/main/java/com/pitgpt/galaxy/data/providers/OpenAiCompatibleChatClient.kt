@@ -47,6 +47,15 @@ fun interface ProviderHttpTransport {
     suspend fun post(url: String, apiKey: String, body: String): ProviderHttpResponse
 }
 
+/** Provider-neutral boundary for text generation. Voice transports remain independent. */
+fun interface TextChatProvider {
+    suspend fun complete(
+        provider: AiProviderConfig,
+        turns: List<ChatTurn>,
+        temperature: Double? = null
+    ): ChatCompletion
+}
+
 class UrlConnectionProviderTransport : ProviderHttpTransport {
     override suspend fun post(url: String, apiKey: String, body: String): ProviderHttpResponse =
         suspendCancellableCoroutine { continuation ->
@@ -90,11 +99,11 @@ class UrlConnectionProviderTransport : ProviderHttpTransport {
  */
 class OpenAiCompatibleChatClient(
     private val transport: ProviderHttpTransport = UrlConnectionProviderTransport()
-) {
-    suspend fun complete(
+) : TextChatProvider {
+    override suspend fun complete(
         provider: AiProviderConfig,
         turns: List<ChatTurn>,
-        temperature: Double? = null
+        temperature: Double?
     ): ChatCompletion {
         require(provider.apiKey.isNotBlank()) { "Provider API key is missing" }
         require(provider.model.isNotBlank()) { "Provider model is missing" }
