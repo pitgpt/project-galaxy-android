@@ -60,6 +60,7 @@ import com.pitgpt.galaxy.core.usecase.GenerateCharacterReply
 import com.pitgpt.galaxy.data.voice.RealtimeVoiceController
 import com.pitgpt.galaxy.data.voice.RealtimeVoiceStatus
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -297,6 +298,8 @@ fun GalaxyHome() {
                         systemPrompt = selectedProfile.personaDefinition
                     )
                     messages.add(reply)
+                } catch (error: CancellationException) {
+                    throw error
                 } catch (error: Exception) {
                     throw CharacterReplyGenerationException(error)
                 }
@@ -474,6 +477,8 @@ private fun ConversationScreen(
             try {
                 onSend(value)
                 draft = ""
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
                 sendError = if (error is CharacterReplyGenerationException) {
                     draft = ""
