@@ -72,13 +72,8 @@ internal object EncryptedDatabaseBootstrap {
         key.fill(0)
         try {
             verifyEncryptedDatabase(database, passphrase, expectedVersion = null, expectedCounts = null)
-            // A backup left after a successful atomic promotion is now safe to retire.
-            if (backup.exists()) check(backup.delete()) {
-                "The encrypted database is ready, but the temporary plaintext rollback copy could not be removed."
-            }
-            removeSidecar(backup.path + "-wal")
-            removeSidecar(backup.path + "-shm")
-            removeSidecar(backup.path + "-journal")
+            // Keep the plaintext rollback copy until Room has opened the encrypted database
+            // and validated its own schema identity/migrations.
             return passphrase.toByteArray(Charsets.UTF_8)
         } catch (failure: Exception) {
             throw failure
@@ -172,11 +167,36 @@ internal object EncryptedDatabaseBootstrap {
             throw failure
         }
 
-        check(plaintextBackupFile.delete()) {
-            "Encrypted database is active, but the temporary plaintext rollback copy could not be removed."
+        // The rollback copy is intentionally retained until Room itself opens the new database.
+    }
+
+    fun completeMigration(context: Context) {
+        val backup = File(context.getDatabasePath(DATABASE_NAME).parentFile, DATABASE_NAME + BACKUP_SUFFIX)
+        if (backup.exists()) check(backup.delete()) {
+            "Galaxy opened the encrypted database, but the temporary plaintext rollback copy could not be removed."
         }
-        movedSidecars.forEach { (_, saved) ->
-            if (saved.exists()) check(saved.delete()) { "Could not remove a plaintext database journal backup." }
+        listOf("-wal", "-shm", "-journal").forEach { removeSidecar(backup.path + it) }
+    }
+
+    fun rollbackMigration(context: Context) {
+        val database = context.getDatabasePath(DATABASE_NAME)
+        val backup = File(database.parentFile, DATABASE_NAME + BACKUP_SUFFIX)
+        if (!backup.exists()) return
+
+        listOf("", "-wal", "-shm", "-journal").forEach { suffix ->
+            val current = File(database.path + suffix)
+            if (current.exists()) check(current.delete()) {
+                "Could not remove the failed encrypted database during rollback."
+            }
+        }
+        check(backup.renameTo(database)) {
+            "Could not restore the original plaintext Galaxy database after Room validation failed."
+        }
+        listOf("-wal", "-shm", "-journal").forEach { suffix ->
+            val saved = File(backup.path + suffix)
+            if (saved.exists()) check(saved.renameTo(File(database.path + suffix))) {
+                "Could not restore an original Galaxy database journal during rollback."
+            }
         }
     }
 
