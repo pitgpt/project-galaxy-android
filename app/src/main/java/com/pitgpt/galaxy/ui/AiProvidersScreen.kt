@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.sp
 import com.pitgpt.galaxy.data.providers.AiProviderConfig
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
 import com.pitgpt.galaxy.data.providers.ProviderSettings
+import com.pitgpt.galaxy.data.providers.ProviderSettingsLoadException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -29,7 +30,14 @@ private val ProviderAccent = Color(0xFFB8D9FF)
 
 @Composable
 fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
-    var settings by remember { mutableStateOf(store.load()) }
+    val initialLoad = remember(store) { runCatching { store.load() } }
+    var settings by remember { mutableStateOf(initialLoad.getOrElse { ProviderSettings() }) }
+    var loadError by remember {
+        mutableStateOf(initialLoad.exceptionOrNull()?.let {
+            "Не удалось расшифровать сохранённые настройки. Исходные данные сохранены и не удалены."
+        })
+    }
+    var showResetConfirmation by remember { mutableStateOf(false) }
     var editingId by remember { mutableStateOf<String?>(null) }
     var isEditing by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
@@ -63,7 +71,27 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
         Text("Ключи хранятся локально в зашифрованном виде с помощью Android Keystore. Не отправляй их в чат и не делись скриншотами с открытым ключом.",
             color = ProviderMuted, fontSize = 12.sp, lineHeight = 18.sp)
         Spacer(Modifier.height(14.dp))
-        if (!isEditing) {
+        if (loadError != null) {
+            Text("Сохранённые настройки провайдера сейчас недоступны.", color = Color(0xFFFFB0A8),
+                fontSize = 15.sp)
+            Text("Возможно, Android Keystore временно недоступен или ключ был сброшен. Приложение не удалило зашифрованные данные и не будет их перезаписывать.",
+                color = ProviderMuted, fontSize = 12.sp, lineHeight = 18.sp)
+            Spacer(Modifier.height(12.dp))
+            Button(onClick = {
+                try {
+                    settings = store.load()
+                    loadError = null
+                    status = "Сохранённые настройки восстановлены."
+                } catch (_: ProviderSettingsLoadException) {
+                    loadError = "Не удалось прочитать сохранённые настройки. Данные по-прежнему сохранены."
+                }
+            }, modifier = Modifier.fillMaxWidth()) {
+                Text("ПОВТОРИТЬ ЧТЕНИЕ")
+            }
+            TextButton(onClick = { showResetConfirmation = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("СБРОСИТЬ ХРАНИЛИЩЕ", color = Color(0xFFFF9B9B))
+            }
+        } else if (!isEditing) {
             Button(onClick = { startEdit(null) }, modifier = Modifier.fillMaxWidth()) {
                 Text("＋ ДОБАВИТЬ ПРОВАЙДЕРА")
             }
@@ -143,7 +171,36 @@ fun AiProvidersScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                 }) { Text("СОХРАНИТЬ") }
             }
         }
-        status?.takeIf { !isEditing }?.let { Text(it, color = ProviderAccent, fontSize = 11.sp) }
+        status?.takeIf { !isEditing && loadError == null }?.let {
+            Text(it, color = ProviderAccent, fontSize = 11.sp)
+        }
+    }
+    if (showResetConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showResetConfirmation = false },
+            title = { Text("Удалить сохранённые настройки?") },
+            text = {
+                Text("Это действие безвозвратно удалит локальную зашифрованную копию провайдеров и API-ключей. Продолжай только если восстановить доступ не удалось и ты готов настроить провайдеры заново.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    try {
+                        store.clear()
+                        settings = ProviderSettings()
+                        loadError = null
+                        isEditing = false
+                        status = "Хранилище очищено. Можно добавить провайдера заново."
+                    } catch (_: Exception) {
+                        loadError = "Не удалось очистить хранилище. Исходные данные не подтверждены как удалённые."
+                    } finally {
+                        showResetConfirmation = false
+                    }
+                }) { Text("УДАЛИТЬ", color = Color(0xFFFF7777)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetConfirmation = false }) { Text("ОТМЕНА") }
+            }
+        )
     }
 }
 
