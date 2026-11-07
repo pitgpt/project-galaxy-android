@@ -127,7 +127,7 @@ class PlaintextDatabaseEncryptorTest {
             db.execSQL("INSERT INTO memory_items VALUES ('r1', 'first memory')")
             db.execSQL("INSERT INTO memory_items VALUES ('r2', 'second memory')")
             db.version = 2
-            db.execSQL("PRAGMA application_id = 1195467864")
+            db.execSQL("PRAGMA application_id = 1195461720")
         }
     }
 
