@@ -102,7 +102,7 @@ fun MemoryManagementScreen(
                     }
                     context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
                         it.write(root.toString(2))
-                    } ?: error("Unable to open export destination")
+                    } ?: kotlin.error("Unable to open export destination")
                 }.onSuccess {
                     exportStatus = "Экспорт памяти сохранён."
                 }.onFailure {
