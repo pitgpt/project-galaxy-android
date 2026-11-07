@@ -357,7 +357,7 @@ private fun HomeScreen(
             modifier = Modifier.fillMaxSize().padding(horizontal = 26.dp, vertical = 22.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Column {
                     Text("PROJECT", color = Muted, fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
