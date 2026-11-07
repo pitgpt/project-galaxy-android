@@ -4,6 +4,16 @@
         <!-- Device-bound secrets and private Galaxy data stay on this device. -->
         <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
         <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
+        <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+        <exclude domain="database" path="galaxy.db" />
+        <exclude domain="database" path="galaxy.db-wal" />
+        <exclude domain="database" path="galaxy.db-shm" />
+        <exclude domain="database" path="galaxy.db-journal" />
+        <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+        <exclude domain="database" path="galaxy.db" />
+        <exclude domain="database" path="galaxy.db-wal" />
+        <exclude domain="database" path="galaxy.db-shm" />
+        <exclude domain="database" path="galaxy.db-journal" />
         <exclude domain="database" path="." />
         <exclude domain="sharedpref" path="galaxy_database_key.xml" />
         <exclude domain="file" path="galaxy-db-migration/" />
