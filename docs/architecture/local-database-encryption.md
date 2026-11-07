@@ -51,17 +51,19 @@ Required sequence:
 
 If any stage fails, keep the original database intact, report a non-destructive error, and allow retry. No destructive fallback such as `fallbackToDestructiveMigration` is acceptable.
 
-## Recommended initial backup policy (pending product confirmation)
+## Selected initial backup policy
 
-Recommended v1: device-only storage. Exclude `galaxy.db`, its WAL/SHM sidecars, the wrapped database-key preferences, and migration temporary files from both cloud backup and device-to-device transfer. Android Auto Backup otherwise includes most app data by default, and Android 12+ uses separate cloud-backup and device-transfer rule sections; legacy devices still require the older `full-backup-content` rules. Verify the exact domain/path exclusions against Android's current Auto Backup documentation and an actual restore/transfer test. [Android Auto Backup documentation](https://developer.android.com/identity/data/autobackup).
+The product decision is now confirmed: v1 uses device-only storage. Conversation history, character profiles, memories, the wrapped SQLCipher key, and migration staging files must not be restored by Android cloud backup or device-to-device transfer. Both Android 11-and-lower legacy rules and Android 12+ cloud/device-transfer rules are configured accordingly. The app manifest targets API 35, so both XML rule formats are required. The XML changes are part of this PR; actual backup/restore behavior still needs device-level validation before release.
+
+V1: device-only storage. Exclude `galaxy.db`, its WAL/SHM sidecars, the wrapped database-key preferences, and migration temporary files from both cloud backup and device-to-device transfer. Android Auto Backup otherwise includes most app data by default, and Android 12+ uses separate cloud-backup and device-transfer rule sections; legacy devices still require the older `full-backup-content` rules. Verify the exact domain/path exclusions against Android's current Auto Backup documentation and an actual restore/transfer test. [Android Auto Backup documentation](https://developer.android.com/identity/data/autobackup).
 
 This means reinstalling or moving phones will not automatically restore conversation history in v1. Add explicit encrypted export/import with a user-controlled recovery secret before promising cross-device recovery.
 
-## Backup and recovery decision — must be settled before shipping
+## Future recovery path
 
 A database encrypted with a key that is device-bound to Android Keystore cannot be restored to another device unless the key is also recoverable.
 
-Two valid product choices exist:
+A future export/import implementation may choose between:
 
 - **Device-only storage:** exclude the database and wrapped key from both cloud backup and device transfer. Add explicit encrypted export/import with a user-controlled recovery secret before promising cross-device recovery.
 - **User-recoverable backup:** introduce a separately designed recovery secret or account-backed key-wrapping protocol. The recovery mechanism must be tested independently and must not depend on copying a non-exportable Keystore key.
