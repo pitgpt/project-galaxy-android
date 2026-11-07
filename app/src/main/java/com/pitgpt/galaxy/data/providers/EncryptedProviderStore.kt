@@ -96,7 +96,11 @@ class EncryptedProviderStore(context: Context) {
     /** Removes unreadable saved data only after an explicit user confirmation in the UI. */
     @Synchronized
     fun clear() {
+        // The user has explicitly confirmed a destructive reset. Remove the ciphertext first,
+        // then retire even an invalidated Keystore key so a fresh key can be generated.
         check(prefs.edit().remove(DATA_KEY).commit()) { "Could not clear provider settings." }
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (store.containsAlias(KEY_ALIAS)) store.deleteEntry(KEY_ALIAS)
     }
 
     private fun existingKey(): SecretKey {
