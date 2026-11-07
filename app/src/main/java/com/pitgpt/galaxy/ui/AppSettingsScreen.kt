@@ -23,7 +23,8 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun AppSettingsScreen(
     onBack: () -> Unit,
-    onOpenProviders: () -> Unit
+    onOpenProviders: () -> Unit,
+    onOpenMemory: () -> Unit
 ) {
     Column(
         Modifier.fillMaxSize().background(Color(0xFF080B18)).padding(20.dp),
@@ -41,6 +42,17 @@ fun AppSettingsScreen(
             color = Color(0xFF9AA8C5),
             fontSize = 13.sp
         )
+        Button(
+            onClick = onOpenMemory,
+            modifier = Modifier.fillMaxWidth().height(58.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Text("ПАМЯТЬ", color = Color.White)
+                Text("Просмотр, экспорт и удаление записей", color = Color(0xFFB8C7E5), fontSize = 11.sp)
+            }
+        }
         Button(
             onClick = onOpenProviders,
             modifier = Modifier.fillMaxWidth().height(58.dp),
