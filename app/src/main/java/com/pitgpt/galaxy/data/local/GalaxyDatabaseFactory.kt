@@ -62,11 +62,13 @@ object GalaxyDatabaseFactory {
             encryptor.complete(pendingMigration)
             return database
         } catch (failure: Exception) {
-            runCatching { database.close() }
+            runCatching { database.close() }.exceptionOrNull()?.let(failure::addSuppressed)
             runCatching { encryptor.rollback(pendingMigration) }
+                .exceptionOrNull()
+                ?.let(failure::addSuppressed)
             passphraseBytes.fill(0)
             throw IllegalStateException(
-                "Galaxy could not open its encrypted local database. The original data was retained where possible.",
+                "Galaxy could not open its encrypted local database. The original data was retained where possible; inspect suppressed recovery errors before retrying.",
                 failure
             )
         }
