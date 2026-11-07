@@ -78,6 +78,7 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: |
+            set +e
             gradle connectedDebugAndroidTest
             test_status=$?
             if [ "$test_status" -ne 0 ]; then
