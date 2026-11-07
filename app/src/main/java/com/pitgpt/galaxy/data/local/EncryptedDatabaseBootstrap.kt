@@ -64,7 +64,6 @@ internal object EncryptedDatabaseBootstrap {
                 }
                 migratePlaintextDatabase(database, temporary, backup, passphrase)
             } finally {
-                passphrase.fill(0)
             }
         }
 
@@ -82,7 +81,6 @@ internal object EncryptedDatabaseBootstrap {
             removeSidecar(backup.path + "-journal")
             return passphrase.toByteArray(Charsets.UTF_8)
         } catch (failure: Exception) {
-            passphrase.fill(0)
             throw failure
         }
     }
