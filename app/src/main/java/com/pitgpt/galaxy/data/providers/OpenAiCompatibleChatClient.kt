@@ -23,6 +23,25 @@ data class ProviderHttpResponse(
     val body: String
 )
 
+private const val MAX_RESPONSE_BYTES = 1_048_576
+
+/** Read at most 1 MiB from an untrusted provider response. */
+private fun readLimitedUtf8(input: java.io.InputStream, maxBytes: Int): String {
+    val output = java.io.ByteArrayOutputStream()
+    val buffer = ByteArray(8 * 1024)
+    var total = 0
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        total += count
+        if (total > maxBytes) {
+            throw java.io.IOException("Provider response exceeded the 1 MiB limit")
+        }
+        output.write(buffer, 0, count)
+    }
+    return output.toString(Charsets.UTF_8.name())
+}
+
 /** Small seam that lets the HTTP implementation be tested without a real API key. */
 fun interface ProviderHttpTransport {
     suspend fun post(url: String, apiKey: String, body: String): ProviderHttpResponse
@@ -54,7 +73,7 @@ class UrlConnectionProviderTransport : ProviderHttpTransport {
                     connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
                     val code = connection.responseCode
                     val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                    val responseBody = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                    val responseBody = stream?.use { readLimitedUtf8(it, MAX_RESPONSE_BYTES) }.orEmpty()
                     continuation.resumeWith(Result.success(ProviderHttpResponse(code, responseBody)))
                 } catch (error: Exception) {
                     continuation.resumeWith(Result.failure(error))
