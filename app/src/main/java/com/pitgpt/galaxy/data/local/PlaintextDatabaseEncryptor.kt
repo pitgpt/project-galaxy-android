@@ -23,6 +23,12 @@ internal class PlaintextDatabaseEncryptor {
         val temporary = File(database.parentFile, "${database.name}.encrypted-tmp")
         val plaintext = hasSqliteHeader(database)
 
+        // Recover sidecars if the process stopped after moving them but before renaming the DB.
+        if (database.exists() && plaintext && !backup.exists()) {
+            restoreSidecar(sidecar(backup, "-wal"), sidecar(database, "-wal"))
+            restoreSidecar(sidecar(backup, "-shm"), sidecar(database, "-shm"))
+        }
+
         if (backup.exists() && !database.exists()) {
             if (temporary.exists()) {
                 verifyEncrypted(temporary, databaseKey, readPlaintextRowCounts(backup))
@@ -35,7 +41,10 @@ internal class PlaintextDatabaseEncryptor {
 
         if (database.exists() && !plaintext) {
             verifyEncrypted(database, databaseKey, null)
-            return if (backup.exists()) PendingMigration(database, backup) else null
+            if (backup.exists()) return PendingMigration(database, backup)
+            sidecar(backup, "-wal").delete()
+            sidecar(backup, "-shm").delete()
+            return null
         }
 
         if (!database.exists()) return null
@@ -52,8 +61,14 @@ internal class PlaintextDatabaseEncryptor {
 
         val backupWal = sidecar(backup, "-wal")
         val backupShm = sidecar(backup, "-shm")
-        moveSidecar(sidecar(database, "-wal"), backupWal)
-        moveSidecar(sidecar(database, "-shm"), backupShm)
+        try {
+            moveSidecar(sidecar(database, "-wal"), backupWal)
+            moveSidecar(sidecar(database, "-shm"), backupShm)
+        } catch (failure: Exception) {
+            restoreSidecar(backupWal, sidecar(database, "-wal"))
+            restoreSidecar(backupShm, sidecar(database, "-shm"))
+            throw failure
+        }
 
         if (!database.renameTo(backup)) {
             restoreSidecar(backupWal, sidecar(database, "-wal"))
@@ -106,7 +121,7 @@ internal class PlaintextDatabaseEncryptor {
             SQLiteDatabase.OPEN_READWRITE
         )
         try {
-            source.rawExecSQL("PRAGMA wal_checkpoint(FULL);")
+            checkpoint(source)
             val rowCounts = readRowCounts(source)
             val passphrase = Base64.encodeToString(databaseKey, Base64.NO_WRAP)
             source.execSQL(
@@ -131,7 +146,7 @@ internal class PlaintextDatabaseEncryptor {
             SQLiteDatabase.OPEN_READWRITE
         )
         return try {
-            database.rawExecSQL("PRAGMA wal_checkpoint(FULL);")
+            checkpoint(database)
             readRowCounts(database)
         } finally {
             database.close()
@@ -164,6 +179,14 @@ internal class PlaintextDatabaseEncryptor {
             }
         } finally {
             database.close()
+        }
+    }
+
+    private fun checkpoint(database: SQLiteDatabase) {
+        database.rawQuery("PRAGMA wal_checkpoint(FULL);", null).use { cursor ->
+            check(cursor.moveToFirst() && cursor.getInt(0) == 0) {
+                "Could not checkpoint the Galaxy database before encryption."
+            }
         }
     }
 
