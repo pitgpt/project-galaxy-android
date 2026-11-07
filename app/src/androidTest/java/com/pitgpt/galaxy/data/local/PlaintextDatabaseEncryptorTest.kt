@@ -71,6 +71,107 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun migrationPreservesTheActualRoomSchemaAndOpensThroughRoom() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        val roomDatabase = androidx.room.Room.databaseBuilder(
+            context,
+            GalaxyDatabase::class.java,
+            databaseFile.absolutePath
+        ).build()
+
+        roomDatabase.openHelper.writableDatabase.apply {
+            execSQL(
+                """
+                INSERT INTO character_profiles (
+                    id, displayName, description, personaDefinition, avatarId,
+                    voiceId, modelProviderId, isBuiltIn, avatarImageUri
+                ) VALUES (
+                    'galaxy.default', 'Galaxy', 'Companion', 'Warm and curious',
+                    'avatar.cosmic', 'voice.warm', 'provider.local', 1, 'content://avatar'
+                )
+                """.trimIndent()
+            )
+            execSQL(
+                """
+                INSERT INTO conversation_messages (
+                    id, characterId, role, content, createdAtEpochMillis
+                ) VALUES ('message-1', 'galaxy.default', 'USER', 'Preserve this message', 123456789)
+                """.trimIndent()
+            )
+            execSQL(
+                """
+                INSERT INTO memory_items (
+                    id, scope, ownerCharacterId, content, importance,
+                    createdAtEpochMillis, updatedAtEpochMillis
+                ) VALUES ('memory-1', 'CHARACTER', 'galaxy.default', 'Preserve this memory', 7, 111, 222)
+                """.trimIndent()
+            )
+        }
+        roomDatabase.close()
+
+        val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        assertNotNull(pending)
+
+        val passphrase = Base64.encodeToString(databaseKey, Base64.NO_WRAP)
+        val encryptedRoom = androidx.room.Room.databaseBuilder(
+            context,
+            GalaxyDatabase::class.java,
+            databaseFile.absolutePath
+        )
+            .openHelperFactory(net.zetetic.database.sqlcipher.SupportOpenHelperFactory(
+                passphrase.toByteArray(Charsets.UTF_8),
+                null,
+                true
+            ))
+            .build()
+
+        try {
+            val db = encryptedRoom.openHelper.writableDatabase
+            db.query(
+                "SELECT displayName, avatarImageUri FROM character_profiles WHERE id = ?",
+                arrayOf("galaxy.default")
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Galaxy", cursor.getString(0))
+                assertEquals("content://avatar", cursor.getString(1))
+            }
+            db.query(
+                "SELECT content, createdAtEpochMillis FROM conversation_messages WHERE id = ?",
+                arrayOf("message-1")
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Preserve this message", cursor.getString(0))
+                assertEquals(123456789L, cursor.getLong(1))
+            }
+            db.query(
+                "SELECT content, importance, ownerCharacterId FROM memory_items WHERE id = ?",
+                arrayOf("memory-1")
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Preserve this memory", cursor.getString(0))
+                assertEquals(7, cursor.getInt(1))
+                assertEquals("galaxy.default", cursor.getString(2))
+            }
+            db.query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+                arrayOf("index_conversation_messages_characterId_createdAtEpochMillis")
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+            }
+            db.query("SELECT identity_hash FROM room_master_table WHERE id = 42").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertTrue(cursor.getString(0).isNotBlank())
+            }
+        } finally {
+            encryptedRoom.close()
+        }
+
+        encryptor.complete(pending)
+        assertFalse(File(directory, "galaxy-test.db.plaintext-backup").exists())
+    }
+
+    @Test
     fun rollbackRestoresOriginalPlaintextDatabase() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
