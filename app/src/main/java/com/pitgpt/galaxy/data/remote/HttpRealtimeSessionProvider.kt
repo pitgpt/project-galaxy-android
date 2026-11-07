@@ -31,10 +31,17 @@ class HttpRealtimeSessionProvider(
         require(connectTimeoutMillis > 0 && readTimeoutMillis > 0)
     }
 
-    override suspend fun createSession(characterId: String, voiceId: String?): RealtimeSessionCredential {
+    override suspend fun createSession(
+        characterId: String,
+        voiceId: String?,
+        personaInstructions: String?
+    ): RealtimeSessionCredential {
         require(characterId.isNotBlank())
         require(!voiceId.isNullOrBlank()) { "A configured voice ID is required" }
         val body = JSONObject().put("character_id", characterId).put("voice_id", voiceId)
+        personaInstructions?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            body.put("persona_instructions", it)
+        }
         val response = request("POST", "/v1/realtime/sessions", body)
         return try {
             RealtimeSessionCredential(

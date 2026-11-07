@@ -15,10 +15,11 @@ class CreateRealtimeSessionTest {
         val provider = FakeProvider(RealtimeSessionCredential("ephemeral-secret", 61_000L, "session-1"))
         val useCase = CreateRealtimeSession(provider, now = { 1_000L })
 
-        val result = useCase("galaxy.default", "voice.warm")
+        val result = useCase("galaxy.default", "voice.warm", "Speak as Galaxy, warm and thoughtful.")
 
         assertEquals("galaxy.default", provider.characterId)
         assertEquals("voice.warm", provider.voiceId)
+        assertEquals("Speak as Galaxy, warm and thoughtful.", provider.personaInstructions)
         assertEquals("ephemeral-secret", result.clientSecret)
         assertEquals(61_000L, result.expiresAtEpochMillis)
     }
@@ -66,6 +67,17 @@ class CreateRealtimeSessionTest {
     }
 
     @Test
+    fun rejectsOversizedPersonaBeforeCallingProvider() {
+        val provider = FakeProvider(RealtimeSessionCredential("secret", 61_000L))
+        val useCase = CreateRealtimeSession(provider, now = { 1_000L })
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { useCase("galaxy.default", "voice.warm", "x".repeat(8_001)) }
+        }
+        assertEquals(null, provider.characterId)
+    }
+
+    @Test
     fun credentialToStringRedactsSecret() {
         val credential = RealtimeSessionCredential("do-not-log-this", 61_000L)
 
@@ -78,13 +90,16 @@ class CreateRealtimeSessionTest {
     ) : RealtimeSessionProvider {
         var characterId: String? = null
         var voiceId: String? = null
+        var personaInstructions: String? = null
 
         override suspend fun createSession(
             characterId: String,
-            voiceId: String?
+            voiceId: String?,
+            personaInstructions: String?
         ): RealtimeSessionCredential {
             this.characterId = characterId
             this.voiceId = voiceId
+            this.personaInstructions = personaInstructions
             return credential
         }
 

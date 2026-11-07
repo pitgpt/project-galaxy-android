@@ -20,12 +20,17 @@ class CreateRealtimeSession(
 
     suspend operator fun invoke(
         characterId: String,
-        voiceId: String?
+        voiceId: String?,
+        personaInstructions: String? = null
     ): RealtimeSessionCredential {
         require(characterId.isNotBlank()) { "Character ID must not be blank" }
         require(voiceId == null || voiceId.isNotBlank()) { "Voice ID must not be blank" }
 
-        val credential = provider.createSession(characterId, voiceId)
+        require(personaInstructions == null || personaInstructions.length <= MAX_PERSONA_INSTRUCTIONS_LENGTH) {
+            "Character persona instructions are too long"
+        }
+
+        val credential = provider.createSession(characterId, voiceId, personaInstructions)
         check(credential.expiresAtEpochMillis - now() > minimumRemainingValidityMillis) {
             "Realtime session credential is expired or too close to expiry"
         }
@@ -34,5 +39,6 @@ class CreateRealtimeSession(
 
     private companion object {
         const val DEFAULT_MINIMUM_REMAINING_VALIDITY_MILLIS = 30_000L
+        const val MAX_PERSONA_INSTRUCTIONS_LENGTH = 8_000
     }
 }
