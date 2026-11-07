@@ -50,7 +50,8 @@ class GenerateCharacterReply(
 
         val completion = client.complete(
             provider = provider,
-            turns = listOf(ChatTurn("system", systemPrompt)) + history
+            turns = listOf(ChatTurn("system", systemPrompt)) + history,
+            temperature = null
         )
         val reply = ConversationMessage(
             id = newId(),
