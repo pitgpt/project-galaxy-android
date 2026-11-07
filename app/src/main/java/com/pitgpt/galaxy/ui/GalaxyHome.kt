@@ -314,7 +314,8 @@ private fun HomeScreen(
     onRetry: () -> Unit,
     onOpenChat: () -> Unit,
     onOpenProfile: () -> Unit,
-    onOpenCharacters: () -> Unit
+    onOpenCharacters: () -> Unit,
+    onOpenProviders: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -404,6 +405,15 @@ private fun HomeScreen(
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Text("ПЕРСОНАЖИ И ПРОФИЛИ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onOpenProviders,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("AI-ПРОВАЙДЕРЫ", fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(10.dp))
             Button(
