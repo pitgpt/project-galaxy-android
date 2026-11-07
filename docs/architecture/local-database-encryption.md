@@ -19,7 +19,7 @@ Use the maintained `net.zetetic:sqlcipher-android` library with Room's `SupportO
 
 Keep Room and the existing DAO/repository model. SQLCipher encrypts the complete database file, including character profiles, message content, memory content, indexes, and schema metadata. This avoids scattering encryption/decryption logic across entities and repositories.
 
-The SQLCipher native library must be loaded before opening the database. The Room 2 integration uses `SupportOpenHelperFactory`. Pin and verify an exact release compatible with the project's Android Gradle Plugin, Room 2.7.0, supported ABIs, and 16 KB page-size requirements before implementation.
+The SQLCipher native library must be loaded before opening the database. The Room 2 integration uses `SupportOpenHelperFactory` with `androidx.sqlite`. The official repository currently lists v4.20.0 as the latest stable release; v5.0.0 is still a beta and should not be selected for this migration. The v4.19.1 release notes explicitly update the Android build to compile/target SDK 36, matching this project's current SDK level, while the current 4.20.0 release is a maintenance update. Before pinning 4.20.0, verify its published Maven artifact, compile SDK requirement, ABI contents, and 16 KB page-size alignment in CI. The library supports API 23+ and the project's minSdk 26 is within that range. [Official releases](https://github.com/sqlcipher/sqlcipher-android/releases).
 
 ## Key management
 
@@ -41,15 +41,21 @@ Required sequence:
 1. Acquire a process-wide migration lock and ensure no Room instance or DAO operation is active.
 2. Checkpoint and close the old database cleanly so its WAL is not omitted.
 3. Preserve the original database and any required sidecar state until the encrypted copy is verified.
-4. Create a new encrypted temporary database using the newly generated key.
-5. Export the complete schema and data into the encrypted database.
+4. Create a new encrypted temporary database using the newly generated key. Use SQLCipher's documented plaintext-to-encrypted `ATTACH DATABASE ... KEY ...` plus `sqlcipher_export()` flow, or an equivalently verified library-supported export API. The source must remain read-only during export where practical.
+5. Export the complete schema and data into the encrypted database. Exercise the exact `rawExecSQL`/query behavior against the pinned SQLCipher Android version in an instrumentation test; do not suppress export errors.
 6. Verify the encrypted copy can be reopened with the key, passes SQLCipher integrity checks, has the expected Room schema version, and has matching row counts for every table (characters, messages, memories).
 7. Only after verification, atomically promote the encrypted file into the canonical database path using same-filesystem renames.
-8. Retain a clearly marked rollback copy only during the migration window. On the next successful startup, verify the encrypted database again and securely remove the temporary plaintext rollback copy.
+8. Retain a clearly marked rollback copy only during the migration window. On the next successful startup, verify the encrypted database again and remove the temporary plaintext rollback copy. Do not claim guaranteed secure erasure: flash storage wear-leveling and filesystem behavior make physical overwrite guarantees unreliable. Keep the rollback window short, restrict file permissions, and never include plaintext temporary files in backup.
 9. Record migration state so an interrupted migration can deterministically resume or roll back. Never respond to an unknown/partial state by deleting either database.
 10. Run Room migrations on the encrypted database after conversion, not during the plaintext export.
 
 If any stage fails, keep the original database intact, report a non-destructive error, and allow retry. No destructive fallback such as `fallbackToDestructiveMigration` is acceptable.
+
+## Recommended initial backup policy (pending product confirmation)
+
+Recommended v1: device-only storage. Exclude `galaxy.db`, its WAL/SHM sidecars, the wrapped database-key preferences, and migration temporary files from both cloud backup and device-to-device transfer. Android Auto Backup otherwise includes most app data by default, and Android 12+ uses separate cloud-backup and device-transfer rule sections; legacy devices still require the older `full-backup-content` rules. Verify the exact domain/path exclusions against Android's current Auto Backup documentation and an actual restore/transfer test. [Android Auto Backup documentation](https://developer.android.com/identity/data/autobackup).
+
+This means reinstalling or moving phones will not automatically restore conversation history in v1. Add explicit encrypted export/import with a user-controlled recovery secret before promising cross-device recovery.
 
 ## Backup and recovery decision — must be settled before shipping
 
@@ -72,7 +78,7 @@ Do not ship a state where Android silently backs up the encrypted database but o
 - SQLCipher integrity check succeeds after migration and after normal writes.
 - Database file does not expose the SQLite header/plaintext table content.
 - WAL checkpoint/close and sidecar handling are correct.
-- Cloud backup and device transfer match the chosen recovery policy.
+- Cloud backup and device transfer match the chosen recovery policy on Android 11 and lower and Android 12+.
 - Existing Room repository and DAO tests continue to pass.
 
 ## Acceptance criteria
