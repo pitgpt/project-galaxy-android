@@ -90,3 +90,27 @@ Do not ship a state where Android silently backs up the encrypted database but o
 - No silent key replacement or destructive migration fallback exists.
 - Backup/recovery behavior is explicit, documented, and tested.
 - CI builds and tests all supported ABI variants; an installable debug APK is produced.
+
+
+## Implemented on the working branch
+
+- SQLCipher for Android 4.20.0 is integrated with Room 2.7.0 using `SupportOpenHelperFactory`.
+- A 256-bit random database passphrase is wrapped by a dedicated AES-GCM key in Android Keystore. The wrapped key is stored in private preferences.
+- If a database exists but its wrapped key is missing or cannot be decrypted, startup fails closed. It does not create a replacement key.
+- Existing plaintext SQLite databases are checkpointed and exported into a separate encrypted temporary file with SQLCipher's documented `sqlcipher_export()` mechanism.
+- Before promotion, the encrypted copy is reopened and checked for `integrity_check`, table row counts, `user_version`, and `application_id`.
+- The plaintext original is renamed to a rollback file only after the encrypted copy passes verification. The rollback copy is kept until Room opens the encrypted database successfully.
+- Recovery paths handle process interruption before and after promotion; WAL/SHM sidecars are preserved or restored where applicable.
+- Android cloud backup and device-to-device transfer exclude the complete database domain and the wrapped database-key preferences.
+
+## Validation still required
+
+- CI compilation and tests for the current PR head.
+- Physical-device/emulator verification of SQLCipher native library loading and Room open.
+- Fresh encrypted install and migration from schema versions 1 and 2.
+- Process interruption at each migration/promotion stage, including WAL and SHM sidecars.
+- Missing, corrupted, and Keystore-invalidated wrapped-key scenarios.
+- Backup and device-transfer behavior on supported Android versions.
+- Verify the plaintext rollback file is removed after successful Room open and remains recoverable on every failure path.
+
+Do not remove the Draft status until the above checks have passed.
