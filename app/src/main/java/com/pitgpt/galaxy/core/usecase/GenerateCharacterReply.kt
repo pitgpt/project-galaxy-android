@@ -4,8 +4,8 @@ import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.repository.ConversationRepository
 import com.pitgpt.galaxy.data.providers.ChatTurn
-import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
 import com.pitgpt.galaxy.data.providers.OpenAiCompatibleChatClient
+import com.pitgpt.galaxy.data.providers.ProviderSettingsRepository
 import com.pitgpt.galaxy.data.providers.TextChatProvider
 import java.util.UUID
 
@@ -15,7 +15,7 @@ import java.util.UUID
  */
 class GenerateCharacterReply(
     private val conversations: ConversationRepository,
-    private val providerStore: EncryptedProviderStore,
+    private val providerStore: ProviderSettingsRepository,
     private val client: TextChatProvider = OpenAiCompatibleChatClient(),
     private val newId: () -> String = { UUID.randomUUID().toString() },
     private val now: () -> Long = { System.currentTimeMillis() }
