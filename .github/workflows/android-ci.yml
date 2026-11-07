@@ -54,8 +54,33 @@ jobs:
       - name: Run backend tests
         run: pytest -q
 
+
+  instrumented-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6.2.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6.4.1
+        with:
+          gradle-version: '8.11.1'
+      - name: Run SQLCipher migration tests on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: gradle connectedDebugAndroidTest
+
   build:
-    needs: [test, backend-test]
+    needs: [test, backend-test, instrumented-test]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
