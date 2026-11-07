@@ -2,7 +2,7 @@
 
 ## Status
 
-Design only. No database code, schema, backup rules, or user data are changed by this document.
+Implementation in progress on this Draft PR. The SQLCipher dependency, Keystore-wrapped key store, plaintext-to-encrypted bootstrap, Room open-helper integration, and Android backup exclusions are now present. Device-level migration and restore tests are still required before release.
 
 ## Current state
 
@@ -53,7 +53,7 @@ If any stage fails, keep the original database intact, report a non-destructive 
 
 ## Selected initial backup policy
 
-The product decision is now confirmed: v1 uses device-only storage. Conversation history, character profiles, memories, the wrapped SQLCipher key, and migration staging files must not be restored by Android cloud backup or device-to-device transfer. Both Android 11-and-lower legacy rules and Android 12+ cloud/device-transfer rules are configured accordingly. The app manifest targets API 35, so both XML rule formats are required. The XML changes are part of this PR; actual backup/restore behavior still needs device-level validation before release.
+The product decision is confirmed: v1 uses device-only storage. Conversation history, character profiles, memories, the wrapped SQLCipher key, and migration staging files must not be restored by Android cloud backup or device-to-device transfer. Both Android 11-and-lower legacy rules and Android 12+ cloud/device-transfer rules are configured accordingly. The app manifest targets API 35, so both XML rule formats are required. The XML changes are implemented in this PR; actual backup/restore behavior still needs device-level validation before release.
 
 V1: device-only storage. Exclude `galaxy.db`, its WAL/SHM sidecars, the wrapped database-key preferences, and migration temporary files from both cloud backup and device-to-device transfer. Android Auto Backup otherwise includes most app data by default, and Android 12+ uses separate cloud-backup and device-transfer rule sections; legacy devices still require the older `full-backup-content` rules. Verify the exact domain/path exclusions against Android's current Auto Backup documentation and an actual restore/transfer test. [Android Auto Backup documentation](https://developer.android.com/identity/data/autobackup).
 
