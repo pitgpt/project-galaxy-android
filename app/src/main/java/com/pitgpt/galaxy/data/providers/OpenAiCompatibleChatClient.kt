@@ -1,7 +1,7 @@
 package com.pitgpt.galaxy.data.providers
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -30,7 +30,7 @@ fun interface ProviderHttpTransport {
 
 class UrlConnectionProviderTransport : ProviderHttpTransport {
     override suspend fun post(url: String, apiKey: String, body: String): ProviderHttpResponse =
-        withContext(Dispatchers.IO) {
+        suspendCancellableCoroutine { continuation ->
             val connection = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 connectTimeout = 15_000
@@ -41,15 +41,27 @@ class UrlConnectionProviderTransport : ProviderHttpTransport {
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
             }
-            try {
-                connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-                val code = connection.responseCode
-                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                val responseBody = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-                ProviderHttpResponse(code, responseBody)
-            } finally {
-                connection.disconnect()
-            }
+
+            // HttpURLConnection is blocking. Disconnect it as soon as the caller cancels,
+            // so a cancelled chat request does not keep waiting for the network timeout.
+            continuation.invokeOnCancellation { connection.disconnect() }
+            Dispatchers.IO.dispatch(continuation.context, Runnable {
+                if (!continuation.isActive) {
+                    connection.disconnect()
+                    return@Runnable
+                }
+                try {
+                    connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                    val code = connection.responseCode
+                    val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                    val responseBody = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                    continuation.resumeWith(Result.success(ProviderHttpResponse(code, responseBody)))
+                } catch (error: Exception) {
+                    continuation.resumeWith(Result.failure(error))
+                } finally {
+                    connection.disconnect()
+                }
+            })
         }
 }
 
