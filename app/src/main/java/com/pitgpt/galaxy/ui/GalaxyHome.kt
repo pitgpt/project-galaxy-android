@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
@@ -354,7 +356,8 @@ private fun HomeScreen(
         )
     ) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 26.dp, vertical = 22.dp),
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = 26.dp, vertical = 22.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
@@ -380,8 +383,8 @@ private fun HomeScreen(
                     Text(BuildConfig.GIT_SHA, color = Color(0xFF657AAB), fontSize = 8.sp)
                 }
             }
-            Spacer(Modifier.weight(1f))
-            Box(Modifier.size(238.dp), contentAlignment = Alignment.Center) {
+            Spacer(Modifier.height(24.dp))
+            Box(Modifier.size(208.dp), contentAlignment = Alignment.Center) {
                 Box(Modifier.size(230.dp).border(1.dp, Color(0x447C8DDB), CircleShape)
                     .padding(13.dp).border(1.dp, Color(0x337FCBFF), CircleShape))
                 Box(Modifier.size(174.dp).background(
@@ -398,7 +401,7 @@ private fun HomeScreen(
                     ?: "Твоё личное пространство для мыслей, идей и разговоров.",
                 color = Muted, fontSize = 15.sp, lineHeight = 23.sp, textAlign = TextAlign.Center
             )
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(24.dp))
             Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp))
                     .background(Color(0xAA18213B))
