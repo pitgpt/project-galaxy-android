@@ -12,6 +12,9 @@ interface GeneratedImageRepository {
         imageBytes: ByteArray
     ): StoredGeneratedImage
 
+    /** Returns the already-persisted result for a generation request, if present. */
+    suspend fun getForRequest(requestId: String): StoredGeneratedImage?
+
     suspend fun get(assetId: String): StoredGeneratedImage?
     suspend fun listForConversation(conversationId: String): List<StoredGeneratedImage>
     suspend fun read(assetId: String): ByteArray
