@@ -77,6 +77,23 @@ class RoomGeneratedImageRepositoryTest {
     }
 
     @Test
+    fun conflictingResultForSameRequestDoesNotReplaceOriginalCiphertext() = runBlocking {
+        val request = request("conversation-a")
+        val originalBytes = ByteArray(48) { (it * 5).toByte() }
+        val differentBytes = ByteArray(48) { (it * 7).toByte() }
+        val original = repository.save(request, asset(request.id, originalBytes), originalBytes)
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                repository.save(request, asset(request.id, differentBytes), differentBytes)
+            }
+        }
+
+        assertArrayEquals(originalBytes, repository.read(original.assetId))
+        assertEquals(1, mediaDirectory.listFiles { file -> file.extension == "gcm" }?.size)
+    }
+
+    @Test
     fun listsOnlyImagesForRequestedConversation() = runBlocking {
         val first = request("conversation-a")
         val second = request("conversation-b")
