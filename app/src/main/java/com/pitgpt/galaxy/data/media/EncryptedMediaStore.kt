@@ -8,9 +8,7 @@ import java.io.FileOutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
-import java.util.UUID
 import javax.crypto.Cipher
-import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 data class EncryptedMediaAsset(
@@ -46,12 +44,15 @@ class EncryptedMediaStore(
         val destination = assetFile(assetId)
         check(!destination.exists()) { "A media asset with this ID already exists." }
 
+        // Never generate a replacement key when committed ciphertext already exists.
+        val key = if (hasStoredAssets()) keyProvider.getExistingKey() else keyProvider.getOrCreateKey()
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, keyProvider.getOrCreateKey())
+        cipher.init(Cipher.ENCRYPT_MODE, key)
+        require(cipher.iv.size == IV_BYTES) { "The media encryption provider returned an invalid IV." }
         cipher.updateAAD(associatedData(assetId, mimeType))
         val encrypted = cipher.doFinal(plaintext)
 
-        val temporary = File.createTempFile("galaxy-media-", ".tmp", directory)
+        val temporary = File.createTempFile(TEMP_PREFIX, ".tmp", directory)
         try {
             FileOutputStream(temporary).use { output ->
                 output.write(MAGIC)
@@ -135,7 +136,11 @@ class EncryptedMediaStore(
         check(directory.isDirectory) { "The encrypted media path is not a directory." }
     }
 
-    private fun assetFile(assetId: String): File = File(directory, "$assetId.gcm")
+    private fun hasStoredAssets(): Boolean =
+        directory.listFiles { file -> file.isFile && file.name.endsWith(FILE_EXTENSION) }
+            ?.isNotEmpty() == true
+
+    private fun assetFile(assetId: String): File = File(directory, "$assetId$FILE_EXTENSION")
 
     private fun validateAssetId(assetId: String) {
         require(ASSET_ID_PATTERN.matches(assetId)) { "Media asset ID is invalid." }
@@ -160,6 +165,8 @@ class EncryptedMediaStore(
         private const val TAG_BITS = 128
         private const val GCM_TAG_BYTES = 16
         private const val HEADER_BYTES = 4 + 1 + IV_BYTES
+        private const val FILE_EXTENSION = ".gcm"
+        private const val TEMP_PREFIX = "galaxy-media-"
         private val MAGIC = byteArrayOf(0x47, 0x4C, 0x58, 0x4D) // GLXM
         private val ASSET_ID_PATTERN = Regex("[A-Za-z0-9_-]{1,128}")
         private val SUPPORTED_MIME_TYPES = setOf("image/png", "image/jpeg", "image/webp")
