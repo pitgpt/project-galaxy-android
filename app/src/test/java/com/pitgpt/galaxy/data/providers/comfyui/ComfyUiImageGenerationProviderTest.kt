@@ -69,7 +69,7 @@ class ComfyUiImageGenerationProviderTest {
         assertThrows(IllegalStateException::class.java) {
             runBlocking { provider(transport, store).cancel("prompt-123") }
         }
-        assertFalse(store.get("prompt-123")!!.cancelled)
+        assertFalse(runBlocking { store.get("prompt-123")!!.cancelled })
         assertEquals(listOf("GET", "POST", "GET", "GET"), transport.methods)
     }
 
