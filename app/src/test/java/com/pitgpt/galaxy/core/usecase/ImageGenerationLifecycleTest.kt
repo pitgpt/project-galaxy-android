@@ -56,9 +56,30 @@ class ImageGenerationLifecycleTest {
     }
 
     @Test
+    fun refusesRunningCancellationWhenProviderOnlySupportsQueuedCancellation() {
+        val provider = FakeProvider(
+            capabilities = capabilities().copy(
+                supportsCancellation = false,
+                supportsQueuedCancellation = true,
+                supportsRunningCancellation = false
+            ),
+            status = ImageGenerationStatus(ImageGenerationState.RUNNING)
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { CancelImageGeneration(provider)("job-running-unsupported") }
+        }
+        assertEquals(null, provider.cancelledJobId)
+    }
+
+    @Test
     fun refusesCancellationWhenProviderDoesNotSupportIt() {
         val provider = FakeProvider(
-            capabilities = capabilities().copy(supportsCancellation = false),
+            capabilities = capabilities().copy(
+                supportsCancellation = false,
+                supportsQueuedCancellation = false,
+                supportsRunningCancellation = false
+            ),
             status = ImageGenerationStatus(ImageGenerationState.RUNNING)
         )
 
