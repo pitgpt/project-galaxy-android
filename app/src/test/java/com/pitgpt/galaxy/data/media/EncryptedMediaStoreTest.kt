@@ -108,6 +108,18 @@ class EncryptedMediaStoreTest {
         assertEquals(1, keyProvider.createCalls)
     }
 
+    @Test
+    fun missingKeyCannotBeReplacedWhileEncryptedAssetsExist() {
+        store.save("asset_09", "image/png", byteArrayOf(9, 10))
+        keyProvider.available = false
+
+        assertThrows(IllegalStateException::class.java) {
+            store.save("asset_10", "image/png", byteArrayOf(10, 11))
+        }
+        assertEquals(1, keyProvider.createCalls)
+        assertFalse(store.contains("asset_10"))
+    }
+
     private class FakeKeyProvider(
         private val key: SecretKey
     ) : MediaEncryptionKeyProvider {
