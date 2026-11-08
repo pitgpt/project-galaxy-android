@@ -79,4 +79,55 @@ class GalaxyDatabaseMigrationTest {
             helper.close()
         }
     }
+
+    @Test
+    fun freshInstallMayCreateDatabaseKey() {
+        requireDatabaseKeyCreationAllowed(
+            databaseExists = false,
+            databaseIsPlaintext = false,
+            encryptedTemporaryExists = false
+        )
+    }
+
+    @Test
+    fun plaintextDatabaseMayCreateDatabaseKeyBeforeMigration() {
+        requireDatabaseKeyCreationAllowed(
+            databaseExists = true,
+            databaseIsPlaintext = true,
+            encryptedTemporaryExists = false
+        )
+    }
+
+    @Test
+    fun missingKeyIsNotRecreatedWhenOnlyEncryptedTemporaryCandidateRemains() {
+        assertKeyCreationRejected {
+            requireDatabaseKeyCreationAllowed(
+                databaseExists = false,
+                databaseIsPlaintext = false,
+                encryptedTemporaryExists = true
+            )
+        }
+    }
+
+    @Test
+    fun missingKeyIsNotRecreatedForAnExistingEncryptedDatabase() {
+        assertKeyCreationRejected {
+            requireDatabaseKeyCreationAllowed(
+                databaseExists = true,
+                databaseIsPlaintext = false,
+                encryptedTemporaryExists = false
+            )
+        }
+    }
+
+    private fun assertKeyCreationRejected(block: () -> Unit) {
+        var rejected = false
+        try {
+            block()
+        } catch (_: IllegalStateException) {
+            rejected = true
+        }
+        assertTrue(rejected)
+    }
+
 }

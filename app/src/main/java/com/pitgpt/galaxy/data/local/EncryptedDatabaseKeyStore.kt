@@ -24,13 +24,15 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
     )
 
     @Synchronized
-    fun getOrCreateDatabaseKey(databaseExists: Boolean, databaseIsPlaintext: Boolean): ByteArray {
+    fun getOrCreateDatabaseKey(
+        databaseExists: Boolean,
+        databaseIsPlaintext: Boolean,
+        encryptedTemporaryExists: Boolean
+    ): ByteArray {
         val encoded = preferences.getString(WRAPPED_KEY, null)
         if (encoded != null) return decrypt(encoded)
 
-        check(!databaseExists || databaseIsPlaintext) {
-            "The encrypted Galaxy database exists, but its device-bound key is missing."
-        }
+        requireDatabaseKeyCreationAllowed(databaseExists, databaseIsPlaintext, encryptedTemporaryExists)
 
         val key = ByteArray(DATABASE_KEY_BYTES).also(SecureRandom()::nextBytes)
         try {
@@ -100,5 +102,24 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
         const val WRAPPING_KEY_BITS = 256
         const val IV_BYTES = 12
         const val TAG_BITS = 128
+    }
+}
+
+
+/**
+ * A missing wrapping key is recoverable only while the canonical source is plaintext,
+ * or on a fresh install. An encrypted temporary candidate may be the only recoverable
+ * database after a crash between preserving the plaintext backup and promotion.
+ */
+internal fun requireDatabaseKeyCreationAllowed(
+    databaseExists: Boolean,
+    databaseIsPlaintext: Boolean,
+    encryptedTemporaryExists: Boolean
+) {
+    check(!databaseExists || databaseIsPlaintext) {
+        "The encrypted Galaxy database exists, but its device-bound key is missing."
+    }
+    check(!encryptedTemporaryExists || (databaseExists && databaseIsPlaintext)) {
+        "An encrypted Galaxy migration candidate exists, but its device-bound key is missing."
     }
 }

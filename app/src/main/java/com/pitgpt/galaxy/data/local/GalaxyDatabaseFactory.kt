@@ -33,8 +33,12 @@ object GalaxyDatabaseFactory {
 
         val databaseExists = databaseFile.exists()
         val databaseIsPlaintext = encryptor.isPlaintextDatabase(databaseFile)
+        val encryptedTemporaryExists = File(
+            databaseFile.parentFile,
+            "${databaseFile.name}.encrypted-tmp"
+        ).exists()
         val databaseKey = EncryptedDatabaseKeyStore(context)
-            .getOrCreateDatabaseKey(databaseExists, databaseIsPlaintext)
+            .getOrCreateDatabaseKey(databaseExists, databaseIsPlaintext, encryptedTemporaryExists)
         val pendingMigration = try {
             encryptor.migrateIfNeeded(databaseFile, databaseKey)
         } catch (failure: Exception) {
