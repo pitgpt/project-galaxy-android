@@ -304,7 +304,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                                 width = optionalNode(widthNodeId, widthInputName),
                                 height = optionalNode(heightNodeId, heightInputName),
                                 seed = optionalNode(seedNodeId, seedInputName)
-                            )
+                            ).also { it.validateMappings() }
                         }.getOrNull()
                         if (template == null) {
                             status = "Проверь JSON, ID шаблона и соответствие ID узлов/имён входов."
