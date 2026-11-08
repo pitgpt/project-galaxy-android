@@ -172,6 +172,33 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun recoversWhenProcessStopsAfterPreservingPlaintextButBeforeEncryptedPromotion() {
+        createPlaintextDatabase()
+        val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        assertNotNull(pending)
+
+        // Recreate the on-disk state after the plaintext file was moved to its backup,
+        // but before the encrypted temporary file was promoted to the canonical path.
+        val encryptedTemporary = File(directory, "galaxy-test.db.encrypted-tmp")
+        assertTrue(databaseFile.renameTo(encryptedTemporary))
+        assertTrue(File(directory, "galaxy-test.db.plaintext-backup").exists())
+        assertFalse(databaseFile.exists())
+
+        val recovered = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+
+        assertNotNull(recovered)
+        assertTrue(databaseFile.exists())
+        assertFalse(encryptor.isPlaintextDatabase(databaseFile))
+        openEncrypted(databaseFile, databaseKey).use { encrypted ->
+            assertEquals(2L, countRows(encrypted, "character_profiles"))
+            assertEquals(3L, countRows(encrypted, "conversation_messages"))
+            assertEquals(2L, countRows(encrypted, "memory_items"))
+        }
+        encryptor.complete(recovered)
+        assertFalse(File(directory, "galaxy-test.db.plaintext-backup").exists())
+    }
+
+    @Test
     fun rollbackRestoresOriginalPlaintextDatabase() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
