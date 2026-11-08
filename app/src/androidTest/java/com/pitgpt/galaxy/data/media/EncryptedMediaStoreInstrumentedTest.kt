@@ -5,6 +5,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.R
 import java.io.File
 import java.nio.file.Files
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import org.junit.After
@@ -12,6 +13,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -69,6 +71,20 @@ class EncryptedMediaStoreInstrumentedTest {
             )
         )
         assertArrayEquals(plaintext, store.read(metadata.assetId, metadata.mimeType))
+    }
+
+    @Test
+    fun rejectsTamperedCiphertextWithAndroidKeystoreKey() {
+        val plaintext = "authenticated-media-payload".toByteArray()
+        val metadata = store.save("tampered_asset", "image/png", plaintext)
+        val ciphertextFile = File(directory, "${metadata.assetId}.gcm")
+        val tampered = ciphertextFile.readBytes()
+        tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0x01).toByte()
+        ciphertextFile.writeBytes(tampered)
+
+        assertThrows(AEADBadTagException::class.java) {
+            store.read(metadata.assetId, metadata.mimeType)
+        }
     }
 
     @Test
