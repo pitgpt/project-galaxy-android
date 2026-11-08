@@ -1,8 +1,6 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
-import android.content.Context
 import androidx.room.Room
-import androidx.test.core.app.ApplicationProvider
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -12,14 +10,18 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 
+@RunWith(RobolectricTestRunner::class)
 class RoomComfyUiJobStoreTest {
     private lateinit var database: GalaxyDatabase
     private lateinit var store: RoomComfyUiJobStore
 
     @Before
     fun setUp() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
+        val context = RuntimeEnvironment.getApplication()
         database = Room.inMemoryDatabaseBuilder(context, GalaxyDatabase::class.java)
             .allowMainThreadQueries()
             .build()
@@ -46,7 +48,7 @@ class RoomComfyUiJobStoreTest {
     }
 
     @Test
-    fun cancellationFlagSurvivesStoreRead() = runBlocking {
+    fun cancellationFlagIsPersisted() = runBlocking {
         store.put(ComfyUiJobRecord("prompt-123", "request-456", 1234L))
 
         store.markCancelled("prompt-123")
