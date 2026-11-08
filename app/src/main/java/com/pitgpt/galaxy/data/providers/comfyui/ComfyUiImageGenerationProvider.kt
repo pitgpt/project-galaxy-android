@@ -84,6 +84,9 @@ class ComfyUiImageGenerationProvider(
         val queue = client.queue(config)
         check(providerJobId !in queue.runningPromptIds) { "ComfyUI job started before queued cancellation completed" }
         check(providerJobId !in queue.pendingPromptIds) { "ComfyUI did not confirm removal of the queued job" }
+        check(!client.hasHistory(config, providerJobId)) {
+            "ComfyUI job completed or entered history while queued cancellation was being verified"
+        }
         jobs.markCancelled(providerJobId)
     }
 
