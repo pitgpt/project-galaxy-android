@@ -31,3 +31,24 @@ data class ComfyUiSavedSettings(
             "vpnConfigured=${vpnBaseUrl != null}, " +
             "vpnTokenConfigured=${vpnBearerToken != null}, preference=$preference)"
 }
+
+/**
+ * Reuses a saved bearer token only when the endpoint origin is unchanged. A token must never be
+ * silently forwarded to a different host or port after the user edits an endpoint.
+ */
+internal fun resolveComfyUiBearerToken(
+    endpoint: String?,
+    enteredToken: String?,
+    clearSavedToken: Boolean,
+    previousEndpoint: String?,
+    previousToken: String?
+): String? {
+    if (endpoint.isNullOrBlank() || clearSavedToken) return null
+    enteredToken?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+
+    val nextOrigin = runCatching { ComfyUiConnectionConfig(endpoint).normalizedBaseUrl }.getOrNull()
+    val previousOrigin = previousEndpoint?.let {
+        runCatching { ComfyUiConnectionConfig(it).normalizedBaseUrl }.getOrNull()
+    }
+    return previousToken.takeIf { nextOrigin != null && nextOrigin == previousOrigin }
+}
