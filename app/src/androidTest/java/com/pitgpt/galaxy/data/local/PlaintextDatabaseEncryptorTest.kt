@@ -199,6 +199,50 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun restoresWalAndShmSidecarsMovedBeforePlaintextDatabasePromotion() {
+        createPlaintextDatabase()
+        val walDatabase = FrameworkSQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READWRITE
+        )
+
+        val pending = try {
+            assertTrue(walDatabase.enableWriteAheadLogging())
+            walDatabase.execSQL("PRAGMA wal_autocheckpoint=0")
+            walDatabase.execSQL("INSERT INTO character_profiles VALUES ('wal-only', 'WAL record')")
+
+            val wal = File(databaseFile.path + "-wal")
+            val shm = File(databaseFile.path + "-shm")
+            assertTrue(wal.exists() && wal.length() > 0)
+            assertTrue(shm.exists() && shm.length() > 0)
+
+            // Simulate process death after both sidecars were moved, but before the
+            // plaintext database itself was renamed to its rollback backup.
+            val backup = File(directory, "galaxy-test.db.plaintext-backup")
+            assertTrue(wal.renameTo(File(backup.path + "-wal")))
+            assertTrue(shm.renameTo(File(backup.path + "-shm")))
+            assertFalse(wal.exists())
+            assertFalse(shm.exists())
+
+            encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        } finally {
+            walDatabase.close()
+        }
+
+        assertNotNull(pending)
+        assertFalse(encryptor.isPlaintextDatabase(databaseFile))
+        openEncrypted(databaseFile, databaseKey).use { encrypted ->
+            assertEquals(3L, countRows(encrypted, "character_profiles"))
+            assertEquals(3L, countRows(encrypted, "conversation_messages"))
+            assertEquals(2L, countRows(encrypted, "memory_items"))
+        }
+
+        encryptor.complete(pending)
+        assertFalse(File(directory, "galaxy-test.db.plaintext-backup").exists())
+    }
+
+    @Test
     fun rollbackRestoresOriginalPlaintextDatabase() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
