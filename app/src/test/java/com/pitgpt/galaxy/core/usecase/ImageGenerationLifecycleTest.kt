@@ -44,6 +44,18 @@ class ImageGenerationLifecycleTest {
     }
 
     @Test
+    fun cancelsRunningJobWhenProviderSupportsCancellation() = runBlocking {
+        val provider = FakeProvider(
+            capabilities = capabilities().copy(supportsCancellation = true),
+            status = ImageGenerationStatus(ImageGenerationState.RUNNING, progressPercent = 45)
+        )
+
+        CancelImageGeneration(provider)("job-running")
+
+        assertEquals("job-running", provider.cancelledJobId)
+    }
+
+    @Test
     fun refusesCancellationWhenProviderDoesNotSupportIt() {
         val provider = FakeProvider(
             capabilities = capabilities().copy(supportsCancellation = false),
@@ -111,6 +123,18 @@ class ImageGenerationLifecycleTest {
 
         assertThrows(IllegalStateException::class.java) {
             runBlocking { GetGeneratedImageAsset(provider)("job-8", "request-1") }
+        }
+    }
+
+    @Test
+    fun rejectsAssetWithUnsupportedDimensions() {
+        val provider = FakeProvider(
+            status = ImageGenerationStatus(ImageGenerationState.COMPLETED),
+            asset = asset().copy(width = 4096)
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { GetGeneratedImageAsset(provider)("job-9", "request-1") }
         }
     }
 
