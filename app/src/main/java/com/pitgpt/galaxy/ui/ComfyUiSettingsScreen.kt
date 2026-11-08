@@ -291,35 +291,43 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                 Button(
                     enabled = !saving && !checking && !loading && !loadFailed && !importingWorkflow,
                     onClick = {
-                        val template = runCatching {
-                            fun optionalNode(nodeId: String, inputName: String): ComfyUiNodeInput? {
-                                if (nodeId.isBlank()) return null
-                                return ComfyUiNodeInput(nodeId.trim(), inputName.trim())
-                            }
-                            ComfyUiWorkflowTemplate(
-                                id = workflowId.trim(),
-                                workflowJson = workflowJson,
-                                positivePrompt = ComfyUiNodeInput(positiveNodeId.trim(), positiveInputName.trim()),
-                                negativePrompt = optionalNode(negativeNodeId, negativeInputName),
-                                width = optionalNode(widthNodeId, widthInputName),
-                                height = optionalNode(heightNodeId, heightInputName),
-                                seed = optionalNode(seedNodeId, seedInputName)
-                            ).also { it.validateMappings() }
-                        }.getOrNull()
-                        if (template == null) {
-                            status = "Проверь JSON, ID шаблона и соответствие ID узлов/имён входов."
-                        } else {
-                            saving = true
-                            scope.launch {
-                                try {
+                        saving = true
+                        scope.launch {
+                            try {
+                                val template = try {
+                                    buildComfyUiWorkflowTemplate(
+                                        id = workflowId,
+                                        workflowJson = workflowJson,
+                                        positiveNodeId = positiveNodeId,
+                                        positiveInputName = positiveInputName,
+                                        negativeNodeId = negativeNodeId,
+                                        negativeInputName = negativeInputName,
+                                        widthNodeId = widthNodeId,
+                                        widthInputName = widthInputName,
+                                        heightNodeId = heightNodeId,
+                                        heightInputName = heightInputName,
+                                        seedNodeId = seedNodeId,
+                                        seedInputName = seedInputName
+                                    )
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (_: Exception) {
+                                    null
+                                }
+
+                                if (template == null) {
+                                    status = "Проверь JSON, ID шаблона и соответствие ID узлов/имён входов."
+                                } else {
                                     val current = settingsIo.load()
                                     settingsIo.save(current.copy(comfyUiWorkflow = template))
                                     status = "Workflow сохранён в зашифрованном хранилище."
-                                } catch (_: Exception) {
-                                    status = "Не удалось сохранить workflow. Проверь Android Keystore."
-                                } finally {
-                                    saving = false
                                 }
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                status = "Не удалось сохранить workflow. Проверь Android Keystore."
+                            } finally {
+                                saving = false
                             }
                         }
                     },
