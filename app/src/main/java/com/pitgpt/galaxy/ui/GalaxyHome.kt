@@ -58,6 +58,7 @@ import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import com.pitgpt.galaxy.data.voice.RealtimeVoiceController
 import com.pitgpt.galaxy.data.voice.RealtimeVoiceStatus
+import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -79,6 +80,8 @@ fun GalaxyHome() {
     var reloadKey by remember { mutableStateOf(0) }
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showProviders by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
     var showEditCharacter by remember { mutableStateOf(false) }
@@ -261,6 +264,13 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showProviders) {
+        AiProvidersScreen(store = app.providerStore, onBack = { showProviders = false; showSettings = true })
+    } else if (showSettings) {
+        AppSettingsScreen(
+            onBack = { showSettings = false },
+            onOpenProviders = { showSettings = false; showProviders = true }
+        )
     } else if (showChat) {
         ConversationScreen(
             characterName = characterName,
@@ -294,7 +304,8 @@ fun GalaxyHome() {
             onRetry = { reloadKey += 1 },
             onOpenChat = { showChat = true },
             onOpenProfile = { showProfile = true },
-            onOpenCharacters = { showCharacters = true }
+            onOpenCharacters = { showCharacters = true },
+            onOpenSettings = { showSettings = true }
         )
     }
 }
@@ -309,7 +320,8 @@ private fun HomeScreen(
     onRetry: () -> Unit,
     onOpenChat: () -> Unit,
     onOpenProfile: () -> Unit,
-    onOpenCharacters: () -> Unit
+    onOpenCharacters: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -399,6 +411,15 @@ private fun HomeScreen(
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Text("ПЕРСОНАЖИ И ПРОФИЛИ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onOpenSettings,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("НАСТРОЙКИ", fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(10.dp))
             Button(
