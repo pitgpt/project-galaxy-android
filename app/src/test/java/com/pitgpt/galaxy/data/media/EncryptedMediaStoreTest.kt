@@ -1,6 +1,7 @@
 package com.pitgpt.galaxy.data.media
 
 import java.io.File
+import java.io.FileFilter
 import java.nio.file.Files
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
@@ -95,6 +96,19 @@ class EncryptedMediaStoreTest {
         assertTrue(store.delete("asset_07"))
         assertFalse(store.contains("asset_07"))
         assertFalse(store.delete("asset_07"))
+    }
+
+    @Test
+    fun refusesToCreateAReplacementKeyWhenDirectoryCannotBeInspected() {
+        val unreadableDirectory = object : File(directory.path) {
+            override fun listFiles(filter: FileFilter?): Array<File>? = null
+        }
+        val guardedStore = EncryptedMediaStore(unreadableDirectory, keyProvider, maxAssetBytes = 1024)
+
+        assertThrows(IllegalStateException::class.java) {
+            guardedStore.save("asset_11", "image/png", byteArrayOf(1, 2, 3))
+        }
+        assertEquals(0, keyProvider.createCalls)
     }
 
     @Test
