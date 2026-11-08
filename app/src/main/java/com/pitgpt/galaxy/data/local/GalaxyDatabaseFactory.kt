@@ -16,6 +16,24 @@ object GalaxyDatabaseFactory {
         }
     }
 
+    internal val MIGRATION_2_3 = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS comfyui_jobs (
+                    promptId TEXT NOT NULL PRIMARY KEY,
+                    requestId TEXT NOT NULL,
+                    createdAtEpochMillis INTEGER NOT NULL,
+                    cancelled INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_comfyui_jobs_requestId ON comfyui_jobs(requestId)"
+            )
+        }
+    }
+
     private val encryptor = PlaintextDatabaseEncryptor()
 
     @Volatile
@@ -51,7 +69,6 @@ object GalaxyDatabaseFactory {
             )
         }
 
-        // Encode directly to bytes so an immutable passphrase String is not left on the heap.
         val passphraseBytes = Base64.encode(databaseKey, Base64.NO_WRAP)
         databaseKey.fill(0)
         val database = Room.databaseBuilder(
@@ -59,14 +76,11 @@ object GalaxyDatabaseFactory {
             GalaxyDatabase::class.java,
             DATABASE_NAME
         )
-            // SQLCipher's helper retains this byte array for the lifetime of the helper so it can
-            // reopen the database. Do not zero it after the first open; clear it on failed setup.
             .openHelperFactory(SupportOpenHelperFactory(passphraseBytes, null, true))
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .build()
 
         try {
-            // Room opens lazily. Force the encrypted connection before retiring the plaintext backup.
             database.openHelper.writableDatabase
             encryptor.complete(pendingMigration)
             return database
