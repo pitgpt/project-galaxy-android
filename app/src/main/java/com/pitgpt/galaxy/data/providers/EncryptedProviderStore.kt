@@ -4,6 +4,8 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiNodeInput
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
@@ -25,7 +27,8 @@ data class ProviderSettings(
     val activeProviderId: String? = null,
     val textModel: String? = null,
     val voiceModel: String? = null,
-    val comfyUi: ComfyUiSavedSettings? = null
+    val comfyUi: ComfyUiSavedSettings? = null,
+    val comfyUiWorkflow: ComfyUiWorkflowTemplate? = null
 )
 
 /**
@@ -79,12 +82,34 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
                     )
                 )
             }
+            val workflowJson = root.optJSONObject("comfyUiWorkflow")
+            val workflow = workflowJson?.let { value ->
+                fun node(name: String): ComfyUiNodeInput? {
+                    val item = value.optJSONObject(name) ?: return null
+                    return ComfyUiNodeInput(
+                        nodeId = item.getString("nodeId"),
+                        inputName = item.getString("inputName")
+                    )
+                }
+                ComfyUiWorkflowTemplate(
+                    id = value.getString("id"),
+                    workflowJson = value.getString("workflowJson"),
+                    positivePrompt = requireNotNull(node("positivePrompt")) {
+                        "Workflow positive-prompt mapping is missing"
+                    },
+                    negativePrompt = node("negativePrompt"),
+                    width = node("width"),
+                    height = node("height"),
+                    seed = node("seed")
+                )
+            }
             ProviderSettings(
                 providers,
                 root.optString("activeProviderId").takeIf { it.isNotBlank() },
                 root.optString("textModel").takeIf { it.isNotBlank() },
                 root.optString("voiceModel").takeIf { it.isNotBlank() },
-                comfyUi
+                comfyUi,
+                workflow
             )
         } catch (error: Exception) {
             // Preserve the ciphertext. Recovery or destructive reset must be an explicit user action.
@@ -102,6 +127,19 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
                 .put("vpnBearerToken", value.vpnBearerToken ?: JSONObject.NULL)
                 .put("preference", value.preference.name)
         } ?: JSONObject.NULL
+        val workflow = settings.comfyUiWorkflow?.let { value ->
+            fun node(input: ComfyUiNodeInput?): Any = input?.let {
+                JSONObject().put("nodeId", it.nodeId).put("inputName", it.inputName)
+            } ?: JSONObject.NULL
+            JSONObject()
+                .put("id", value.id)
+                .put("workflowJson", value.workflowJson)
+                .put("positivePrompt", node(value.positivePrompt))
+                .put("negativePrompt", node(value.negativePrompt))
+                .put("width", node(value.width))
+                .put("height", node(value.height))
+                .put("seed", node(value.seed))
+        } ?: JSONObject.NULL
         val root = JSONObject().put("providers", JSONArray().apply {
             settings.providers.forEach { provider ->
                 put(JSONObject().put("id", provider.id).put("name", provider.name)
@@ -109,7 +147,7 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
             }
         }).put("activeProviderId", settings.activeProviderId ?: "")
             .put("textModel", settings.textModel ?: "").put("voiceModel", settings.voiceModel ?: "")
-            .put("comfyUi", comfyUi)
+            .put("comfyUi", comfyUi).put("comfyUiWorkflow", workflow)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val encrypted = cipher.iv + cipher.doFinal(root.toString().toByteArray(Charsets.UTF_8))

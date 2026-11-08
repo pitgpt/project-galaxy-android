@@ -1,5 +1,7 @@
 package com.pitgpt.galaxy.data.providers
 
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiNodeInput
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -61,6 +63,25 @@ class ProviderSettingsOperationsTest {
         val result = settings.withProviderRemoved("first")
 
         assertEquals(comfyUi, result.comfyUi)
+    }
+
+
+    @Test
+    fun removingAiProviderPreservesComfyUiWorkflowTemplate() {
+        val workflow = ComfyUiWorkflowTemplate(
+            id = "test-workflow-v1",
+            workflowJson = """{"1":{"inputs":{"text":""}}}""",
+            positivePrompt = ComfyUiNodeInput("1", "text")
+        )
+        val settings = ProviderSettings(
+            providers = listOf(first),
+            activeProviderId = "first",
+            comfyUiWorkflow = workflow
+        )
+
+        val result = settings.withProviderRemoved("first")
+
+        assertEquals(workflow, result.comfyUiWorkflow)
     }
 
     @Test
