@@ -18,6 +18,13 @@ class PersistGeneratedImageResult(
         providerJobId: String
     ): StoredGeneratedImage {
         require(providerJobId.isNotBlank()) { "Provider job ID must not be blank" }
+        images.getForRequest(request.id)?.let { existing ->
+            check(
+                existing.conversationId == request.conversationId &&
+                    existing.characterId == request.characterId
+            ) { "The generation request ID is already associated with different Galaxy context" }
+            return existing
+        }
         val result = resultSource.completedImage(providerJobId)
         check(result.asset.requestId == request.id) {
             "Image provider returned an image for a different generation request"
