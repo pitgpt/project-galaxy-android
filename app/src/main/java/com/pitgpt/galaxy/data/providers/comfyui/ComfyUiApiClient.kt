@@ -265,7 +265,8 @@ class ComfyUiApiClient(
         val queueNumber = if (body.has("number") && !body.isNull("number")) {
             body.optLong("number").takeIf { it >= 0 }
         } else null
-        if (body.optJSONObject("node_errors")?.length() ?: 0 > 0) {
+        val nodeErrors = body.optJSONObject("node_errors")
+        if (nodeErrors != null && nodeErrors.length() > 0) {
             throw ComfyUiApiException("ComfyUI rejected one or more workflow nodes", response.statusCode)
         }
         return ComfyUiSubmittedPrompt(promptId, queueNumber)
