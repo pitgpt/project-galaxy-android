@@ -175,7 +175,7 @@ class EncryptedMediaStore(
         fun fromContext(context: Context): EncryptedMediaStore =
             EncryptedMediaStore(
                 File(context.applicationContext.filesDir, MEDIA_DIRECTORY),
-                AndroidKeystoreMediaKeyProvider(context)
+                AndroidKeystoreMediaKeyProvider()
             )
 
         const val MEDIA_DIRECTORY = "galaxy_media"
