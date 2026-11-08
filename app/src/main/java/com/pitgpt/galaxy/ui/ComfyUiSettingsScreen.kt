@@ -1,5 +1,9 @@
 package com.pitgpt.galaxy.ui
 
+import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -26,17 +30,22 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pitgpt.galaxy.data.providers.ComfyUiSavedSettings
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
+import com.pitgpt.galaxy.data.providers.ProviderSettings
 import com.pitgpt.galaxy.data.providers.ProviderSettingsIo
 import com.pitgpt.galaxy.data.providers.resolveComfyUiBearerToken
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiEndpointSelector
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiNodeInput
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRoutePreference
 import kotlinx.coroutines.launch
+import java.io.ByteArrayOutputStream
 
 private val ComfyNight = Color(0xFF080B18)
 private val ComfyText = Color.White
@@ -46,7 +55,20 @@ private val ComfyAccent = Color(0xFFB8D9FF)
 @Composable
 fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
     val settingsIo = remember(store) { ProviderSettingsIo(store) }
+    val context = LocalContext.current
     var persistedComfyUi by remember { mutableStateOf<ComfyUiSavedSettings?>(null) }
+    var workflowId by remember { mutableStateOf("") }
+    var workflowJson by remember { mutableStateOf("") }
+    var positiveNodeId by remember { mutableStateOf("") }
+    var positiveInputName by remember { mutableStateOf("text") }
+    var negativeNodeId by remember { mutableStateOf("") }
+    var negativeInputName by remember { mutableStateOf("text") }
+    var widthNodeId by remember { mutableStateOf("") }
+    var widthInputName by remember { mutableStateOf("width") }
+    var heightNodeId by remember { mutableStateOf("") }
+    var heightInputName by remember { mutableStateOf("height") }
+    var seedNodeId by remember { mutableStateOf("") }
+    var seedInputName by remember { mutableStateOf("seed") }
     var loading by remember { mutableStateOf(true) }
     var loadFailed by remember { mutableStateOf(false) }
     var lanUrl by remember { mutableStateOf("") }
@@ -60,12 +82,41 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
     var checking by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val workflowPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching { readWorkflowJson(context, uri) }
+                .onSuccess { imported ->
+                    workflowJson = imported
+                    if (workflowId.isBlank()) workflowId = "comfyui.workflow.v1"
+                    status = "Workflow JSON загружен. Укажи ID узлов и входов, затем сохрани шаблон."
+                }
+                .onFailure {
+                    status = "Не удалось прочитать workflow. Файл должен быть JSON размером не более 2 МиБ."
+                }
+        }
+    }
 
-    fun applyLoadedSettings(loaded: ComfyUiSavedSettings?) {
-        persistedComfyUi = loaded
-        lanUrl = loaded?.lanBaseUrl.orEmpty()
-        vpnUrl = loaded?.vpnBaseUrl.orEmpty()
-        preference = loaded?.preference ?: ComfyUiRoutePreference.AUTO
+    fun applyLoadedSettings(loaded: ProviderSettings) {
+        val comfy = loaded.comfyUi
+        persistedComfyUi = comfy
+        lanUrl = comfy?.lanBaseUrl.orEmpty()
+        vpnUrl = comfy?.vpnBaseUrl.orEmpty()
+        preference = comfy?.preference ?: ComfyUiRoutePreference.AUTO
+        val workflow = loaded.comfyUiWorkflow
+        workflowId = workflow?.id.orEmpty()
+        workflowJson = workflow?.workflowJson.orEmpty()
+        positiveNodeId = workflow?.positivePrompt?.nodeId.orEmpty()
+        positiveInputName = workflow?.positivePrompt?.inputName ?: "text"
+        negativeNodeId = workflow?.negativePrompt?.nodeId.orEmpty()
+        negativeInputName = workflow?.negativePrompt?.inputName ?: "text"
+        widthNodeId = workflow?.width?.nodeId.orEmpty()
+        widthInputName = workflow?.width?.inputName ?: "width"
+        heightNodeId = workflow?.height?.nodeId.orEmpty()
+        heightInputName = workflow?.height?.inputName ?: "height"
+        seedNodeId = workflow?.seed?.nodeId.orEmpty()
+        seedInputName = workflow?.seed?.inputName ?: "seed"
         lanToken = ""
         vpnToken = ""
         clearLanToken = false
@@ -75,7 +126,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
 
     LaunchedEffect(settingsIo) {
         try {
-            applyLoadedSettings(settingsIo.load().comfyUi)
+            applyLoadedSettings(settingsIo.load())
         } catch (_: Exception) {
             loadFailed = true
         } finally {
@@ -136,7 +187,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                         loading = true
                         scope.launch {
                             try {
-                                applyLoadedSettings(settingsIo.load().comfyUi)
+                                applyLoadedSettings(settingsIo.load())
                                 status = "Настройки прочитаны."
                             } catch (_: Exception) {
                                 loadFailed = true
@@ -187,6 +238,82 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                         Text("Удалить сохранённый VPN-токен", color = ComfyMuted, fontSize = 12.sp)
                     }
                 }
+
+
+                Text("ШАБЛОН WORKFLOW", color = ComfyAccent, fontSize = 13.sp)
+                Text(
+                    "Импортируй API-format JSON из ComfyUI. Galaxy не угадывает узлы: укажи ID узла и имя входа для каждого поля.",
+                    color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
+                )
+                Button(
+                    enabled = !saving && !checking,
+                    onClick = { workflowPicker.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (workflowJson.isBlank()) "ИМПОРТИРОВАТЬ WORKFLOW JSON" else "ЗАМЕНИТЬ WORKFLOW JSON") }
+                Text(
+                    if (workflowJson.isBlank()) "Workflow пока не импортирован."
+                    else "JSON загружен и готов к настройке. Содержимое хранится в зашифрованном хранилище.",
+                    color = ComfyMuted, fontSize = 11.sp
+                )
+                OutlinedTextField(value = workflowId, onValueChange = { workflowId = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("ID шаблона") })
+                OutlinedTextField(value = positiveNodeId, onValueChange = { positiveNodeId = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Positive prompt · ID узла") })
+                OutlinedTextField(value = positiveInputName, onValueChange = { positiveInputName = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Positive prompt · имя входа") })
+                OutlinedTextField(value = negativeNodeId, onValueChange = { negativeNodeId = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Negative prompt · ID узла (необязательно)") })
+                OutlinedTextField(value = negativeInputName, onValueChange = { negativeInputName = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Negative prompt · имя входа") })
+                OutlinedTextField(value = widthNodeId, onValueChange = { widthNodeId = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Width · ID узла (необязательно)") })
+                OutlinedTextField(value = widthInputName, onValueChange = { widthInputName = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Width · имя входа") })
+                OutlinedTextField(value = heightNodeId, onValueChange = { heightNodeId = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Height · ID узла (необязательно)") })
+                OutlinedTextField(value = heightInputName, onValueChange = { heightInputName = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Height · имя входа") })
+                OutlinedTextField(value = seedNodeId, onValueChange = { seedNodeId = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Seed · ID узла (необязательно)") })
+                OutlinedTextField(value = seedInputName, onValueChange = { seedInputName = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Seed · имя входа") })
+                Button(
+                    enabled = !saving && !checking && !loading && !loadFailed,
+                    onClick = {
+                        val template = runCatching {
+                            fun optionalNode(nodeId: String, inputName: String): ComfyUiNodeInput? {
+                                if (nodeId.isBlank()) return null
+                                return ComfyUiNodeInput(nodeId.trim(), inputName.trim())
+                            }
+                            ComfyUiWorkflowTemplate(
+                                id = workflowId.trim(),
+                                workflowJson = workflowJson,
+                                positivePrompt = ComfyUiNodeInput(positiveNodeId.trim(), positiveInputName.trim()),
+                                negativePrompt = optionalNode(negativeNodeId, negativeInputName),
+                                width = optionalNode(widthNodeId, widthInputName),
+                                height = optionalNode(heightNodeId, heightInputName),
+                                seed = optionalNode(seedNodeId, seedInputName)
+                            )
+                        }.getOrNull()
+                        if (template == null) {
+                            status = "Проверь JSON, ID шаблона и соответствие ID узлов/имён входов."
+                        } else {
+                            saving = true
+                            scope.launch {
+                                try {
+                                    val current = settingsIo.load()
+                                    settingsIo.save(current.copy(comfyUiWorkflow = template))
+                                    status = "Workflow сохранён в зашифрованном хранилище."
+                                } catch (_: Exception) {
+                                    status = "Не удалось сохранить workflow. Проверь Android Keystore."
+                                } finally {
+                                    saving = false
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("СОХРАНИТЬ WORKFLOW") }
 
                 Text("Предпочитаемый маршрут", color = ComfyAccent, fontSize = 13.sp)
                 ComfyUiRoutePreference.values().forEach { option ->
@@ -259,5 +386,26 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                 )
             }
         }
+    }
+}
+
+
+private fun readWorkflowJson(context: Context, uri: Uri): String {
+    val input = context.contentResolver.openInputStream(uri)
+        ?: throw IllegalStateException("Workflow file cannot be opened")
+    val output = ByteArrayOutputStream()
+    input.use { stream ->
+        val buffer = ByteArray(8 * 1024)
+        var total = 0
+        while (true) {
+            val count = stream.read(buffer)
+            if (count < 0) break
+            total += count
+            require(total <= 2 * 1024 * 1024) { "Workflow file exceeds the size limit" }
+            output.write(buffer, 0, count)
+        }
+    }
+    return output.toByteArray().toString(Charsets.UTF_8).also {
+        require(it.isNotBlank()) { "Workflow file is empty" }
     }
 }
