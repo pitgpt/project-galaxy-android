@@ -320,6 +320,23 @@ class ComfyUiApiClient(
         return ComfyUiHistoryResult(promptId, ImageGenerationStatus(state), images.distinct())
     }
 
+    /**
+     * Checks whether ComfyUI has already recorded this prompt in history.
+     * Used after queued deletion to avoid reporting a job as cancelled if it
+     * completed while the queue operation was in flight.
+     */
+    suspend fun hasHistory(
+        config: ComfyUiConnectionConfig,
+        promptId: String
+    ): Boolean {
+        validatePromptId(promptId)
+        val response = jsonRequest(config, "GET", config.endpoint("/history/$promptId"))
+        if (response.statusCode == 404) return false
+        requireSuccess(response.statusCode)
+        val root = parseObject(response.body)
+        return root.optJSONObject(promptId) != null || root.has("status") || root.has("outputs")
+    }
+
     suspend fun status(
         config: ComfyUiConnectionConfig,
         promptId: String
