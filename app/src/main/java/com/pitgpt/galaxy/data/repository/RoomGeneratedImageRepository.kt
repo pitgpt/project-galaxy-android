@@ -10,6 +10,8 @@ import com.pitgpt.galaxy.data.local.entity.toEntity
 import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Coordinates encrypted binary storage with SQLCipher-backed metadata.
@@ -19,17 +21,32 @@ class RoomGeneratedImageRepository(
     private val dao: GeneratedImageDao,
     private val mediaStore: EncryptedMediaStore
 ) : GeneratedImageRepository {
+    private val saveMutex = Mutex()
+
     override suspend fun save(
         request: ImageGenerationRequest,
         asset: GeneratedImageAsset,
         imageBytes: ByteArray
-    ): StoredGeneratedImage {
+    ): StoredGeneratedImage = saveMutex.withLock {
         require(asset.requestId == request.id) { "Generated image belongs to a different request" }
         require(asset.byteSize == imageBytes.size.toLong()) { "Generated image byte size does not match its payload" }
         require(asset.mimeType in SUPPORTED_MIME_TYPES) { "Generated image MIME type is unsupported" }
         require(imageBytes.isNotEmpty()) { "Generated image payload must not be empty" }
         require(sha256(imageBytes).equals(asset.sha256, ignoreCase = true)) {
             "Generated image checksum does not match its payload"
+        }
+
+        dao.getForRequest(request.id)?.toDomain()?.let { existing ->
+            check(
+                existing.conversationId == request.conversationId &&
+                    existing.characterId == request.characterId
+            ) { "The generation request ID is already associated with different Galaxy context" }
+            check(
+                existing.mimeType == asset.mimeType &&
+                    existing.byteSize == asset.byteSize &&
+                    existing.sha256.equals(asset.sha256, ignoreCase = true)
+            ) { "A different image is already persisted for this generation request" }
+            return@withLock existing
         }
 
         val stored = StoredGeneratedImage(
@@ -54,7 +71,12 @@ class RoomGeneratedImageRepository(
                 ?.let(failure::addSuppressed)
             throw failure
         }
-        return stored
+        stored
+    }
+
+    override suspend fun getForRequest(requestId: String): StoredGeneratedImage? {
+        require(requestId.isNotBlank()) { "Generation request ID must not be blank" }
+        return dao.getForRequest(requestId)?.toDomain()
     }
 
     override suspend fun get(assetId: String): StoredGeneratedImage? {
