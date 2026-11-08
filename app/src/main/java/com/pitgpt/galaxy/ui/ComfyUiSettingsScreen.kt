@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import com.pitgpt.galaxy.data.providers.ComfyUiSavedSettings
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
 import com.pitgpt.galaxy.data.providers.ProviderSettingsIo
+import com.pitgpt.galaxy.data.providers.resolveComfyUiBearerToken
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiEndpointSelector
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRoutePreference
 import kotlinx.coroutines.launch
@@ -87,9 +88,21 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
         val vpn = vpnUrl.trim().takeIf { it.isNotEmpty() }
         val saved = ComfyUiSavedSettings(
             lanBaseUrl = lan,
-            lanBearerToken = if (lan == null || clearLanToken) null else lanToken.trim().takeIf { it.isNotEmpty() } ?: persistedComfyUi?.lanBearerToken,
+            lanBearerToken = resolveComfyUiBearerToken(
+                endpoint = lan,
+                enteredToken = lanToken,
+                clearSavedToken = clearLanToken,
+                previousEndpoint = persistedComfyUi?.lanBaseUrl,
+                previousToken = persistedComfyUi?.lanBearerToken
+            ),
             vpnBaseUrl = vpn,
-            vpnBearerToken = if (vpn == null || clearVpnToken) null else vpnToken.trim().takeIf { it.isNotEmpty() } ?: persistedComfyUi?.vpnBearerToken,
+            vpnBearerToken = resolveComfyUiBearerToken(
+                endpoint = vpn,
+                enteredToken = vpnToken,
+                clearSavedToken = clearVpnToken,
+                previousEndpoint = persistedComfyUi?.vpnBaseUrl,
+                previousToken = persistedComfyUi?.vpnBearerToken
+            ),
             preference = preference
         )
         saved.toEndpointOptions()
@@ -146,7 +159,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                 OutlinedTextField(
                     value = lanToken, onValueChange = { lanToken = it; status = null },
                     modifier = Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text(if (persistedComfyUi?.lanBearerToken != null) "LAN-токен (пусто — оставить сохранённый)" else "LAN-токен (необязательно)") },
+                    label = { Text(if (persistedComfyUi?.lanBearerToken != null) "LAN-токен (пусто — сохранить только для прежнего адреса)" else "LAN-токен (необязательно)") },
                     visualTransformation = PasswordVisualTransformation()
                 )
                 if (persistedComfyUi?.lanBearerToken != null) {
@@ -165,7 +178,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                 OutlinedTextField(
                     value = vpnToken, onValueChange = { vpnToken = it; status = null },
                     modifier = Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text(if (persistedComfyUi?.vpnBearerToken != null) "VPN-токен (пусто — оставить сохранённый)" else "VPN-токен (необязательно)") },
+                    label = { Text(if (persistedComfyUi?.vpnBearerToken != null) "VPN-токен (пусто — сохранить только для прежнего адреса)" else "VPN-токен (необязательно)") },
                     visualTransformation = PasswordVisualTransformation()
                 )
                 if (persistedComfyUi?.vpnBearerToken != null) {
