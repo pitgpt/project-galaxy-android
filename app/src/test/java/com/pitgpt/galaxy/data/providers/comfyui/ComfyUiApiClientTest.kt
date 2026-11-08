@@ -10,7 +10,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class ComfyUiApiClientTest {
     private val config = ComfyUiConnectionConfig("http://192.168.1.20:8188", bearerToken = "test-token")
     private val request = ImageGenerationRequest(
