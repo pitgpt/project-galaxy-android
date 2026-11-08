@@ -1,7 +1,5 @@
 package com.pitgpt.galaxy.ui
 
-import android.content.Context
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -44,8 +42,10 @@ import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiEndpointSelector
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiNodeInput
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRoutePreference
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.withContext
 
 private val ComfyNight = Color(0xFF080B18)
 private val ComfyText = Color.White
@@ -81,20 +81,31 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
     var status by remember { mutableStateOf<String?>(null) }
     var checking by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
+    var importingWorkflow by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val workflowPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            runCatching { readWorkflowJson(context, uri) }
-                .onSuccess { imported ->
+            scope.launch {
+                importingWorkflow = true
+                try {
+                    val imported = withContext(Dispatchers.IO) {
+                        val input = context.contentResolver.openInputStream(uri)
+                            ?: throw IllegalStateException("Workflow file cannot be opened")
+                        readBoundedWorkflowJson(input)
+                    }
                     workflowJson = imported
                     if (workflowId.isBlank()) workflowId = "comfyui.workflow.v1"
                     status = "Workflow JSON загружен. Укажи ID узлов и входов, затем сохрани шаблон."
-                }
-                .onFailure {
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
                     status = "Не удалось прочитать workflow. Файл должен быть JSON размером не более 2 МиБ."
+                } finally {
+                    importingWorkflow = false
                 }
+            }
         }
     }
 
@@ -246,10 +257,10 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                     color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
                 )
                 Button(
-                    enabled = !saving && !checking,
+                    enabled = !saving && !checking && !importingWorkflow,
                     onClick = { workflowPicker.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text(if (workflowJson.isBlank()) "ИМПОРТИРОВАТЬ WORKFLOW JSON" else "ЗАМЕНИТЬ WORKFLOW JSON") }
+                ) { Text(if (importingWorkflow) "ЧИТАЮ WORKFLOW…" else if (workflowJson.isBlank()) "ИМПОРТИРОВАТЬ WORKFLOW JSON" else "ЗАМЕНИТЬ WORKFLOW JSON") }
                 Text(
                     if (workflowJson.isBlank()) "Workflow пока не импортирован."
                     else "JSON загружен и готов к настройке. Содержимое хранится в зашифрованном хранилище.",
@@ -278,7 +289,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                 OutlinedTextField(value = seedInputName, onValueChange = { seedInputName = it },
                     modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Seed · имя входа") })
                 Button(
-                    enabled = !saving && !checking && !loading && !loadFailed,
+                    enabled = !saving && !checking && !loading && !loadFailed && !importingWorkflow,
                     onClick = {
                         val template = runCatching {
                             fun optionalNode(nodeId: String, inputName: String): ComfyUiNodeInput? {
@@ -390,22 +401,3 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
 }
 
 
-private fun readWorkflowJson(context: Context, uri: Uri): String {
-    val input = context.contentResolver.openInputStream(uri)
-        ?: throw IllegalStateException("Workflow file cannot be opened")
-    val output = ByteArrayOutputStream()
-    input.use { stream ->
-        val buffer = ByteArray(8 * 1024)
-        var total = 0
-        while (true) {
-            val count = stream.read(buffer)
-            if (count < 0) break
-            total += count
-            require(total <= 2 * 1024 * 1024) { "Workflow file exceeds the size limit" }
-            output.write(buffer, 0, count)
-        }
-    }
-    return output.toByteArray().toString(Charsets.UTF_8).also {
-        require(it.isNotBlank()) { "Workflow file is empty" }
-    }
-}
