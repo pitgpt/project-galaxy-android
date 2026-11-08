@@ -51,8 +51,13 @@ data class ImageGenerationCapabilities(
     val minHeight: Int,
     val maxHeight: Int,
     val supportsReferenceImages: Boolean,
+    /** Legacy aggregate flag retained for source compatibility with existing providers. */
     val supportsCancellation: Boolean,
-    val supportsProgress: Boolean
+    val supportsProgress: Boolean,
+    /** Whether a provider can remove a job before execution starts. */
+    val supportsQueuedCancellation: Boolean = supportsCancellation,
+    /** Whether a provider can stop a job that is already executing. */
+    val supportsRunningCancellation: Boolean = supportsCancellation
 ) {
     init {
         require(supportedMimeTypes.isNotEmpty()) { "At least one image format is required" }
