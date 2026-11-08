@@ -1,11 +1,12 @@
 package com.pitgpt.galaxy.data.media
 
-import android.util.Xml
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.R
 import java.io.File
 import java.nio.file.Files
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
@@ -43,7 +44,15 @@ class EncryptedMediaStoreInstrumentedTest {
 
         assertNull("Android Keystore must not export the AES key bytes", created.encoded)
         assertNull("Reloaded Android Keystore key must remain non-exportable", loaded.encoded)
-        assertTrue(created == loaded)
+        val plaintext = "keystore-key-round-trip".toByteArray()
+        val encryptor = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(Cipher.ENCRYPT_MODE, created)
+        }
+        val ciphertext = encryptor.doFinal(plaintext)
+        val decryptor = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(Cipher.DECRYPT_MODE, loaded, GCMParameterSpec(128, encryptor.iv))
+        }
+        assertArrayEquals(plaintext, decryptor.doFinal(ciphertext))
     }
 
     @Test
@@ -75,7 +84,7 @@ class EncryptedMediaStoreInstrumentedTest {
         assertTrue(("database" to ".") in extractionRules)
     }
 
-    private fun readExclusions(parser: org.xmlpull.v1.XmlPullParser): Set<Pair<String, String>> {
+    private fun readExclusions(parser: android.content.res.XmlResourceParser): Set<Pair<String, String>> {
         val exclusions = mutableSetOf<Pair<String, String>>()
         try {
             var event = parser.eventType
