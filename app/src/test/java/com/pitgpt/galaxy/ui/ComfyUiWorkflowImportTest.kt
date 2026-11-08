@@ -2,8 +2,12 @@ package com.pitgpt.galaxy.ui
 
 import java.io.ByteArrayInputStream
 import java.nio.charset.CharacterCodingException
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ComfyUiWorkflowImportTest {
@@ -47,6 +51,58 @@ class ComfyUiWorkflowImportTest {
     fun rejectsEmptyDocument() {
         assertThrows(IllegalArgumentException::class.java) {
             readBoundedWorkflowJson(ByteArrayInputStream(ByteArray(0)))
+        }
+    }
+
+    @Test
+    fun buildsAndValidatesWorkflowOnProvidedDispatcher() = runBlocking {
+        var dispatched = false
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                dispatched = true
+                block.run()
+            }
+        }
+
+        val template = buildComfyUiWorkflowTemplate(
+            id = "test-workflow-v1",
+            workflowJson = """{"1":{"inputs":{"text":""}}}""",
+            positiveNodeId = "1",
+            positiveInputName = "text",
+            negativeNodeId = "",
+            negativeInputName = "text",
+            widthNodeId = "",
+            widthInputName = "width",
+            heightNodeId = "",
+            heightInputName = "height",
+            seedNodeId = "",
+            seedInputName = "seed",
+            dispatcher = dispatcher
+        )
+
+        assertTrue("Workflow parsing must use the supplied background dispatcher", dispatched)
+        assertEquals("1", template.positivePrompt.nodeId)
+    }
+
+    @Test
+    fun rejectsInvalidMappingBeforeReturningWorkflowTemplate() {
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                buildComfyUiWorkflowTemplate(
+                    id = "test-workflow-v1",
+                    workflowJson = """{"1":{"inputs":{"text":""}}}""",
+                    positiveNodeId = "1",
+                    positiveInputName = "missing",
+                    negativeNodeId = "",
+                    negativeInputName = "text",
+                    widthNodeId = "",
+                    widthInputName = "width",
+                    heightNodeId = "",
+                    heightInputName = "height",
+                    seedNodeId = "",
+                    seedInputName = "seed"
+                )
+            }
         }
     }
 }
