@@ -98,6 +98,7 @@ class ComfyUiRuntimeFactoryTest {
         var savedRequest: ImageGenerationRequest? = null
         var savedAsset: com.pitgpt.galaxy.core.model.GeneratedImageAsset? = null
         var savedBytes: ByteArray? = null
+        var savedImage: StoredGeneratedImage? = null
 
         override suspend fun save(
             request: ImageGenerationRequest,
@@ -118,8 +119,11 @@ class ComfyUiRuntimeFactoryTest {
                 byteSize = asset.byteSize,
                 sha256 = asset.sha256,
                 createdAtEpochMillis = asset.createdAtEpochMillis
-            )
+            ).also { savedImage = it }
         }
+
+        override suspend fun getForRequest(requestId: String): StoredGeneratedImage? =
+            savedImage?.takeIf { it.requestId == requestId }
 
         override suspend fun get(assetId: String): StoredGeneratedImage? = null
         override suspend fun listForConversation(conversationId: String): List<StoredGeneratedImage> = emptyList()
