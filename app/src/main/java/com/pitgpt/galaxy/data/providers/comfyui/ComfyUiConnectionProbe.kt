@@ -111,7 +111,8 @@ class ComfyUiConnectionProbe(
             return ComfyUiProbeResult(false, response.statusCode, message)
         }
 
-        val validJson = runCatching { JSONObject(response.body) }.isSuccess
+        val jsonBody = response.body.trim()
+        val validJson = jsonBody.startsWith("{") && runCatching { JSONObject(jsonBody) }.isSuccess
         if (!validJson) {
             return ComfyUiProbeResult(
                 reachable = false,
