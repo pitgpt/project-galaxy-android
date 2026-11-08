@@ -16,6 +16,12 @@ import com.pitgpt.galaxy.data.repository.RoomConversationRepository
 import com.pitgpt.galaxy.data.repository.RoomMemoryRepository
 import com.pitgpt.galaxy.data.repository.RoomGeneratedImageRepository
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiConnectionConfig
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntimeFactory
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
+import com.pitgpt.galaxy.data.providers.comfyui.RoomComfyUiJobStore
 
 /** Application-level composition root for Galaxy's local data and authentication layers. */
 class GalaxyApplication : Application() {
@@ -27,7 +33,22 @@ class GalaxyApplication : Application() {
     val providerStore: EncryptedProviderStore by lazy { EncryptedProviderStore(this) }
     val mediaStore: EncryptedMediaStore by lazy { EncryptedMediaStore.fromContext(this) }
     val generatedImages by lazy { RoomGeneratedImageRepository(database.generatedImageDao(), mediaStore) }
+    val comfyUiJobStore: ComfyUiJobStore by lazy { RoomComfyUiJobStore(database.comfyUiJobDao()) }
+    private val comfyUiRuntimeFactory by lazy {
+        ComfyUiRuntimeFactory(comfyUiJobStore, generatedImages)
+    }
     private val initializeGalaxy by lazy { InitializeGalaxy(characters) }
+
+    /**
+     * Creates a ComfyUI runtime backed by SQLCipher job correlation and encrypted image storage.
+     * Endpoint and workflow configuration are supplied by the settings layer; no network policy
+     * relaxation or plaintext media persistence is performed here.
+     */
+    fun createComfyUiRuntime(
+        config: ComfyUiConnectionConfig,
+        template: ComfyUiWorkflowTemplate,
+        clientId: String
+    ): ComfyUiRuntime = comfyUiRuntimeFactory.create(config, template, clientId)
 
     fun realtimeSessionProvider(tokenProvider: GalaxyAccessTokenProvider): HttpRealtimeSessionProvider =
         HttpRealtimeSessionProvider(BuildConfig.GALAXY_API_BASE_URL, tokenProvider)
