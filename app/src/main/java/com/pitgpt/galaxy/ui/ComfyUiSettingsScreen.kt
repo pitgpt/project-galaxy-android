@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -115,7 +116,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
             )
             if (persistedComfyUi?.lanBearerToken != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = clearLanToken, onClick = { clearLanToken = !clearLanToken })
+                    Checkbox(checked = clearLanToken, onCheckedChange = { clearLanToken = it })
                     Text("Удалить сохранённый LAN-токен", color = ComfyMuted, fontSize = 12.sp)
                 }
             }
@@ -124,7 +125,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
             OutlinedTextField(
                 value = vpnUrl, onValueChange = { vpnUrl = it; status = null },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
-                label = { Text("VPN URL, например http://100.x.x.x:8188") }
+                label = { Text("VPN URL, например http://100.64.0.10:8188") }
             )
             OutlinedTextField(
                 value = vpnToken, onValueChange = { vpnToken = it; status = null },
@@ -134,7 +135,7 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
             )
             if (persistedComfyUi?.vpnBearerToken != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = clearVpnToken, onClick = { clearVpnToken = !clearVpnToken })
+                    Checkbox(checked = clearVpnToken, onCheckedChange = { clearVpnToken = it })
                     Text("Удалить сохранённый VPN-токен", color = ComfyMuted, fontSize = 12.sp)
                 }
             }
