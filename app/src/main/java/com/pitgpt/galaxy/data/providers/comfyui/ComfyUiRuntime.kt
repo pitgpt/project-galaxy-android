@@ -2,6 +2,7 @@ package com.pitgpt.galaxy.data.providers.comfyui
 
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.core.usecase.PersistGeneratedImageResult
+import com.pitgpt.galaxy.data.providers.ComfyUiSavedSettings
 
 /**
  * Application-scoped ComfyUI runtime components for one configured workflow endpoint.
@@ -10,6 +11,21 @@ import com.pitgpt.galaxy.core.usecase.PersistGeneratedImageResult
 data class ComfyUiRuntime(
     val provider: ComfyUiImageGenerationProvider,
     val persistCompletedResult: PersistGeneratedImageResult
+)
+
+/**
+ * Raised when every saved endpoint probe fails. The message contains only route and
+ * probe diagnostics; bearer tokens and full endpoint URLs are deliberately omitted.
+ */
+class ComfyUiEndpointUnavailableException(
+    val attempts: List<ComfyUiRouteAttempt>
+) : IllegalStateException(
+    if (attempts.isEmpty()) {
+        "No ComfyUI endpoint is configured or reachable"
+    } else {
+        "No configured ComfyUI endpoint is reachable: " +
+            attempts.joinToString("; ") { "${it.route}: ${it.message}" }
+    }
 )
 
 /**
@@ -38,5 +54,21 @@ class ComfyUiRuntimeFactory(
             provider = provider,
             persistCompletedResult = PersistGeneratedImageResult(provider, images)
         )
+    }
+
+    /**
+     * Resolves the saved LAN/VPN preference with a bounded ComfyUI probe before creating
+     * a runtime. The caller still supplies an explicit versioned workflow template.
+     */
+    suspend fun createFromSettings(
+        settings: ComfyUiSavedSettings,
+        template: ComfyUiWorkflowTemplate,
+        clientId: String,
+        selector: ComfyUiEndpointSelector = ComfyUiEndpointSelector()
+    ): ComfyUiRuntime {
+        val resolution = selector.resolve(settings.toEndpointOptions())
+        val endpoint = resolution.selectedEndpoint
+            ?: throw ComfyUiEndpointUnavailableException(resolution.attempts)
+        return create(endpoint, template, clientId)
     }
 }
