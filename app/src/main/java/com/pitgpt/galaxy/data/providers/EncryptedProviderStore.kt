@@ -24,7 +24,8 @@ data class ProviderSettings(
     val providers: List<AiProviderConfig> = emptyList(),
     val activeProviderId: String? = null,
     val textModel: String? = null,
-    val voiceModel: String? = null
+    val voiceModel: String? = null,
+    val comfyUi: ComfyUiSavedSettings? = null
 )
 
 /**
@@ -66,11 +67,24 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
                     ))
                 }
             }
+            val comfyUiJson = root.optJSONObject("comfyUi")
+            val comfyUi = comfyUiJson?.let { value ->
+                ComfyUiSavedSettings(
+                    lanBaseUrl = value.optString("lanBaseUrl").takeIf { it.isNotBlank() && it != "null" },
+                    lanBearerToken = value.optString("lanBearerToken").takeIf { it.isNotBlank() && it != "null" },
+                    vpnBaseUrl = value.optString("vpnBaseUrl").takeIf { it.isNotBlank() && it != "null" },
+                    vpnBearerToken = value.optString("vpnBearerToken").takeIf { it.isNotBlank() && it != "null" },
+                    preference = com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRoutePreference.valueOf(
+                        value.optString("preference").ifBlank { "AUTO" }
+                    )
+                )
+            }
             ProviderSettings(
                 providers,
                 root.optString("activeProviderId").takeIf { it.isNotBlank() },
                 root.optString("textModel").takeIf { it.isNotBlank() },
-                root.optString("voiceModel").takeIf { it.isNotBlank() }
+                root.optString("voiceModel").takeIf { it.isNotBlank() },
+                comfyUi
             )
         } catch (error: Exception) {
             // Preserve the ciphertext. Recovery or destructive reset must be an explicit user action.
@@ -80,6 +94,14 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
 
     @Synchronized
     override fun save(settings: ProviderSettings) {
+        val comfyUi = settings.comfyUi?.let { value ->
+            JSONObject()
+                .put("lanBaseUrl", value.lanBaseUrl ?: JSONObject.NULL)
+                .put("lanBearerToken", value.lanBearerToken ?: JSONObject.NULL)
+                .put("vpnBaseUrl", value.vpnBaseUrl ?: JSONObject.NULL)
+                .put("vpnBearerToken", value.vpnBearerToken ?: JSONObject.NULL)
+                .put("preference", value.preference.name)
+        } ?: JSONObject.NULL
         val root = JSONObject().put("providers", JSONArray().apply {
             settings.providers.forEach { provider ->
                 put(JSONObject().put("id", provider.id).put("name", provider.name)
@@ -87,6 +109,7 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
             }
         }).put("activeProviderId", settings.activeProviderId ?: "")
             .put("textModel", settings.textModel ?: "").put("voiceModel", settings.voiceModel ?: "")
+            .put("comfyUi", comfyUi)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val encrypted = cipher.iv + cipher.doFinal(root.toString().toByteArray(Charsets.UTF_8))
