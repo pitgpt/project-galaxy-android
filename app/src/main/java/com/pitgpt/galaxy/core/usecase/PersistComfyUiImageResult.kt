@@ -4,6 +4,8 @@ import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Transfers one completed provider result from bounded memory into encrypted media storage.
@@ -13,10 +15,12 @@ class PersistGeneratedImageResult(
     private val resultSource: GeneratedImageResultSource,
     private val images: GeneratedImageRepository
 ) {
+    private val persistenceMutex = Mutex()
+
     suspend operator fun invoke(
         request: ImageGenerationRequest,
         providerJobId: String
-    ): StoredGeneratedImage {
+    ): StoredGeneratedImage = persistenceMutex.withLock {
         require(providerJobId.isNotBlank()) { "Provider job ID must not be blank" }
         images.getForRequest(request.id)?.let { existing ->
             check(
@@ -38,6 +42,6 @@ class PersistGeneratedImageResult(
         check(result.asset.sha256.equals(result.sha256, ignoreCase = true)) {
             "Image checksum metadata does not match the downloaded bytes"
         }
-        return images.save(request, result.asset, result.bytes)
+        images.save(request, result.asset, result.bytes)
     }
 }
