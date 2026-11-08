@@ -34,6 +34,16 @@ class InMemoryComfyUiJobStore : ComfyUiJobStore {
     }
 }
 
+data class ComfyUiCompletedImage(
+    val asset: GeneratedImageAsset,
+    val download: ComfyUiImageDownload
+)
+
+/** Supplies one validated provider result with its bounded in-memory bytes. */
+interface ComfyUiImageResultSource {
+    suspend fun completedImage(providerJobId: String): ComfyUiCompletedImage
+}
+
 /**
  * Adapter for one explicitly mapped ComfyUI workflow. PNG is the initial output format.
  * Image bytes remain in memory and must be passed to encrypted media storage by the caller.
@@ -44,7 +54,7 @@ class ComfyUiImageGenerationProvider(
     private val clientId: String,
     private val client: ComfyUiApiClient,
     private val jobs: ComfyUiJobStore
-) : ImageGenerationProvider {
+) : ImageGenerationProvider, ComfyUiImageResultSource {
     init {
         require(clientId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "ComfyUI client ID is invalid" }
     }
@@ -90,16 +100,26 @@ class ComfyUiImageGenerationProvider(
         jobs.markCancelled(providerJobId)
     }
 
-    override suspend fun result(providerJobId: String): GeneratedImageAsset {
+    override suspend fun result(providerJobId: String): GeneratedImageAsset =
+        completedImage(providerJobId).asset
+
+    /** Bounded bytes in memory only; caller must persist them through encrypted media storage. */
+    suspend fun downloadResult(providerJobId: String): ComfyUiImageDownload =
+        completedImage(providerJobId).download
+
+    /** Downloads once and returns validated metadata together with the exact bytes it describes. */
+    override suspend fun completedImage(providerJobId: String): ComfyUiCompletedImage {
         val job = requireJob(providerJobId)
         check(!job.cancelled) { "Cancelled image generation has no result" }
         val history = client.history(config, providerJobId)
-        check(history.status.state == ImageGenerationState.COMPLETED) { "ComfyUI image generation has not completed" }
+        check(history.status.state == ImageGenerationState.COMPLETED) {
+            "ComfyUI image generation has not completed"
+        }
         val ref = selectOutput(history.images)
         val download = client.download(config, ref)
         check(download.mimeType == PNG_MIME) { "ComfyUI returned an unsupported image format" }
         val (width, height) = pngDimensions(download.bytes)
-        return GeneratedImageAsset(
+        val asset = GeneratedImageAsset(
             assetId = "comfyui:" + providerJobId + ":" + ref.filename,
             requestId = job.requestId,
             mimeType = download.mimeType,
@@ -109,18 +129,7 @@ class ComfyUiImageGenerationProvider(
             sha256 = download.sha256,
             createdAtEpochMillis = job.createdAtEpochMillis
         )
-    }
-
-    /** Bounded bytes in memory only; caller must persist them through encrypted media storage. */
-    suspend fun downloadResult(providerJobId: String): ComfyUiImageDownload {
-        val job = requireJob(providerJobId)
-        check(!job.cancelled) { "Cancelled image generation has no result" }
-        val history = client.history(config, providerJobId)
-        check(history.status.state == ImageGenerationState.COMPLETED) { "ComfyUI image generation has not completed" }
-        return client.download(config, selectOutput(history.images)).also {
-            check(it.mimeType == PNG_MIME) { "ComfyUI returned an unsupported image format" }
-            pngDimensions(it.bytes)
-        }
+        return ComfyUiCompletedImage(asset, download)
     }
 
     private fun selectOutput(images: List<ComfyUiImageReference>) =
