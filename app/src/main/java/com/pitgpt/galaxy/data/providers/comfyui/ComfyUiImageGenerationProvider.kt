@@ -1,11 +1,13 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
 import com.pitgpt.galaxy.core.model.GeneratedImageAsset
+import com.pitgpt.galaxy.core.model.GeneratedImagePayload
 import com.pitgpt.galaxy.core.model.ImageGenerationCapabilities
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.ImageGenerationState
 import com.pitgpt.galaxy.core.model.ImageGenerationStatus
 import com.pitgpt.galaxy.core.repository.ImageGenerationProvider
+import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
 import java.util.concurrent.ConcurrentHashMap
 
 data class ComfyUiJobRecord(
@@ -34,16 +36,6 @@ class InMemoryComfyUiJobStore : ComfyUiJobStore {
     }
 }
 
-data class ComfyUiCompletedImage(
-    val asset: GeneratedImageAsset,
-    val download: ComfyUiImageDownload
-)
-
-/** Supplies one validated provider result with its bounded in-memory bytes. */
-interface ComfyUiImageResultSource {
-    suspend fun completedImage(providerJobId: String): ComfyUiCompletedImage
-}
-
 /**
  * Adapter for one explicitly mapped ComfyUI workflow. PNG is the initial output format.
  * Image bytes remain in memory and must be passed to encrypted media storage by the caller.
@@ -54,7 +46,7 @@ class ComfyUiImageGenerationProvider(
     private val clientId: String,
     private val client: ComfyUiApiClient,
     private val jobs: ComfyUiJobStore
-) : ImageGenerationProvider, ComfyUiImageResultSource {
+) : ImageGenerationProvider, GeneratedImageResultSource {
     init {
         require(clientId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "ComfyUI client ID is invalid" }
     }
@@ -105,10 +97,10 @@ class ComfyUiImageGenerationProvider(
 
     /** Bounded bytes in memory only; caller must persist them through encrypted media storage. */
     suspend fun downloadResult(providerJobId: String): ComfyUiImageDownload =
-        completedImage(providerJobId).download
+        completedImage(providerJobId).let { ComfyUiImageDownload(it.mimeType, it.bytes, it.sha256) }
 
     /** Downloads once and returns validated metadata together with the exact bytes it describes. */
-    override suspend fun completedImage(providerJobId: String): ComfyUiCompletedImage {
+    override suspend fun completedImage(providerJobId: String): GeneratedImagePayload {
         val job = requireJob(providerJobId)
         check(!job.cancelled) { "Cancelled image generation has no result" }
         val history = client.history(config, providerJobId)
@@ -129,7 +121,7 @@ class ComfyUiImageGenerationProvider(
             sha256 = download.sha256,
             createdAtEpochMillis = job.createdAtEpochMillis
         )
-        return ComfyUiCompletedImage(asset, download)
+        return GeneratedImagePayload(asset, download.mimeType, download.bytes, download.sha256)
     }
 
     private fun selectOutput(images: List<ComfyUiImageReference>) =
