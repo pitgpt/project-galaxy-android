@@ -9,6 +9,7 @@ import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
 import java.security.MessageDigest
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -53,9 +54,10 @@ class PersistGeneratedImageResultTest {
 
     @Test
     fun returnsExistingRequestResultWithoutDownloadingAgain() = runBlocking {
-        val source = FakeSource(GeneratedImagePayload(
-            validAsset, "image/png", bytes, sha256(bytes)
-        ))
+        val source = FakeSource(
+            GeneratedImagePayload(validAsset, "image/png", bytes, sha256(bytes)),
+            delayMillis = 10
+        )
         val repository = FakeRepository()
         val useCase = PersistGeneratedImageResult(source, repository)
 
@@ -101,13 +103,15 @@ class PersistGeneratedImageResultTest {
             .joinToString("") { "%02x".format(it) }
 
     private class FakeSource(
-        private val result: GeneratedImagePayload
+        private val result: GeneratedImagePayload,
+        private val delayMillis: Long = 0
     ) : GeneratedImageResultSource {
         var requestedJobId: String? = null
         var downloadCalls: Int = 0
         override suspend fun completedImage(providerJobId: String): GeneratedImagePayload {
             requestedJobId = providerJobId
             downloadCalls++
+            if (delayMillis > 0) delay(delayMillis)
             return result
         }
     }
