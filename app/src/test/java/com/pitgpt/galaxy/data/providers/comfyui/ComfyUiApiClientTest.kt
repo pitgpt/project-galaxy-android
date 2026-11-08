@@ -88,12 +88,14 @@ class ComfyUiApiClientTest {
     }
 
     @Test
-    fun rejectsInvalidPromptIdFromProvider() = runBlocking {
-        val transport = FakeTransport().apply {
-            jsonResponse = ComfyUiApiResponse(200, """{"prompt_id":"../admin"}""")
-        }
-        assertThrows(ComfyUiApiException::class.java) {
-            runBlocking { ComfyUiApiClient(transport).submit(config, template, request, "client-1") }
+    fun rejectsInvalidPromptIdFromProvider() {
+        runBlocking {
+            val transport = FakeTransport().apply {
+                jsonResponse = ComfyUiApiResponse(200, """{"prompt_id":"../admin"}""")
+            }
+            assertThrows(ComfyUiApiException::class.java) {
+                runBlocking { ComfyUiApiClient(transport).submit(config, template, request, "client-1") }
+            }
         }
     }
 
@@ -168,13 +170,15 @@ class ComfyUiApiClientTest {
     }
 
     @Test
-    fun rejectsImageWithMismatchedContentTypeAndSignature() = runBlocking {
-        val transport = FakeTransport().apply {
-            binaryResponse = ComfyUiBinaryResponse(200, "image/png", "<html>".toByteArray())
-        }
-        assertThrows(IllegalArgumentException::class.java) {
-            runBlocking {
-                ComfyUiApiClient(transport).download(config, ComfyUiImageReference("fake.png"))
+    fun rejectsImageWithMismatchedContentTypeAndSignature() {
+        runBlocking {
+            val transport = FakeTransport().apply {
+                binaryResponse = ComfyUiBinaryResponse(200, "image/png", "<html>".toByteArray())
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking {
+                    ComfyUiApiClient(transport).download(config, ComfyUiImageReference("fake.png"))
+                }
             }
         }
     }
