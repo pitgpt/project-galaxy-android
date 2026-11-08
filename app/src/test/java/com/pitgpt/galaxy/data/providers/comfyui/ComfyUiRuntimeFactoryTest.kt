@@ -61,7 +61,7 @@ class ComfyUiRuntimeFactoryTest {
             assertEquals("stored-asset", stored.assetId)
             assertEquals(request.id, images.savedRequest?.id)
             assertEquals("image/png", images.savedAsset?.mimeType)
-            assertArrayEquals(png, images.savedBytes)
+            assertArrayEquals(png, images.savedBytes!!)
             assertEquals(1, transport.binaryDownloads)
         }
     }
