@@ -7,7 +7,6 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import kotlin.coroutines.resumeWith
 
 data class ComfyUiHttpResponse(
     val statusCode: Int,
