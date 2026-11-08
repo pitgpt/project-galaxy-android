@@ -1,12 +1,11 @@
 package com.pitgpt.galaxy.core.usecase
 
 import com.pitgpt.galaxy.core.model.GeneratedImageAsset
+import com.pitgpt.galaxy.core.model.GeneratedImagePayload
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiCompletedImage
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiImageDownload
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiImageResultSource
+import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
 import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -14,7 +13,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class PersistComfyUiImageResultTest {
+class PersistGeneratedImageResultTest {
     private val request = ImageGenerationRequest(
         id = "request-1",
         conversationId = "conversation-1",
@@ -38,12 +37,11 @@ class PersistComfyUiImageResultTest {
 
     @Test
     fun persistsValidatedBytesAndReturnsGalaxyOwnedMetadata() = runBlocking {
-        val source = FakeSource(ComfyUiCompletedImage(
-            validAsset,
-            ComfyUiImageDownload("image/png", bytes, sha256(bytes))
+        val source = FakeSource(GeneratedImagePayload(
+            validAsset, "image/png", bytes, sha256(bytes)
         ))
         val repository = FakeRepository()
-        val saved = PersistComfyUiImageResult(source, repository)(request, "prompt-1")
+        val saved = PersistGeneratedImageResult(source, repository)(request, "prompt-1")
 
         assertEquals("prompt-1", source.requestedJobId)
         assertEquals(request.id, repository.savedRequest?.id)
@@ -53,28 +51,26 @@ class PersistComfyUiImageResultTest {
 
     @Test
     fun rejectsWrongRequestBeforeRepositoryWrite() = runBlocking {
-        val source = FakeSource(ComfyUiCompletedImage(
-            validAsset.copy(requestId = "other-request"),
-            ComfyUiImageDownload("image/png", bytes, sha256(bytes))
+        val source = FakeSource(GeneratedImagePayload(
+            validAsset.copy(requestId = "other-request"), "image/png", bytes, sha256(bytes)
         ))
         val repository = FakeRepository()
 
         assertThrows(IllegalStateException::class.java) {
-            runBlocking { PersistComfyUiImageResult(source, repository)(request, "prompt-1") }
+            runBlocking { PersistGeneratedImageResult(source, repository)(request, "prompt-1") }
         }
         assertEquals(null, repository.savedRequest)
     }
 
     @Test
     fun rejectsMismatchedDownloadChecksumBeforeRepositoryWrite() = runBlocking {
-        val source = FakeSource(ComfyUiCompletedImage(
-            validAsset,
-            ComfyUiImageDownload("image/png", bytes, "0".repeat(64))
+        val source = FakeSource(GeneratedImagePayload(
+            validAsset, "image/png", bytes, "0".repeat(64)
         ))
         val repository = FakeRepository()
 
         assertThrows(IllegalStateException::class.java) {
-            runBlocking { PersistComfyUiImageResult(source, repository)(request, "prompt-1") }
+            runBlocking { PersistGeneratedImageResult(source, repository)(request, "prompt-1") }
         }
         assertEquals(null, repository.savedRequest)
     }
@@ -84,10 +80,10 @@ class PersistComfyUiImageResultTest {
             .joinToString("") { "%02x".format(it) }
 
     private class FakeSource(
-        private val result: ComfyUiCompletedImage
-    ) : ComfyUiImageResultSource {
+        private val result: GeneratedImagePayload
+    ) : GeneratedImageResultSource {
         var requestedJobId: String? = null
-        override suspend fun completedImage(providerJobId: String): ComfyUiCompletedImage {
+        override suspend fun completedImage(providerJobId: String): GeneratedImagePayload {
             requestedJobId = providerJobId
             return result
         }
