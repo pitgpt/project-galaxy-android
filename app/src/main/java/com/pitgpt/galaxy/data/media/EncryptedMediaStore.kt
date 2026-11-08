@@ -136,9 +136,11 @@ class EncryptedMediaStore(
         check(directory.isDirectory) { "The encrypted media path is not a directory." }
     }
 
-    private fun hasStoredAssets(): Boolean =
-        directory.listFiles { file -> file.isFile && file.name.endsWith(FILE_EXTENSION) }
-            ?.isNotEmpty() == true
+    private fun hasStoredAssets(): Boolean {
+        val assets = directory.listFiles { file -> file.isFile && file.name.endsWith(FILE_EXTENSION) }
+            ?: throw IllegalStateException("The encrypted media directory could not be inspected.")
+        return assets.isNotEmpty()
+    }
 
     private fun assetFile(assetId: String): File = File(directory, "$assetId$FILE_EXTENSION")
 
