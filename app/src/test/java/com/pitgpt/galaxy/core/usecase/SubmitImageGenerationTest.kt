@@ -4,6 +4,7 @@ import com.pitgpt.galaxy.core.model.GeneratedImageAsset
 import com.pitgpt.galaxy.core.model.ImageGenerationCapabilities
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.ImageGenerationStatus
+import com.pitgpt.galaxy.core.model.ImageGenerationState
 import com.pitgpt.galaxy.core.repository.ImageGenerationProvider
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -62,6 +63,22 @@ class SubmitImageGenerationTest {
         assertEquals(false, submitCalled)
     }
 
+    @Test
+    fun rejectsUnsupportedPreferredImageFormatBeforeSubmitting() {
+        val pngOnly = capabilities().copy(supportedMimeTypes = setOf("image/png"))
+        val webpRequest = request.copy(preferredMimeType = "image/webp")
+        var submitCalled = false
+        val useCase = SubmitImageGeneration(FakeProvider(
+            supported = pngOnly,
+            onSubmit = { submitCalled = true; "job-123" }
+        ))
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { useCase(webpRequest) }
+        }
+        assertEquals(false, submitCalled)
+    }
+
     private fun capabilities() = ImageGenerationCapabilities(
         supportedMimeTypes = setOf("image/png", "image/webp"),
         minWidth = 256,
@@ -80,7 +97,7 @@ class SubmitImageGenerationTest {
         override suspend fun capabilities() = supported
         override suspend fun submit(request: ImageGenerationRequest) = onSubmit(request)
         override suspend fun status(providerJobId: String) = ImageGenerationStatus(
-            state = com.pitgpt.galaxy.core.model.ImageGenerationState.QUEUED
+            state = ImageGenerationState.QUEUED
         )
         override suspend fun cancel(providerJobId: String) = Unit
         override suspend fun result(providerJobId: String) = GeneratedImageAsset(
