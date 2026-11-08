@@ -43,8 +43,11 @@ class RoomGeneratedImageRepository(
             ) { "The generation request ID is already associated with different Galaxy context" }
             check(
                 existing.mimeType == asset.mimeType &&
+                    existing.width == asset.width &&
+                    existing.height == asset.height &&
                     existing.byteSize == asset.byteSize &&
-                    existing.sha256.equals(asset.sha256, ignoreCase = true)
+                    existing.sha256.equals(asset.sha256, ignoreCase = true) &&
+                    existing.createdAtEpochMillis == asset.createdAtEpochMillis
             ) { "A different image is already persisted for this generation request" }
             return@withLock existing
         }
