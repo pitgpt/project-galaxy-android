@@ -10,6 +10,7 @@ data class ImageGenerationRequest(
     val characterId: String,
     val prompt: String,
     val negativePrompt: String? = null,
+    val preferredMimeType: String? = null,
     val workflowId: String? = null,
     val width: Int = 1024,
     val height: Int = 1024,
@@ -25,6 +26,9 @@ data class ImageGenerationRequest(
         require(prompt.length <= MAX_PROMPT_LENGTH) { "Prompt is too long" }
         require(negativePrompt == null || negativePrompt.length <= MAX_PROMPT_LENGTH) {
             "Negative prompt is too long"
+        }
+        require(preferredMimeType == null || preferredMimeType.contains("/")) {
+            "Preferred MIME type is invalid"
         }
         require(width > 0 && height > 0) { "Image dimensions must be positive" }
         require(referenceAssetIds.all { it.isNotBlank() }) {
@@ -59,6 +63,7 @@ data class ImageGenerationCapabilities(
     fun supports(request: ImageGenerationRequest): Boolean =
         request.width in minWidth..maxWidth &&
             request.height in minHeight..maxHeight &&
+            (request.preferredMimeType == null || request.preferredMimeType in supportedMimeTypes) &&
             (request.referenceAssetIds.isEmpty() || supportsReferenceImages)
 }
 
@@ -99,6 +104,8 @@ data class GeneratedImageAsset(
         require(mimeType.isNotBlank()) { "MIME type must not be blank" }
         require(width > 0 && height > 0) { "Image dimensions must be positive" }
         require(byteSize > 0) { "Image byte size must be positive" }
-        require(sha256.matches(Regex("[a-fA-F0-9]{64}"))) { "SHA-256 must contain 64 hexadecimal characters" }
+        require(sha256.matches(Regex("[a-fA-F0-9]{64}"))) {
+            "SHA-256 must contain 64 hexadecimal characters"
+        }
     }
 }
