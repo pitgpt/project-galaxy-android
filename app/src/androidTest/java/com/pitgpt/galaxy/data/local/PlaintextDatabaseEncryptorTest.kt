@@ -209,7 +209,9 @@ class PlaintextDatabaseEncryptorTest {
 
         val pending = try {
             assertTrue(walDatabase.enableWriteAheadLogging())
-            walDatabase.execSQL("PRAGMA wal_autocheckpoint=0")
+            walDatabase.rawQuery("PRAGMA wal_autocheckpoint=0", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+            }
             walDatabase.execSQL("INSERT INTO character_profiles VALUES ('wal-only', 'WAL record')")
 
             val wal = File(databaseFile.path + "-wal")
