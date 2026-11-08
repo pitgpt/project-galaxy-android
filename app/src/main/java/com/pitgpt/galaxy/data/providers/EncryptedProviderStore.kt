@@ -111,7 +111,12 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
 
     private fun getOrCreateKey(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (store.containsAlias(KEY_ALIAS)) {
+        val aliasExists = store.containsAlias(KEY_ALIAS)
+        requireProviderKeyCreationAllowed(
+            hasStoredCiphertext = prefs.contains(DATA_KEY),
+            keyAliasExists = aliasExists
+        )
+        if (aliasExists) {
             return store.getKey(KEY_ALIAS, null) as? SecretKey
                 ?: throw IllegalStateException("The provider encryption key exists but is unavailable.")
         }
@@ -131,5 +136,15 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val IV_BYTES = 12
         const val TAG_BITS = 128
+    }
+}
+
+/**
+ * Prevents a save path from replacing encrypted settings when their original Keystore key is gone.
+ * A missing key with existing ciphertext is a locked-data state, not a first-run state.
+ */
+internal fun requireProviderKeyCreationAllowed(hasStoredCiphertext: Boolean, keyAliasExists: Boolean) {
+    check(keyAliasExists || !hasStoredCiphertext) {
+        "Saved provider settings exist but their encryption key is missing; refusing to overwrite them."
     }
 }

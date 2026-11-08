@@ -45,4 +45,21 @@ class ProviderSettingsOperationsTest {
         assertEquals(emptyList<AiProviderConfig>(), result.providers)
         assertEquals(null, result.activeProviderId)
     }
+
+    @Test
+    fun refusesReplacementKeyWhenEncryptedSettingsExistButKeystoreAliasIsMissing() {
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            requireProviderKeyCreationAllowed(hasStoredCiphertext = true, keyAliasExists = false)
+        }
+    }
+
+    @Test
+    fun allowsFirstRunKeyCreationWhenNoEncryptedSettingsExist() {
+        requireProviderKeyCreationAllowed(hasStoredCiphertext = false, keyAliasExists = false)
+    }
+
+    @Test
+    fun allowsExistingKeystoreKeyToUnlockExistingCiphertext() {
+        requireProviderKeyCreationAllowed(hasStoredCiphertext = true, keyAliasExists = true)
+    }
 }
