@@ -1,5 +1,7 @@
 package com.pitgpt.galaxy.data.local
 
+import java.io.File
+
 import android.content.Context
 import android.util.Base64
 import androidx.room.Room
