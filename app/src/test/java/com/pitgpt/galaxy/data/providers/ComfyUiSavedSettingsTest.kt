@@ -118,6 +118,19 @@ class ComfyUiSavedSettingsTest {
     }
 
     @Test
+    fun enteredTokenWinsWhenClearAndReplacementAreSelectedTogether() {
+        val token = resolveComfyUiBearerToken(
+            endpoint = "https://comfy.example.net",
+            enteredToken = "  replacement-token  ",
+            clearSavedToken = true,
+            previousEndpoint = "https://comfy.example.net",
+            previousToken = "existing-token"
+        )
+
+        assertEquals("replacement-token", token)
+    }
+
+    @Test
     fun explicitRemovalOrEndpointRemovalClearsSavedToken() {
         assertEquals(
             null,
