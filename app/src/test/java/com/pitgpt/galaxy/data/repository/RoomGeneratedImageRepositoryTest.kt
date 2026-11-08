@@ -63,6 +63,20 @@ class RoomGeneratedImageRepositoryTest {
     }
 
     @Test
+    fun repeatedSaveForSameRequestReturnsExistingEncryptedAsset() = runBlocking {
+        val request = request("conversation-a")
+        val bytes = ByteArray(48) { (it * 5).toByte() }
+
+        val first = repository.save(request, asset(request.id, bytes), bytes)
+        val second = repository.save(request, asset(request.id, bytes), bytes)
+
+        assertEquals(first, second)
+        assertEquals(first, repository.getForRequest(request.id))
+        assertEquals(1, mediaDirectory.listFiles { file -> file.extension == "gcm" }?.size)
+        assertArrayEquals(bytes, repository.read(first.assetId))
+    }
+
+    @Test
     fun listsOnlyImagesForRequestedConversation() = runBlocking {
         val first = request("conversation-a")
         val second = request("conversation-b")
