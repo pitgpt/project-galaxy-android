@@ -1,6 +1,7 @@
 package com.pitgpt.galaxy.data.local
 
 import android.content.Context
+import android.util.Base64
 import androidx.room.Room
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
@@ -44,14 +45,16 @@ object GalaxyDatabaseFactory {
             )
         }
 
-        val passphrase = android.util.Base64.encodeToString(databaseKey, android.util.Base64.NO_WRAP)
+        // Encode directly to bytes so an immutable passphrase String is not left on the heap.
+        val passphraseBytes = Base64.encode(databaseKey, Base64.NO_WRAP)
         databaseKey.fill(0)
-        val passphraseBytes = passphrase.toByteArray(Charsets.UTF_8)
         val database = Room.databaseBuilder(
             context,
             GalaxyDatabase::class.java,
             DATABASE_NAME
         )
+            // SQLCipher's helper retains this byte array for the lifetime of the helper so it can
+            // reopen the database. Do not zero it after the first open; clear it on failed setup.
             .openHelperFactory(SupportOpenHelperFactory(passphraseBytes, null, true))
             .addMigrations(MIGRATION_1_2)
             .build()
