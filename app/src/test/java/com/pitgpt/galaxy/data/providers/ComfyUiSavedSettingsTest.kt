@@ -64,4 +64,80 @@ class ComfyUiSavedSettingsTest {
             ).toEndpointOptions()
         }
     }
+
+    @Test
+    fun preservesSavedTokenWhenNormalizedEndpointIsUnchanged() {
+        val token = resolveComfyUiBearerToken(
+            endpoint = "https://comfy.example.net/",
+            enteredToken = "",
+            clearSavedToken = false,
+            previousEndpoint = "https://comfy.example.net",
+            previousToken = "existing-token"
+        )
+
+        assertEquals("existing-token", token)
+    }
+
+    @Test
+    fun doesNotForwardSavedTokenWhenEndpointHostChanges() {
+        val token = resolveComfyUiBearerToken(
+            endpoint = "https://other.example.net",
+            enteredToken = "",
+            clearSavedToken = false,
+            previousEndpoint = "https://comfy.example.net",
+            previousToken = "existing-token"
+        )
+
+        assertEquals(null, token)
+    }
+
+    @Test
+    fun doesNotForwardSavedTokenWhenEndpointPortChanges() {
+        val token = resolveComfyUiBearerToken(
+            endpoint = "http://192.168.1.20:8189",
+            enteredToken = "",
+            clearSavedToken = false,
+            previousEndpoint = "http://192.168.1.20:8188",
+            previousToken = "existing-token"
+        )
+
+        assertEquals(null, token)
+    }
+
+    @Test
+    fun explicitTokenReplacesSavedTokenForChangedEndpoint() {
+        val token = resolveComfyUiBearerToken(
+            endpoint = "https://other.example.net",
+            enteredToken = "  replacement-token  ",
+            clearSavedToken = false,
+            previousEndpoint = "https://comfy.example.net",
+            previousToken = "existing-token"
+        )
+
+        assertEquals("replacement-token", token)
+    }
+
+    @Test
+    fun explicitRemovalOrEndpointRemovalClearsSavedToken() {
+        assertEquals(
+            null,
+            resolveComfyUiBearerToken(
+                endpoint = "https://comfy.example.net",
+                enteredToken = "",
+                clearSavedToken = true,
+                previousEndpoint = "https://comfy.example.net",
+                previousToken = "existing-token"
+            )
+        )
+        assertEquals(
+            null,
+            resolveComfyUiBearerToken(
+                endpoint = null,
+                enteredToken = "",
+                clearSavedToken = false,
+                previousEndpoint = "https://comfy.example.net",
+                previousToken = "existing-token"
+            )
+        )
+    }
 }
