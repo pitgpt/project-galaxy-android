@@ -32,6 +32,13 @@ data class ComfyUiConnectionConfig(
         }
     }
 
+    /** Avoid leaking bearer credentials through generated data-class logging. */
+    override fun toString(): String =
+        "ComfyUiConnectionConfig(baseUrl=$normalizedBaseUrl, " +
+            "bearerTokenConfigured=${bearerToken != null}, " +
+            "connectTimeoutMillis=$connectTimeoutMillis, " +
+            "readTimeoutMillis=$readTimeoutMillis)"
+
     fun endpoint(path: String): String {
         require(path.startsWith("/") && !path.startsWith("//")) {
             "ComfyUI API path must be an absolute path"
