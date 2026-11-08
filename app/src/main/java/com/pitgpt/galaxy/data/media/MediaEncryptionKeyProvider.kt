@@ -1,6 +1,5 @@
 package com.pitgpt.galaxy.data.media
 
-import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
@@ -14,9 +13,7 @@ interface MediaEncryptionKeyProvider {
 }
 
 /** Device-bound media key. Reading never creates a replacement for a missing key. */
-class AndroidKeystoreMediaKeyProvider(context: Context) : MediaEncryptionKeyProvider {
-    private val appContext = context.applicationContext
-
+class AndroidKeystoreMediaKeyProvider : MediaEncryptionKeyProvider {
     @Synchronized
     override fun getOrCreateKey(): SecretKey {
         val keyStore = loadKeyStore()
