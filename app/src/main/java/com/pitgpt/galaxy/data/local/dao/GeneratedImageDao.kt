@@ -14,6 +14,9 @@ interface GeneratedImageDao {
     @Query("SELECT * FROM generated_images WHERE assetId = :assetId LIMIT 1")
     suspend fun get(assetId: String): GeneratedImageEntity?
 
+    @Query("SELECT * FROM generated_images WHERE requestId = :requestId ORDER BY createdAtEpochMillis ASC LIMIT 1")
+    suspend fun getForRequest(requestId: String): GeneratedImageEntity?
+
     @Query("""
         SELECT * FROM generated_images
         WHERE conversationId = :conversationId
