@@ -50,9 +50,27 @@ class ComfyUiImageGenerationProviderTest {
         }
         provider(transport, store).cancel("prompt-123")
         assertTrue(store.get("prompt-123")!!.cancelled)
-        assertEquals(listOf("GET", "POST", "GET"), transport.methods)
+        assertEquals(listOf("GET", "POST", "GET", "GET"), transport.methods)
         assertTrue(String(transport.bodies[1]!!, Charsets.UTF_8).contains("prompt-123"))
         assertFalse(transport.urls.any { it.endsWith("/interrupt") })
+    }
+
+    @Test fun completedJobIsNotMarkedCancelledWhenItFinishesDuringQueueDeletion() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
+            responses.add(ComfyUiApiResponse(200, """{}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"prompt-123":{"status":{"status_str":"success","completed":true},"outputs":{}}}"""))
+        }
+        val store = InMemoryComfyUiJobStore().apply {
+            runBlocking { put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis)) }
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, store).cancel("prompt-123") }
+        }
+        assertFalse(store.get("prompt-123")!!.cancelled)
+        assertEquals(listOf("GET", "POST", "GET", "GET"), transport.methods)
     }
 
     @Test fun runningCancellationIsRejectedWithoutDelete() {
