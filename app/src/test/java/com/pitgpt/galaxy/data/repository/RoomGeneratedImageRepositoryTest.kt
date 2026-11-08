@@ -93,17 +93,19 @@ class RoomGeneratedImageRepositoryTest {
     }
 
     @Test
-    fun deleteRemovesMetadataAndCiphertext() = runBlocking {
-        val request = request("conversation-a")
-        val bytes = ByteArray(40) { 9 }
-        val saved = repository.save(request, asset(request.id, bytes), bytes)
+    fun deleteRemovesMetadataAndCiphertext() {
+        runBlocking {
+            val request = request("conversation-a")
+            val bytes = ByteArray(40) { 9 }
+            val saved = repository.save(request, asset(request.id, bytes), bytes)
 
-        repository.delete(saved.assetId)
+            repository.delete(saved.assetId)
 
-        assertNull(repository.get(saved.assetId))
-        assertFalse(mediaStore.contains(saved.assetId))
-        assertThrows(IllegalArgumentException::class.java) {
-            runBlocking { repository.read(saved.assetId) }
+            assertNull(repository.get(saved.assetId))
+            assertFalse(mediaStore.contains(saved.assetId))
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking { repository.read(saved.assetId) }
+            }
         }
     }
 
