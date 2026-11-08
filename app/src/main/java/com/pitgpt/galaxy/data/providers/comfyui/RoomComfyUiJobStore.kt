@@ -1,8 +1,7 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
 import com.pitgpt.galaxy.data.local.dao.ComfyUiJobDao
-import com.pitgpt.galaxy.data.local.entity.toDomain
-import com.pitgpt.galaxy.data.local.entity.toEntity
+import com.pitgpt.galaxy.data.local.entity.ComfyUiJobEntity
 
 /**
  * Durable job correlation backed by Galaxy's SQLCipher-encrypted Room database.
@@ -20,11 +19,25 @@ class RoomComfyUiJobStore(
     }
 
     override suspend fun get(promptId: String): ComfyUiJobRecord? =
-        dao.get(promptId)?.toDomain()
+        dao.get(promptId)?.toRecord()
 
     override suspend fun markCancelled(promptId: String) {
         check(dao.markCancelled(promptId) == 1) {
             "ComfyUI job could not be marked as cancelled"
         }
     }
+
+    private fun ComfyUiJobRecord.toEntity() = ComfyUiJobEntity(
+        promptId = promptId,
+        requestId = requestId,
+        createdAtEpochMillis = createdAtEpochMillis,
+        cancelled = cancelled
+    )
+
+    private fun ComfyUiJobEntity.toRecord() = ComfyUiJobRecord(
+        promptId = promptId,
+        requestId = requestId,
+        createdAtEpochMillis = createdAtEpochMillis,
+        cancelled = cancelled
+    )
 }
