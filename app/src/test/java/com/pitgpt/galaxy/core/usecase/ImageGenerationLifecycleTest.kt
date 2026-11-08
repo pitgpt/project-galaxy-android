@@ -44,6 +44,22 @@ class ImageGenerationLifecycleTest {
     }
 
     @Test
+    fun cancelsQueuedJobWhenOnlyQueuedCancellationIsSupported() = runBlocking {
+        val provider = FakeProvider(
+            capabilities = capabilities().copy(
+                supportsCancellation = false,
+                supportsQueuedCancellation = true,
+                supportsRunningCancellation = false
+            ),
+            status = ImageGenerationStatus(ImageGenerationState.QUEUED)
+        )
+
+        CancelImageGeneration(provider)("job-queued-only")
+
+        assertEquals("job-queued-only", provider.cancelledJobId)
+    }
+
+    @Test
     fun cancelsRunningJobWhenProviderSupportsCancellation() = runBlocking {
         val provider = FakeProvider(
             capabilities = capabilities().copy(supportsCancellation = true),
@@ -56,9 +72,30 @@ class ImageGenerationLifecycleTest {
     }
 
     @Test
+    fun refusesRunningCancellationWhenProviderOnlySupportsQueuedCancellation() {
+        val provider = FakeProvider(
+            capabilities = capabilities().copy(
+                supportsCancellation = false,
+                supportsQueuedCancellation = true,
+                supportsRunningCancellation = false
+            ),
+            status = ImageGenerationStatus(ImageGenerationState.RUNNING)
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { CancelImageGeneration(provider)("job-running-unsupported") }
+        }
+        assertEquals(null, provider.cancelledJobId)
+    }
+
+    @Test
     fun refusesCancellationWhenProviderDoesNotSupportIt() {
         val provider = FakeProvider(
-            capabilities = capabilities().copy(supportsCancellation = false),
+            capabilities = capabilities().copy(
+                supportsCancellation = false,
+                supportsQueuedCancellation = false,
+                supportsRunningCancellation = false
+            ),
             status = ImageGenerationStatus(ImageGenerationState.RUNNING)
         )
 
