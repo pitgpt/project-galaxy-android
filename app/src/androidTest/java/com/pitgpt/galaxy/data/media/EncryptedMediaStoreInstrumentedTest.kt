@@ -76,22 +76,38 @@ class EncryptedMediaStoreInstrumentedTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val legacyRules = readExclusions(context.resources.getXml(R.xml.backup_rules))
         val extractionRules = readExclusions(context.resources.getXml(R.xml.data_extraction_rules))
+        val mediaExclusion = "file" to "galaxy_media/"
 
         assertTrue("Legacy full-backup rules must exclude encrypted media",
-            ("file" to "galaxy_media/") in legacyRules)
-        assertTrue("Cloud/device-transfer rules must exclude encrypted media",
-            ("file" to "galaxy_media/") in extractionRules)
-        assertTrue(("database" to ".") in extractionRules)
+            mediaExclusion in legacyRules.getValue("root"))
+        assertTrue("Cloud backup rules must exclude encrypted media",
+            mediaExclusion in extractionRules.getValue("cloud-backup"))
+        assertTrue("Device-transfer rules must exclude encrypted media",
+            mediaExclusion in extractionRules.getValue("device-transfer"))
+        assertTrue(("database" to ".") in extractionRules.getValue("cloud-backup"))
+        assertTrue(("database" to ".") in extractionRules.getValue("device-transfer"))
     }
 
-    private fun readExclusions(parser: android.content.res.XmlResourceParser): Set<Pair<String, String>> {
-        val exclusions = mutableSetOf<Pair<String, String>>()
+    private fun readExclusions(
+        parser: android.content.res.XmlResourceParser
+    ): Map<String, Set<Pair<String, String>>> {
+        val exclusions = mutableMapOf<String, MutableSet<Pair<String, String>>>()
+        var section = "root"
         try {
             var event = parser.eventType
             while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
-                if (event == org.xmlpull.v1.XmlPullParser.START_TAG && parser.name == "exclude") {
-                    exclusions += parser.getAttributeValue(null, "domain").orEmpty() to
-                        parser.getAttributeValue(null, "path").orEmpty()
+                if (event == org.xmlpull.v1.XmlPullParser.START_TAG) {
+                    when (parser.name) {
+                        "cloud-backup", "device-transfer" -> section = parser.name
+                        "exclude" -> exclusions.getOrPut(section) { mutableSetOf() }.add(
+                            parser.getAttributeValue(null, "domain").orEmpty() to
+                                parser.getAttributeValue(null, "path").orEmpty()
+                        )
+                    }
+                } else if (event == org.xmlpull.v1.XmlPullParser.END_TAG &&
+                    (parser.name == "cloud-backup" || parser.name == "device-transfer")
+                ) {
+                    section = "root"
                 }
                 event = parser.next()
             }
