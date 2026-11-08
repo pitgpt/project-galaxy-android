@@ -42,6 +42,7 @@ The project remains a single Gradle module, with package boundaries separating r
 - `data/repository`: Room-backed repository implementations
 - `data/auth`: Supabase authentication and encrypted session handling
 - `data/remote`: authenticated backend API client
+- `data/providers`: encrypted provider settings and provider-neutral text generation adapters
 - `data/voice`: Realtime voice orchestration and WebRTC transport
 - `backend`: FastAPI service for authenticated ephemeral Realtime credentials
 
@@ -63,4 +64,4 @@ Conversation messages are stored with a character ID, so each character's histor
 - Backend production deployment and a real HTTPS API endpoint are not configured yet. The app's default API URL is a deliberate placeholder.
 - STUN is configured for common NAT traversal. A managed TURN service is still needed for restrictive networks.
 
-See [backend/README.md](backend/README.md) for backend configuration, local startup, and deployment requirements.
+See [docs/architecture/text-provider-architecture.md](docs/architecture/text-provider-architecture.md) for the text-provider boundary and future adapter requirements. See [backend/README.md](backend/README.md) for backend configuration, local startup, and deployment requirements.

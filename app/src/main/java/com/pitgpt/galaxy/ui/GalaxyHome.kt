@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
@@ -56,9 +58,11 @@ import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
+import com.pitgpt.galaxy.core.usecase.GenerateCharacterReply
 import com.pitgpt.galaxy.data.voice.RealtimeVoiceController
 import com.pitgpt.galaxy.data.voice.RealtimeVoiceStatus
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -81,6 +85,7 @@ fun GalaxyHome() {
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showMemory by remember { mutableStateOf(false) }
     var showProviders by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
@@ -264,12 +269,19 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showMemory) {
+        MemoryManagementScreen(
+            repository = app.memories,
+            activeCharacterId = activeCharacterId,
+            onBack = { showMemory = false; showSettings = true }
+        )
     } else if (showProviders) {
         AiProvidersScreen(store = app.providerStore, onBack = { showProviders = false; showSettings = true })
     } else if (showSettings) {
         AppSettingsScreen(
             onBack = { showSettings = false },
-            onOpenProviders = { showSettings = false; showProviders = true }
+            onOpenProviders = { showSettings = false; showProviders = true },
+            onOpenMemory = { showSettings = false; showMemory = true }
         )
     } else if (showChat) {
         ConversationScreen(
@@ -290,8 +302,23 @@ fun GalaxyHome() {
             onToggleMute = { voiceController.setMicrophoneEnabled(voiceState.muted) },
             onBack = { voiceController.disconnect(); showChat = false },
             onSend = { text ->
-                val message = SendMessage(app.conversations).invoke(activeCharacterId, text)
-                messages.add(message)
+                val userMessage = SendMessage(app.conversations).invoke(activeCharacterId, text)
+                messages.add(userMessage)
+                try {
+                    val selectedProfile = requireNotNull(profile) { "Active character profile is missing" }
+                    val reply = GenerateCharacterReply(
+                        conversations = app.conversations,
+                        providerStore = app.providerStore
+                    ).invoke(
+                        characterId = activeCharacterId,
+                        systemPrompt = selectedProfile.personaDefinition
+                    )
+                    messages.add(reply)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    throw CharacterReplyGenerationException(error)
+                }
             }
         )
     } else {
@@ -329,10 +356,11 @@ private fun HomeScreen(
         )
     ) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 26.dp, vertical = 22.dp),
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = 26.dp, vertical = 22.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Column {
                     Text("PROJECT", color = Muted, fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
@@ -355,8 +383,8 @@ private fun HomeScreen(
                     Text(BuildConfig.GIT_SHA, color = Color(0xFF657AAB), fontSize = 8.sp)
                 }
             }
-            Spacer(Modifier.weight(1f))
-            Box(Modifier.size(238.dp), contentAlignment = Alignment.Center) {
+            Spacer(Modifier.height(24.dp))
+            Box(Modifier.size(208.dp), contentAlignment = Alignment.Center) {
                 Box(Modifier.size(230.dp).border(1.dp, Color(0x447C8DDB), CircleShape)
                     .padding(13.dp).border(1.dp, Color(0x337FCBFF), CircleShape))
                 Box(Modifier.size(174.dp).background(
@@ -373,7 +401,7 @@ private fun HomeScreen(
                     ?: "Твоё личное пространство для мыслей, идей и разговоров.",
                 color = Muted, fontSize = 15.sp, lineHeight = 23.sp, textAlign = TextAlign.Center
             )
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(24.dp))
             Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp))
                     .background(Color(0xAA18213B))
@@ -466,6 +494,11 @@ private fun ConversationScreen(
             try {
                 onSend(value)
                 draft = ""
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: CharacterReplyGenerationException) {
+                draft = ""
+                sendError = "Сообщение сохранено, но ответ AI не получен. Проверь провайдера и повтори позже."
             } catch (error: Exception) {
                 sendError = "Не удалось сохранить сообщение. Текст остался в поле, попробуй ещё раз."
             } finally {
@@ -1078,3 +1111,5 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
         }
     }
 }
+
+private class CharacterReplyGenerationException(cause: Throwable) : Exception(cause)

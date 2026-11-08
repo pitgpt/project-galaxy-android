@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -23,13 +24,14 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun AppSettingsScreen(
     onBack: () -> Unit,
-    onOpenProviders: () -> Unit
+    onOpenProviders: () -> Unit,
+    onOpenMemory: () -> Unit
 ) {
     Column(
         Modifier.fillMaxSize().background(Color(0xFF080B18)).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) {
                 Text("‹ НАЗАД", color = Color(0xFFB8D9FF))
             }
@@ -41,6 +43,17 @@ fun AppSettingsScreen(
             color = Color(0xFF9AA8C5),
             fontSize = 13.sp
         )
+        Button(
+            onClick = onOpenMemory,
+            modifier = Modifier.fillMaxWidth().height(58.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Text("ПАМЯТЬ", color = Color.White)
+                Text("Просмотр, экспорт и удаление записей", color = Color(0xFFB8C7E5), fontSize = 11.sp)
+            }
+        }
         Button(
             onClick = onOpenProviders,
             modifier = Modifier.fillMaxWidth().height(58.dp),
