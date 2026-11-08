@@ -35,6 +35,9 @@ data class ComfyUiSavedSettings(
 /**
  * Reuses a saved bearer token only when the endpoint origin is unchanged. A token must never be
  * silently forwarded to a different host or port after the user edits an endpoint.
+ *
+ * A newly entered token takes precedence over the clear-saved-token flag so replacing a credential
+ * in the same edit operation cannot accidentally persist a null token.
  */
 internal fun resolveComfyUiBearerToken(
     endpoint: String?,
@@ -43,8 +46,9 @@ internal fun resolveComfyUiBearerToken(
     previousEndpoint: String?,
     previousToken: String?
 ): String? {
-    if (endpoint.isNullOrBlank() || clearSavedToken) return null
+    if (endpoint.isNullOrBlank()) return null
     enteredToken?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    if (clearSavedToken) return null
 
     val nextOrigin = runCatching { ComfyUiConnectionConfig(endpoint).normalizedBaseUrl }.getOrNull()
     val previousOrigin = previousEndpoint?.let {
