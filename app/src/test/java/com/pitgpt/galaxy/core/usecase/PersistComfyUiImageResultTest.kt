@@ -7,6 +7,8 @@ import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
 import java.security.MessageDigest
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -57,8 +59,11 @@ class PersistGeneratedImageResultTest {
         val repository = FakeRepository()
         val useCase = PersistGeneratedImageResult(source, repository)
 
-        val first = useCase(request, "prompt-1")
-        val second = useCase(request, "prompt-1")
+        val (first, second) = coroutineScope {
+            val firstCall = async { useCase(request, "prompt-1") }
+            val secondCall = async { useCase(request, "prompt-1") }
+            firstCall.await() to secondCall.await()
+        }
 
         assertEquals(first, second)
         assertEquals(1, source.downloadCalls)
