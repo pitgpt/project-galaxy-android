@@ -33,17 +33,19 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
         }
 
         val key = ByteArray(DATABASE_KEY_BYTES).also(SecureRandom()::nextBytes)
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateWrappingKey())
-        val payload = cipher.iv + cipher.doFinal(key)
-        val saved = preferences.edit()
-            .putString(WRAPPED_KEY, Base64.encodeToString(payload, Base64.NO_WRAP))
-            .commit()
-        if (!saved) {
+        try {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateWrappingKey())
+            val payload = cipher.iv + cipher.doFinal(key)
+            val saved = preferences.edit()
+                .putString(WRAPPED_KEY, Base64.encodeToString(payload, Base64.NO_WRAP))
+                .commit()
+            check(saved) { "Could not persist the wrapped Galaxy database key." }
+            return key
+        } catch (failure: Exception) {
             key.fill(0)
-            error("Could not persist the wrapped Galaxy database key.")
+            throw failure
         }
-        return key
     }
 
     private fun decrypt(encoded: String): ByteArray {
@@ -78,6 +80,7 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
                     KEY_ALIAS,
                     KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
                 )
+                    .setKeySize(WRAPPING_KEY_BITS)
                     .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .setRandomizedEncryptionRequired(true)
@@ -94,6 +97,7 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
         const val ANDROID_KEY_STORE = "AndroidKeyStore"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val DATABASE_KEY_BYTES = 32
+        const val WRAPPING_KEY_BITS = 256
         const val IV_BYTES = 12
         const val TAG_BITS = 128
     }
