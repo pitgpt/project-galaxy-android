@@ -69,6 +69,28 @@ class RoomGeneratedImageRepositoryTest {
     }
 
     @Test
+    fun clearsDecryptedBytesWhenStoredSizeDoesNotMatchMetadata() {
+        val bytes = ByteArray(16) { (it + 1).toByte() }
+
+        assertThrows(IllegalStateException::class.java) {
+            validateDecryptedGeneratedImageBytes(bytes, bytes.size.toLong() + 1, "0".repeat(64))
+        }
+
+        assertArrayEquals(ByteArray(bytes.size), bytes)
+    }
+
+    @Test
+    fun clearsDecryptedBytesWhenStoredChecksumDoesNotMatchMetadata() {
+        val bytes = ByteArray(16) { (it + 1).toByte() }
+
+        assertThrows(IllegalStateException::class.java) {
+            validateDecryptedGeneratedImageBytes(bytes, bytes.size.toLong(), "0".repeat(64))
+        }
+
+        assertArrayEquals(ByteArray(bytes.size), bytes)
+    }
+
+    @Test
     fun repeatedSaveForSameRequestReturnsExistingEncryptedAsset() = runBlocking {
         val request = request("conversation-a")
         val bytes = ByteArray(48) { (it * 5).toByte() }

@@ -17,6 +17,47 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
+internal fun validateDecryptedGeneratedImageBytes(
+    bytes: ByteArray,
+    expectedByteSize: Long,
+    expectedSha256: String
+): ByteArray {
+    try {
+        check(bytes.size.toLong() == expectedByteSize) {
+            "Stored generated image size does not match its metadata"
+        }
+        check(sha256(bytes).equals(expectedSha256, ignoreCase = true)) {
+            "Stored generated image checksum does not match its metadata"
+        }
+        return bytes
+    } catch (failure: Exception) {
+        // Do not leave decrypted image bytes in memory when metadata validation fails.
+        bytes.fill(0)
+        throw failure
+    }
+}
+
+private fun sha256(bytes: ByteArray): String =
+    MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+
+import com.pitgpt.galaxy.core.model.GeneratedImageAsset
+import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.model.StoredGeneratedImage
+import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
+import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
+import com.pitgpt.galaxy.data.local.entity.toDomain
+import com.pitgpt.galaxy.data.local.entity.toEntity
+import com.pitgpt.galaxy.data.media.EncryptedMediaStore
+import java.security.MessageDigest
+import java.util.UUID
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
 /**
  * Coordinates encrypted binary storage with SQLCipher-backed metadata.
  * A failed metadata insert compensates by removing the just-written ciphertext.
@@ -124,11 +165,7 @@ class RoomGeneratedImageRepository(
         val bytes = withContext(ioDispatcher) {
             mediaStore.read(assetId, metadata.mimeType)
         }
-        check(bytes.size.toLong() == metadata.byteSize) { "Stored generated image size does not match its metadata" }
-        check(sha256(bytes).equals(metadata.sha256, ignoreCase = true)) {
-            "Stored generated image checksum does not match its metadata"
-        }
-        return bytes
+        return validateDecryptedGeneratedImageBytes(bytes, metadata.byteSize, metadata.sha256)
     }
 
     override suspend fun delete(assetId: String) {
@@ -143,10 +180,6 @@ class RoomGeneratedImageRepository(
     private fun requireValidAssetId(assetId: String) {
         require(ASSET_ID_PATTERN.matches(assetId)) { "Generated image asset ID is invalid" }
     }
-
-    private fun sha256(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes)
-            .joinToString("") { "%02x".format(it) }
 
     private companion object {
         val SUPPORTED_MIME_TYPES = setOf("image/png", "image/jpeg", "image/webp")
