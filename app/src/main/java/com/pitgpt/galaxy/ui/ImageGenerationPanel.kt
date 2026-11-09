@@ -41,6 +41,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal fun imageGenerationNavigationLocked(isSubmitting: Boolean, hasActiveJob: Boolean): Boolean =
+    isSubmitting || hasActiveJob
+
 internal fun imageGenerationStatusLabel(state: ImageGenerationState): String =
     when (state) {
         ImageGenerationState.QUEUED -> "В очереди"
@@ -102,7 +105,8 @@ internal fun ImageGenerationPanel(
     app: GalaxyApplication,
     characterId: String,
     modifier: Modifier = Modifier,
-    onActiveChanged: (Boolean) -> Unit
+    onActiveChanged: (Boolean) -> Unit,
+    onSubmittingChanged: (Boolean) -> Unit
 ) {
     var runtime by remember { mutableStateOf<ComfyUiRuntime?>(null) }
     var setupError by remember { mutableStateOf<String?>(null) }
@@ -228,6 +232,7 @@ internal fun ImageGenerationPanel(
                     return@Button
                 }
                 isSubmitting = true
+                onSubmittingChanged(true)
                 panelError = null
                 scope.launch {
                     try {
@@ -242,6 +247,7 @@ internal fun ImageGenerationPanel(
                         panelError = "Не удалось отправить задание. Проверь ComfyUI и сохранённый workflow."
                     } finally {
                         isSubmitting = false
+                        onSubmittingChanged(false)
                     }
                 }
             }

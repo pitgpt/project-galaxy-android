@@ -13,6 +13,14 @@ import org.junit.Test
 
 class ImageGenerationPanelTest {
     @Test
+    fun locksConversationNavigationWhileSubmittingOrTrackingAnActiveJob() {
+        assertFalse(imageGenerationNavigationLocked(isSubmitting = true, hasActiveJob = false))
+        assertFalse(imageGenerationNavigationLocked(isSubmitting = false, hasActiveJob = true))
+        assertFalse(imageGenerationNavigationLocked(isSubmitting = true, hasActiveJob = true))
+        assertTrue(!imageGenerationNavigationLocked(isSubmitting = false, hasActiveJob = false))
+    }
+
+    @Test
     fun mapsEveryProviderStateToARussianLabel() {
         assertEquals("В очереди", imageGenerationStatusLabel(ImageGenerationState.QUEUED))
         assertEquals("Выполняется", imageGenerationStatusLabel(ImageGenerationState.RUNNING))

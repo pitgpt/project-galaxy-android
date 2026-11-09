@@ -495,6 +495,7 @@ private fun ConversationScreen(
     var sendError by remember { mutableStateOf<String?>(null) }
     var showImageGeneration by remember { mutableStateOf(false) }
     var imageGenerationActive by remember { mutableStateOf(false) }
+    var imageGenerationSubmitting by remember { mutableStateOf(false) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val keyboardDismiss = rememberOutsideTapKeyboardDismissState()
@@ -530,13 +531,16 @@ private fun ConversationScreen(
     ) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack, enabled = !imageGenerationActive) {
+                TextButton(
+                    onClick = onBack,
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting, imageGenerationActive)
+                ) {
                     Text("‹  НАЗАД", color = Ice)
                 }
                 Spacer(Modifier.weight(1f))
                 TextButton(
                     onClick = { showImageGeneration = !showImageGeneration },
-                    enabled = !imageGenerationActive
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting, imageGenerationActive)
                 ) {
                     Text(if (showImageGeneration) "К ЧАТУ" else "ОБРАЗ", color = Ice, fontSize = 9.sp)
                 }
@@ -559,7 +563,8 @@ private fun ConversationScreen(
                     app = app,
                     characterId = characterId,
                     modifier = Modifier.weight(1f),
-                    onActiveChanged = { imageGenerationActive = it }
+                    onActiveChanged = { imageGenerationActive = it },
+                    onSubmittingChanged = { imageGenerationSubmitting = it }
                 )
             } else if (loadError != null) {
                 Column(
