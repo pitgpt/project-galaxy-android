@@ -32,19 +32,24 @@ class PersistGeneratedImageResult(
                 existing
             } else {
                 val result = resultSource.completedImage(providerJobId)
-                check(result.asset.requestId == request.id) {
-                    "Image provider returned an image for a different generation request"
+                try {
+                    check(result.asset.requestId == request.id) {
+                        "Image provider returned an image for a different generation request"
+                    }
+                    check(result.asset.mimeType == result.mimeType) {
+                        "Image MIME metadata does not match the downloaded bytes"
+                    }
+                    check(result.asset.byteSize == result.byteSize) {
+                        "Image size metadata does not match the downloaded bytes"
+                    }
+                    check(result.asset.sha256.equals(result.sha256, ignoreCase = true)) {
+                        "Image checksum metadata does not match the downloaded bytes"
+                    }
+                    images.save(request, result.asset, result.bytes)
+                } finally {
+                    // The encrypted repository has consumed the payload; retire the plaintext buffer.
+                    result.bytes.fill(0)
                 }
-                check(result.asset.mimeType == result.mimeType) {
-                    "Image MIME metadata does not match the downloaded bytes"
-                }
-                check(result.asset.byteSize == result.byteSize) {
-                    "Image size metadata does not match the downloaded bytes"
-                }
-                check(result.asset.sha256.equals(result.sha256, ignoreCase = true)) {
-                    "Image checksum metadata does not match the downloaded bytes"
-                }
-                images.save(request, result.asset, result.bytes)
             }
         }
     }

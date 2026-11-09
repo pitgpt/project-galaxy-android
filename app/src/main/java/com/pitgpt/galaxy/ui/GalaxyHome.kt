@@ -292,6 +292,8 @@ fun GalaxyHome() {
         )
     } else if (showChat) {
         ConversationScreen(
+            app = app,
+            characterId = activeCharacterId,
             characterName = characterName,
             messages = messages,
             isLoading = isLoading,
@@ -474,6 +476,8 @@ private fun HomeScreen(
 
 @Composable
 private fun ConversationScreen(
+    app: GalaxyApplication,
+    characterId: String,
     characterName: String,
     messages: List<ConversationMessage>,
     isLoading: Boolean,
@@ -489,6 +493,9 @@ private fun ConversationScreen(
     var draft by remember { mutableStateOf("") }
     var isSending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
+    var showImageGeneration by remember { mutableStateOf(false) }
+    var imageGenerationActive by remember { mutableStateOf(false) }
+    var imageGenerationSubmitting by remember { mutableStateOf(false) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val keyboardDismiss = rememberOutsideTapKeyboardDismissState()
@@ -524,8 +531,19 @@ private fun ConversationScreen(
     ) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("‹  НАЗАД", color = Ice) }
+                TextButton(
+                    onClick = onBack,
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting, imageGenerationActive)
+                ) {
+                    Text("‹  НАЗАД", color = Ice)
+                }
                 Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = { showImageGeneration = !showImageGeneration },
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting, imageGenerationActive)
+                ) {
+                    Text(if (showImageGeneration) "К ЧАТУ" else "ОБРАЗ", color = Ice, fontSize = 9.sp)
+                }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(characterName, color = Color.White, fontSize = 18.sp,
                         fontWeight = FontWeight.SemiBold)
@@ -540,7 +558,15 @@ private fun ConversationScreen(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            if (loadError != null) {
+            if (showImageGeneration) {
+                ImageGenerationPanel(
+                    app = app,
+                    characterId = characterId,
+                    modifier = Modifier.weight(1f),
+                    onActiveChanged = { imageGenerationActive = it },
+                    onSubmittingChanged = { imageGenerationSubmitting = it }
+                )
+            } else if (loadError != null) {
                 Column(
                     Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.Center,
