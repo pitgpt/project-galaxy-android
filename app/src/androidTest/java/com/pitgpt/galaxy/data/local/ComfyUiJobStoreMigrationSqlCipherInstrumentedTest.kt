@@ -121,4 +121,40 @@ class ComfyUiJobStoreMigrationSqlCipherInstrumentedTest {
             String(header, 0, 15, Charsets.US_ASCII) == "SQLite format 3"
         )
     }
+    @Test
+    fun versionFourMigrationAddsSubmissionStartedInsideSqlCipherDatabase() {
+        val db = helper.writableDatabase
+        db.execSQL(
+            "CREATE TABLE comfyui_jobs (promptId TEXT NOT NULL PRIMARY KEY, requestId TEXT NOT NULL, createdAtEpochMillis INTEGER NOT NULL, cancelled INTEGER NOT NULL)"
+        )
+        db.execSQL(
+            "INSERT INTO comfyui_jobs (promptId, requestId, createdAtEpochMillis, cancelled) VALUES ('prompt-1', 'request-1', 1234, 0)"
+        )
+
+        GalaxyDatabaseFactory.MIGRATION_4_5.migrate(db)
+
+        val columns = mutableSetOf<String>()
+        db.query("PRAGMA table_info(comfyui_jobs)").use { cursor ->
+            val nameIndex = cursor.getColumnIndexOrThrow("name")
+            while (cursor.moveToNext()) columns += cursor.getString(nameIndex)
+        }
+        assertTrue(columns.contains("submissionStarted"))
+
+        db.query(
+            "SELECT submissionStarted FROM comfyui_jobs WHERE promptId = ?",
+            arrayOf("prompt-1")
+        ).use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
+        }
+
+        val databaseFile = context.getDatabasePath(databaseName)
+        val header = ByteArray(16)
+        FileInputStream(databaseFile).use { input -> assertEquals(16, input.read(header)) }
+        assertFalse(
+            "SQLCipher database must not expose the plaintext SQLite file header",
+            String(header, 0, 15, Charsets.US_ASCII) == "SQLite format 3"
+        )
+    }
+
 }
