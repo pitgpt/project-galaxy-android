@@ -29,7 +29,7 @@ interface ComfyUiJobStore {
     suspend fun get(promptId: String): ComfyUiJobRecord?
     suspend fun markCancelled(promptId: String)
     suspend fun all(): List<ComfyUiJobRecord> = emptyList()
-    suspend fun markSubmissionStarted(promptId: String): Boolean = true
+    suspend fun markSubmissionStarted(promptId: String): Boolean
     suspend fun delete(promptId: String) = Unit
 }
 
