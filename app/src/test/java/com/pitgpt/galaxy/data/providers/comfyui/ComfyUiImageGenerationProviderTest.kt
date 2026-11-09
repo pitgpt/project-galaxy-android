@@ -339,11 +339,14 @@ class ComfyUiImageGenerationProviderTest {
     }
 
     private class ReadbackFailingJobStore : ComfyUiJobStore {
+        private var reads = 0
+
         override suspend fun put(record: ComfyUiJobRecord) {
             throw IllegalStateException("simulated SQLCipher write failure")
         }
 
         override suspend fun get(promptId: String): ComfyUiJobRecord? {
+            if (reads++ == 0) return null
             throw IllegalStateException("simulated SQLCipher readback failure")
         }
 
