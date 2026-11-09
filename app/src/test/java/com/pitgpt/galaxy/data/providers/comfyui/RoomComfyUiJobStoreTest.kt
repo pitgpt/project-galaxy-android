@@ -2,6 +2,9 @@ package com.pitgpt.galaxy.data.providers.comfyui
 
 import androidx.room.Room
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -57,6 +60,18 @@ class RoomComfyUiJobStoreTest {
         val saved = store.get("prompt-123")
         assertTrue(saved!!.cancelled)
         assertEquals("request-456", saved.requestId)
+    }
+
+    @Test
+    fun submissionStartedCanBeClaimedOnlyOnce() = runBlocking {
+        store.put(ComfyUiJobRecord("prompt-claim", "request-claim", 1234L))
+
+        val claims = coroutineScope {
+            (1..2).map { async { store.markSubmissionStarted("prompt-claim") } }.awaitAll()
+        }
+
+        assertEquals(1, claims.count { it })
+        assertTrue(store.get("prompt-claim")!!.submissionStarted)
     }
 
     @Test
