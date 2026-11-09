@@ -25,7 +25,6 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
     private lateinit var context: Context
     private lateinit var databaseName: String
     private lateinit var passphrase: ByteArray
-    private lateinit var passphraseBytes: ByteArray
     private var database: GalaxyDatabase? = null
 
     @Before
@@ -34,7 +33,6 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         context = InstrumentationRegistry.getInstrumentation().targetContext
         databaseName = "comfyui-job-store-${UUID.randomUUID()}.db"
         passphrase = ByteArray(32).also(SecureRandom()::nextBytes)
-        passphraseBytes = Base64.encode(passphrase, Base64.NO_WRAP)
     }
 
     @After
@@ -48,7 +46,6 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             File(file.path + "-journal").delete()
         }
         if (::passphrase.isInitialized) passphrase.fill(0)
-        if (::passphraseBytes.isInitialized) passphraseBytes.fill(0)
     }
 
     @Test
@@ -85,8 +82,18 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         assertEquals(record.copy(cancelled = true), reopenedStore.get(record.promptId))
     }
 
-    private fun openDatabase(): GalaxyDatabase =
-        Room.databaseBuilder(context, GalaxyDatabase::class.java, databaseName)
-            .openHelperFactory(SupportOpenHelperFactory(passphraseBytes, null, true))
+    private fun openDatabase(): GalaxyDatabase {
+        val keyBytes = Base64.encode(passphrase, Base64.NO_WRAP)
+        val opened = Room.databaseBuilder(context, GalaxyDatabase::class.java, databaseName)
+            .openHelperFactory(SupportOpenHelperFactory(keyBytes, null, true))
             .build()
+        try {
+            opened.openHelper.writableDatabase
+            return opened
+        } catch (failure: Exception) {
+            keyBytes.fill(0)
+            runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
 }
