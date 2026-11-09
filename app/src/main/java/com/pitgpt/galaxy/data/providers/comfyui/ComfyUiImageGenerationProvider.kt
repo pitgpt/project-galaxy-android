@@ -9,6 +9,9 @@ import com.pitgpt.galaxy.core.model.ImageGenerationStatus
 import com.pitgpt.galaxy.core.repository.ImageGenerationProvider
 import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withContext
 
 data class ComfyUiJobRecord(
     val promptId: String,
@@ -64,8 +67,50 @@ class ComfyUiImageGenerationProvider(
     override suspend fun submit(request: ImageGenerationRequest): String {
         require(request.referenceAssetIds.isEmpty()) { "This ComfyUI workflow does not support reference images yet" }
         val submitted = client.submit(config, template, request, clientId)
-        jobs.put(ComfyUiJobRecord(submitted.promptId, request.id, request.createdAtEpochMillis))
+        val record = ComfyUiJobRecord(submitted.promptId, request.id, request.createdAtEpochMillis)
+        try {
+            jobs.put(record)
+        } catch (failure: Exception) {
+            var registrationConfirmed = false
+            try {
+                withContext(NonCancellable) {
+                    // A database write can fail after commit, or the remote ID can collide with an
+                    // existing record. Confirm local state before attempting remote cleanup.
+                    val existing = jobs.get(submitted.promptId)
+                    when {
+                        existing == record -> registrationConfirmed = true
+                        existing != null -> throw IllegalStateException(
+                            "The ComfyUI prompt ID is already associated with another Galaxy request; remote prompt left untouched"
+                        )
+                        else -> compensateUnpersistedSubmission(submitted.promptId)
+                    }
+                }
+            } catch (compensationFailure: Exception) {
+                failure.addSuppressed(compensationFailure)
+            }
+            if (registrationConfirmed && failure !is CancellationException) {
+                return submitted.promptId
+            }
+            throw failure
+        }
         return submitted.promptId
+    }
+
+    private suspend fun compensateUnpersistedSubmission(promptId: String) {
+        val before = client.queue(config)
+        if (promptId in before.runningPromptIds || promptId !in before.pendingPromptIds) return
+
+        client.deleteQueued(config, promptId)
+        val after = client.queue(config)
+        check(promptId !in after.runningPromptIds) {
+            "ComfyUI started the prompt while local job registration was failing; no interrupt was attempted"
+        }
+        check(promptId !in after.pendingPromptIds) {
+            "ComfyUI did not confirm removal of the unregistered pending prompt"
+        }
+        check(!client.hasHistory(config, promptId)) {
+            "ComfyUI recorded the prompt before queued compensation completed"
+        }
     }
 
     override suspend fun status(providerJobId: String): ImageGenerationStatus {
@@ -89,7 +134,11 @@ class ComfyUiImageGenerationProvider(
         check(!client.hasHistory(config, providerJobId)) {
             "ComfyUI job completed or entered history while queued cancellation was being verified"
         }
-        jobs.markCancelled(providerJobId)
+        // The remote deletion is already confirmed; finish durable local bookkeeping even
+        // if the UI coroutine is cancelled while the SQLCipher write is pending.
+        withContext(NonCancellable) {
+            jobs.markCancelled(providerJobId)
+        }
     }
 
     override suspend fun result(providerJobId: String): GeneratedImageAsset =
