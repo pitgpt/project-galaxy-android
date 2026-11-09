@@ -34,6 +34,7 @@ import com.pitgpt.galaxy.core.usecase.CancelImageGeneration
 import com.pitgpt.galaxy.core.usecase.GetImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.SubmitImageGeneration
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionCancelledException
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionUncertainException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -255,6 +256,13 @@ internal fun ImageGenerationPanel(
                         jobId = submittedJobId
                         status = ImageGenerationStatus(ImageGenerationState.QUEUED)
                         onActiveChanged(true)
+                    } catch (cancelled: ComfyUiSubmissionCancelledException) {
+                        request = requestToSubmit
+                        jobId = cancelled.promptId
+                        status = null
+                        panelError = "Отправка прервана после передачи управления сети. Проверяю сохранённый ID; повторная отправка заблокирована."
+                        onActiveChanged(true)
+                        throw cancelled
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (uncertain: ComfyUiSubmissionUncertainException) {
