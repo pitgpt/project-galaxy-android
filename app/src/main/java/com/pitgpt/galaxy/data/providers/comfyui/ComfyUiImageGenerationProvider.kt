@@ -9,6 +9,8 @@ import com.pitgpt.galaxy.core.model.ImageGenerationStatus
 import com.pitgpt.galaxy.core.repository.ImageGenerationProvider
 import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 data class ComfyUiJobRecord(
     val promptId: String,
@@ -64,8 +66,38 @@ class ComfyUiImageGenerationProvider(
     override suspend fun submit(request: ImageGenerationRequest): String {
         require(request.referenceAssetIds.isEmpty()) { "This ComfyUI workflow does not support reference images yet" }
         val submitted = client.submit(config, template, request, clientId)
-        jobs.put(ComfyUiJobRecord(submitted.promptId, request.id, request.createdAtEpochMillis))
+        try {
+            jobs.put(ComfyUiJobRecord(submitted.promptId, request.id, request.createdAtEpochMillis))
+        } catch (failure: Exception) {
+            // The remote prompt already exists. Try to remove it only if ComfyUI still reports it
+            // as pending; never use the global interrupt endpoint or cancel a running prompt.
+            try {
+                withContext(NonCancellable) {
+                    compensateUnpersistedSubmission(submitted.promptId)
+                }
+            } catch (compensationFailure: Exception) {
+                failure.addSuppressed(compensationFailure)
+            }
+            throw failure
+        }
         return submitted.promptId
+    }
+
+    private suspend fun compensateUnpersistedSubmission(promptId: String) {
+        val before = client.queue(config)
+        if (promptId in before.runningPromptIds || promptId !in before.pendingPromptIds) return
+
+        client.deleteQueued(config, promptId)
+        val after = client.queue(config)
+        check(promptId !in after.runningPromptIds) {
+            "ComfyUI started the prompt while local job registration was failing; no interrupt was attempted"
+        }
+        check(promptId !in after.pendingPromptIds) {
+            "ComfyUI did not confirm removal of the unregistered pending prompt"
+        }
+        check(!client.hasHistory(config, promptId)) {
+            "ComfyUI recorded the prompt before queued compensation completed"
+        }
     }
 
     override suspend fun status(providerJobId: String): ImageGenerationStatus {
