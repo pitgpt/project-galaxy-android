@@ -19,7 +19,8 @@ data class ComfyUiJobRecord(
     val promptId: String,
     val requestId: String,
     val createdAtEpochMillis: Long,
-    val cancelled: Boolean = false
+    val cancelled: Boolean = false,
+    val submissionStarted: Boolean = false
 )
 
 /** Store only correlation metadata; production implementation must use SQLCipher. */
@@ -28,6 +29,7 @@ interface ComfyUiJobStore {
     suspend fun get(promptId: String): ComfyUiJobRecord?
     suspend fun markCancelled(promptId: String)
     suspend fun all(): List<ComfyUiJobRecord> = emptyList()
+    suspend fun markSubmissionStarted(promptId: String): Boolean = true
     suspend fun delete(promptId: String) = Unit
 }
 
@@ -39,6 +41,18 @@ class InMemoryComfyUiJobStore : ComfyUiJobStore {
     }
     override suspend fun get(promptId: String) = records[promptId]
     override suspend fun all(): List<ComfyUiJobRecord> = records.values.toList()
+    override suspend fun markSubmissionStarted(promptId: String): Boolean {
+        var claimed = false
+        records.computeIfPresent(promptId) { _, record ->
+            if (!record.submissionStarted) {
+                claimed = true
+                record.copy(submissionStarted = true)
+            } else {
+                record
+            }
+        }
+        return claimed
+    }
     override suspend fun delete(promptId: String) { records.remove(promptId) }
     override suspend fun markCancelled(promptId: String) {
         records.computeIfPresent(promptId) { _, value -> value.copy(cancelled = true) }
@@ -75,8 +89,7 @@ class ComfyUiImageGenerationProvider(
         // Validate the local workflow before writing an intent or making a network request.
         template.buildPrompt(request)
 
-        // ComfyUI accepts a client-supplied UUID prompt_id. Deriving it from requestId makes
-        // repeated calls for the same logical request converge on one durable remote ID.
+        // Derive one canonical ComfyUI UUID from the immutable Galaxy request ID.
         val promptId = UUID.nameUUIDFromBytes(request.id.toByteArray(Charsets.UTF_8)).toString()
         val record = ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis)
         val existing = jobs.get(promptId)
@@ -84,22 +97,26 @@ class ComfyUiImageGenerationProvider(
             check(existing.requestId == request.id) {
                 "The stable ComfyUI prompt ID is already associated with another Galaxy request"
             }
-            return promptId
+            if (existing.submissionStarted) return promptId
+        } else {
+            try {
+                jobs.put(record)
+            } catch (failure: Exception) {
+                // Room may report an acknowledgement failure after the row was committed.
+                // Continue only when a read-back proves that the exact PREPARED intent is durable.
+                val committed = try {
+                    jobs.get(promptId)
+                } catch (readbackFailure: Exception) {
+                    failure.addSuppressed(readbackFailure)
+                    throw failure
+                }
+                if (committed != record) throw failure
+            }
         }
 
-        try {
-            jobs.put(record)
-        } catch (failure: Exception) {
-            // Room may report an acknowledgement failure after the row was committed.
-            // Continue only when a read-back proves that the exact intent is durable.
-            val committed = try {
-                jobs.get(promptId)
-            } catch (readbackFailure: Exception) {
-                failure.addSuppressed(readbackFailure)
-                throw failure
-            }
-            if (committed != record) throw failure
-        }
+        // This conditional SQL update is the single-writer claim. Only one concurrent caller
+        // may transition PREPARED -> SUBMISSION_STARTED and issue POST /prompt.
+        if (!jobs.markSubmissionStarted(promptId)) return promptId
 
         try {
             val submitted = client.submit(config, template, request, clientId, promptId)
@@ -108,7 +125,8 @@ class ComfyUiImageGenerationProvider(
             }
             return promptId
         } catch (cancelled: CancellationException) {
-            // The durable intent is deliberately retained. The request may have reached ComfyUI.
+            // SUBMISSION_STARTED is durable before the HTTP call. The request may have reached
+            // ComfyUI, so retain the ID and never enqueue a replacement automatically.
             throw cancelled
         } catch (failure: ComfyUiApiException) {
             val status = failure.httpStatusCode
@@ -124,8 +142,7 @@ class ComfyUiImageGenerationProvider(
             }
             throw ComfyUiSubmissionUncertainException(promptId)
         } catch (_: Exception) {
-            // Keep the pre-submission intent and surface its stable ID; never create a new prompt
-            // after a timeout, disconnect, malformed response, or server-side failure.
+            // Keep the started intent after timeout, disconnect, malformed response or 5xx.
             throw ComfyUiSubmissionUncertainException(promptId)
         }
     }
