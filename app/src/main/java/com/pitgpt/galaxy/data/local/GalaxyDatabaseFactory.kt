@@ -39,6 +39,9 @@ object GalaxyDatabaseFactory {
             db.execSQL(
                 "ALTER TABLE comfyui_jobs ADD COLUMN submissionStarted INTEGER NOT NULL DEFAULT 0"
             )
+            // Version-4 rows were inserted only after ComfyUI returned a prompt ID.
+            // Treat those legacy rows as already submitted so upgrades never re-enqueue them.
+            db.execSQL("UPDATE comfyui_jobs SET submissionStarted = 1")
         }
     }
 
