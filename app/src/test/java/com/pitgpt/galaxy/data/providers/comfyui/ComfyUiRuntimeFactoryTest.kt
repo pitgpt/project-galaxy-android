@@ -174,7 +174,7 @@ class ComfyUiRuntimeFactoryTest {
         assertEquals("prompt-123", promptId)
         assertEquals(listOf("http://192.168.1.20:8188/prompt"), transport.urls)
         assertEquals(listOf("lan-secret"), transport.bearerTokens)
-        assertTrue(transport.requestBodies.single().orEmpty().contains("\\"text\\":\\"A test image\\""))
+        assertTrue(transport.requestBodies.single().orEmpty().contains("\"text\":\"A test image\""))
         assertEquals(
             ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis),
             jobs.get(promptId)
