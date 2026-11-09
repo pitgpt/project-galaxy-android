@@ -1,6 +1,7 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import java.util.ArrayDeque
 import com.pitgpt.galaxy.core.model.ImageGenerationState
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -131,6 +132,28 @@ class ComfyUiApiClientTest {
     }
 
     @Test
+    fun statusReconcilesQueueMissThroughHistoryUsingTheSamePromptId() = runBlocking {
+        val transport = FakeTransport().apply {
+            jsonResponses.add(
+                ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}""")
+            )
+            jsonResponses.add(
+                ComfyUiApiResponse(
+                    200,
+                    """{"$promptId":{"status":{"status_str":"success","completed":true},"outputs":{}}}"""
+                )
+            )
+        }
+
+        val status = ComfyUiApiClient(transport).status(config, promptId)
+
+        assertEquals(ImageGenerationState.COMPLETED, status.state)
+        assertEquals(listOf("GET", "GET"), transport.methods)
+        assertEquals("http://192.168.1.20:8188/queue", transport.urls[0])
+        assertEquals("http://192.168.1.20:8188/history/$promptId", transport.urls[1])
+    }
+
+    @Test
     fun parsesHistoryStatusAndOutputImageReferences() = runBlocking {
         val transport = FakeTransport().apply {
             jsonResponse = ComfyUiApiResponse(
@@ -243,6 +266,9 @@ class ComfyUiApiClientTest {
         var token: String? = null
         var requestBody: ByteArray? = null
         var maxResponseBytes: Int? = null
+        val methods = mutableListOf<String>()
+        val urls = mutableListOf<String>()
+        val jsonResponses = ArrayDeque<ComfyUiApiResponse>()
         var jsonResponse = ComfyUiApiResponse(200, "{}")
         var binaryResponse = ComfyUiBinaryResponse(200, "image/png", byteArrayOf())
 
@@ -260,7 +286,9 @@ class ComfyUiApiClientTest {
             this.requestBody = body
             this.token = bearerToken
             this.maxResponseBytes = maxResponseBytes
-            return jsonResponse
+            methods += method
+            urls += url
+            return if (jsonResponses.isEmpty()) jsonResponse else jsonResponses.removeFirst()
         }
 
         override suspend fun getBinary(
