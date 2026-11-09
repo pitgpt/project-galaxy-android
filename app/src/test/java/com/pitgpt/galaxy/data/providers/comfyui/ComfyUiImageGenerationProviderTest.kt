@@ -39,6 +39,95 @@ class ComfyUiImageGenerationProviderTest {
             .getJSONObject("inputs").getString("text"))
     }
 
+    @Test fun pendingSubmissionIsRemovedWhenJobCorrelationCannotBeStored() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"deleted":["prompt-123"]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""))
+            responses.add(ComfyUiApiResponse(200, """{}"""))
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, FailingJobStore()).submit(request) }
+        }
+
+        assertEquals(listOf("POST", "GET", "POST", "GET", "GET"), transport.methods)
+        assertTrue(String(transport.bodies[2]!!, Charsets.UTF_8).contains("prompt-123"))
+        assertFalse(transport.urls.any { it.endsWith("/interrupt") })
+    }
+
+    @Test fun runningSubmissionIsNeverInterruptedWhenJobCorrelationCannotBeStored() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[[0,"prompt-123",{},[],[]]],"queue_pending":[]}"""))
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, FailingJobStore()).submit(request) }
+        }
+
+        assertEquals(listOf("POST", "GET"), transport.methods)
+        assertFalse(transport.urls.any { it.endsWith("/interrupt") })
+    }
+
+    @Test fun promptThatStartsDuringCompensationIsNeverInterrupted() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"deleted":["prompt-123"]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[[0,"prompt-123",{},[],[]]],"queue_pending":[]}"""))
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, FailingJobStore()).submit(request) }
+        }
+
+        assertEquals(listOf("POST", "GET", "POST", "GET"), transport.methods)
+        assertFalse(transport.urls.any { it.endsWith("/interrupt") })
+    }
+
+    @Test fun existingPromptIdCollisionDoesNotDeleteRemoteJob() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+        }
+        val existing = ComfyUiJobRecord("prompt-123", "another-request", 999L)
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, ExistingJobStore(existing)).submit(request) }
+        }
+
+        assertEquals(listOf("POST"), transport.methods)
+        assertFalse(transport.urls.any { it.endsWith("/interrupt") })
+    }
+
+    @Test fun treatsWriteAsSuccessfulWhenRecordWasCommittedBeforeStoreThrew() = runBlocking {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+        }
+        val store = CommitThenFailJobStore()
+
+        assertEquals("prompt-123", provider(transport, store).submit(request))
+        assertEquals(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis),
+            store.get("prompt-123"))
+        assertEquals(listOf("POST"), transport.methods)
+    }
+
+    @Test fun readbackFailureDoesNotAttemptRemoteCompensation() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+        }
+
+        val failure = assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, ReadbackFailingJobStore()).submit(request) }
+        }
+
+        assertEquals("simulated SQLCipher write failure", failure.message)
+        assertEquals(1, failure.suppressed.size)
+        assertEquals("simulated SQLCipher readback failure", failure.suppressed.single().message)
+        assertEquals(listOf("POST"), transport.methods)
+    }
+
     @Test fun queuedCancellationDeletesOnlyThatPrompt() = runBlocking {
         val transport = FakeTransport().apply {
             responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
@@ -144,9 +233,57 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(1, transport.urls.count { it.contains("/view?") })
     }
 
+    private class ExistingJobStore(
+        private val existing: ComfyUiJobRecord
+    ) : ComfyUiJobStore {
+        override suspend fun put(record: ComfyUiJobRecord) {
+            throw IllegalStateException("duplicate prompt ID")
+        }
+
+        override suspend fun get(promptId: String): ComfyUiJobRecord? =
+            existing.takeIf { it.promptId == promptId }
+
+        override suspend fun markCancelled(promptId: String) = Unit
+    }
+
+    private class CommitThenFailJobStore : ComfyUiJobStore {
+        private val records = mutableMapOf<String, ComfyUiJobRecord>()
+
+        override suspend fun put(record: ComfyUiJobRecord) {
+            records[record.promptId] = record
+            throw IllegalStateException("simulated acknowledgement failure after commit")
+        }
+
+        override suspend fun get(promptId: String): ComfyUiJobRecord? = records[promptId]
+
+        override suspend fun markCancelled(promptId: String) = Unit
+    }
+
+    private class ReadbackFailingJobStore : ComfyUiJobStore {
+        override suspend fun put(record: ComfyUiJobRecord) {
+            throw IllegalStateException("simulated SQLCipher write failure")
+        }
+
+        override suspend fun get(promptId: String): ComfyUiJobRecord? {
+            throw IllegalStateException("simulated SQLCipher readback failure")
+        }
+
+        override suspend fun markCancelled(promptId: String) = Unit
+    }
+
+    private class FailingJobStore : ComfyUiJobStore {
+        override suspend fun put(record: ComfyUiJobRecord) {
+            throw IllegalStateException("simulated SQLCipher write failure")
+        }
+
+        override suspend fun get(promptId: String): ComfyUiJobRecord? = null
+
+        override suspend fun markCancelled(promptId: String) = Unit
+    }
+
     private fun provider(
         transport: FakeTransport,
-        store: InMemoryComfyUiJobStore = InMemoryComfyUiJobStore()
+        store: ComfyUiJobStore = InMemoryComfyUiJobStore()
     ) = ComfyUiImageGenerationProvider(config, template, "galaxy-test", ComfyUiApiClient(transport), store)
 
     private class FakeTransport : ComfyUiApiTransport {
