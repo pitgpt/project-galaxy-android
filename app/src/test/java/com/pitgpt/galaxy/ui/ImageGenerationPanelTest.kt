@@ -14,10 +14,10 @@ import org.junit.Test
 class ImageGenerationPanelTest {
     @Test
     fun locksConversationNavigationWhileSubmittingOrTrackingAnActiveJob() {
-        assertFalse(imageGenerationNavigationLocked(isSubmitting = true, hasActiveJob = false))
-        assertFalse(imageGenerationNavigationLocked(isSubmitting = false, hasActiveJob = true))
-        assertFalse(imageGenerationNavigationLocked(isSubmitting = true, hasActiveJob = true))
-        assertTrue(!imageGenerationNavigationLocked(isSubmitting = false, hasActiveJob = false))
+        assertTrue(imageGenerationNavigationLocked(isSubmitting = true, hasActiveJob = false))
+        assertTrue(imageGenerationNavigationLocked(isSubmitting = false, hasActiveJob = true))
+        assertTrue(imageGenerationNavigationLocked(isSubmitting = true, hasActiveJob = true))
+        assertFalse(imageGenerationNavigationLocked(isSubmitting = false, hasActiveJob = false))
     }
 
     @Test
