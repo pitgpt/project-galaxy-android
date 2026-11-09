@@ -491,6 +491,7 @@ private fun ConversationScreen(
     var sendError by remember { mutableStateOf<String?>(null) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val keyboardDismiss = rememberOutsideTapKeyboardDismissState()
 
     fun submitDraft() {
         val value = draft.trim()
@@ -519,7 +520,7 @@ private fun ConversationScreen(
     Box(
         Modifier.fillMaxSize().background(
             Brush.verticalGradient(listOf(Color(0xFF111A35), Night, Color(0xFF100D25)))
-        )
+        ).then(keyboardDismiss.rootModifier())
     ) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -632,7 +633,7 @@ private fun ConversationScreen(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { draft = it },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).then(keyboardDismiss.textFieldModifier("message")),
                     placeholder = { Text("Написать сообщение…", color = Muted) },
                     maxLines = 4,
                     shape = RoundedCornerShape(14.dp),
@@ -679,6 +680,7 @@ private fun CharacterProfileScreen(
     var personaDefinition by remember(profile?.id) { mutableStateOf(profile?.personaDefinition.orEmpty()) }
     var avatarImageUri by remember(profile?.id) { mutableStateOf(profile?.avatarImageUri) }
     var error by remember { mutableStateOf<String?>(null) }
+    val keyboardDismiss = rememberOutsideTapKeyboardDismissState()
     val context = LocalContext.current
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -699,10 +701,11 @@ private fun CharacterProfileScreen(
     Box(
         Modifier.fillMaxSize().background(
             Brush.verticalGradient(listOf(Color(0xFF111A35), Night, Color(0xFF100D25)))
-        )
+        ).then(keyboardDismiss.rootModifier())
     ) {
         Column(
-            Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -720,7 +723,7 @@ private fun CharacterProfileScreen(
                 OutlinedTextField(
                     value = displayName,
                     onValueChange = { displayName = it; error = null },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().then(keyboardDismiss.textFieldModifier("displayName")),
                     label = { Text("Имя персонажа") },
                     singleLine = true,
                     colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
@@ -732,7 +735,7 @@ private fun CharacterProfileScreen(
                 OutlinedTextField(
                     value = description,
                     onValueChange = { description = it; error = null },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().then(keyboardDismiss.textFieldModifier("description")),
                     label = { Text("Краткое описание") },
                     minLines = 2, maxLines = 3,
                     colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
@@ -773,9 +776,10 @@ private fun CharacterProfileScreen(
                 OutlinedTextField(
                     value = personaDefinition,
                     onValueChange = { personaDefinition = it; error = null },
-                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    modifier = Modifier.fillMaxWidth().then(keyboardDismiss.textFieldModifier("persona")),
                     label = { Text("Личность и инструкции персонажа") },
                     minLines = 5,
+                    maxLines = 8,
                     colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.White, unfocusedTextColor = Color.White,
                         focusedLabelColor = Ice, unfocusedLabelColor = Muted,
@@ -932,6 +936,7 @@ private fun CharacterEditorScreen(
     var avatarImageUri by remember(initialProfile?.id) { mutableStateOf(initialProfile?.avatarImageUri) }
     val context = LocalContext.current
     var error by remember { mutableStateOf<String?>(null) }
+    val keyboardDismiss = rememberOutsideTapKeyboardDismissState()
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             runCatching {
@@ -947,10 +952,11 @@ private fun CharacterEditorScreen(
     Box(
         Modifier.fillMaxSize().background(
             Brush.verticalGradient(listOf(Color(0xFF111A35), Night, Color(0xFF100D25)))
-        )
+        ).then(keyboardDismiss.rootModifier())
     ) {
         Column(
-            Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 14.dp),
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(9.dp)
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -964,7 +970,7 @@ private fun CharacterEditorScreen(
             OutlinedTextField(
                 value = displayName,
                 onValueChange = { displayName = it; error = null },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().then(keyboardDismiss.textFieldModifier("displayName")),
                 label = { Text("Имя персонажа") },
                 singleLine = true,
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
@@ -976,7 +982,7 @@ private fun CharacterEditorScreen(
             OutlinedTextField(
                 value = description,
                 onValueChange = { description = it },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().then(keyboardDismiss.textFieldModifier("description")),
                 label = { Text("Краткое описание") },
                 minLines = 2, maxLines = 2,
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
@@ -1034,9 +1040,10 @@ private fun CharacterEditorScreen(
             OutlinedTextField(
                 value = personaDefinition,
                 onValueChange = { personaDefinition = it; error = null },
-                modifier = Modifier.fillMaxWidth().weight(1f),
+                modifier = Modifier.fillMaxWidth().then(keyboardDismiss.textFieldModifier("persona")),
                 label = { Text("Личность и инструкции персонажа") },
                 minLines = 3,
+                maxLines = 8,
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                     focusedTextColor = Color.White, unfocusedTextColor = Color.White,
                     focusedLabelColor = Ice, unfocusedLabelColor = Muted,

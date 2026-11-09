@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -40,7 +41,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF080B18)
                 ) {
-                    Box(Modifier.fillMaxSize().background(Color(0xFF080B18)).safeDrawingPadding()) {
+                    Box(Modifier.fillMaxSize().background(Color(0xFF080B18)).safeDrawingPadding().imePadding()) {
                         val auth = (application as GalaxyApplication).auth
                         GalaxyAuthGate(auth = auth) {
                             GalaxyHome()
