@@ -41,23 +41,6 @@ private fun sha256(bytes: ByteArray): String =
     MessageDigest.getInstance("SHA-256").digest(bytes)
         .joinToString("") { "%02x".format(it) }
 
-import com.pitgpt.galaxy.core.model.GeneratedImageAsset
-import com.pitgpt.galaxy.core.model.ImageGenerationRequest
-import com.pitgpt.galaxy.core.model.StoredGeneratedImage
-import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
-import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
-import com.pitgpt.galaxy.data.local.entity.toDomain
-import com.pitgpt.galaxy.data.local.entity.toEntity
-import com.pitgpt.galaxy.data.media.EncryptedMediaStore
-import java.security.MessageDigest
-import java.util.UUID
-import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-
 /**
  * Coordinates encrypted binary storage with SQLCipher-backed metadata.
  * A failed metadata insert compensates by removing the just-written ciphertext.
