@@ -52,6 +52,8 @@ class RoomGeneratedImageRepository(
 
         var mediaSaved = false
         try {
+            // Finish the atomic ciphertext write even if the caller is cancelled, so the
+            // compensation path can reliably remove it before cancellation is rethrown.
             withContext(NonCancellable + ioDispatcher) {
                 mediaStore.save(stored.assetId, stored.mimeType, imageBytes)
                 mediaSaved = true
@@ -103,6 +105,7 @@ class RoomGeneratedImageRepository(
         requireValidAssetId(assetId)
         val removed = dao.delete(assetId)
         check(removed == 1) { "Generated image metadata was not found" }
+        // If file deletion fails, only orphaned ciphertext remains; no metadata exposes it.
         withContext(NonCancellable + ioDispatcher) {
             mediaStore.delete(assetId)
         }
