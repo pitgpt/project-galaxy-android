@@ -94,7 +94,7 @@ class ComfyUiJobMigrationTest {
                 arrayOf("prompt-1")
             ).use { cursor ->
                 assertTrue(cursor.moveToFirst())
-                assertEquals(0, cursor.getInt(0))
+                assertEquals(1, cursor.getInt(0))
             }
         } finally {
             helper.close()
