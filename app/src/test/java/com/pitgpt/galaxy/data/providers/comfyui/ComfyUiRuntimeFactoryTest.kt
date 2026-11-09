@@ -61,7 +61,7 @@ class ComfyUiRuntimeFactoryTest {
             val promptId = runtime.provider.submit(request)
             assertEquals(expectedPromptId, promptId)
             assertEquals(
-                ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis),
+                ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis, submissionStarted = true),
                 jobs.get(promptId)
             )
 
@@ -181,7 +181,7 @@ class ComfyUiRuntimeFactoryTest {
         assertEquals(listOf("lan-secret"), transport.bearerTokens)
         assertTrue(transport.requestBodies.single().orEmpty().contains("\"text\":\"A test image\""))
         assertEquals(
-            ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis),
+            ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis, submissionStarted = true),
             jobs.get(promptId)
         )
     }
