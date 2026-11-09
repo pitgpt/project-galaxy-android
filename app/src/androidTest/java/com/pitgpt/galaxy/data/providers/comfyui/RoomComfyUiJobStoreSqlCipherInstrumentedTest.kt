@@ -39,14 +39,16 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
 
     @After
     fun tearDown() {
-        database?.close()
-        val file = context.getDatabasePath(databaseName)
-        file.delete()
-        File(file.path + "-wal").delete()
-        File(file.path + "-shm").delete()
-        File(file.path + "-journal").delete()
-        passphrase.fill(0)
-        passphraseBytes.fill(0)
+        runCatching { database?.close() }
+        if (::context.isInitialized && ::databaseName.isInitialized) {
+            val file = context.getDatabasePath(databaseName)
+            file.delete()
+            File(file.path + "-wal").delete()
+            File(file.path + "-shm").delete()
+            File(file.path + "-journal").delete()
+        }
+        if (::passphrase.isInitialized) passphrase.fill(0)
+        if (::passphraseBytes.isInitialized) passphraseBytes.fill(0)
     }
 
     @Test
