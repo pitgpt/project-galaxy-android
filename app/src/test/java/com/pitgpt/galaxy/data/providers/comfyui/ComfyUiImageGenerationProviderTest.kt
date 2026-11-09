@@ -71,6 +71,22 @@ class ComfyUiImageGenerationProviderTest {
         assertFalse(transport.urls.any { it.endsWith("/interrupt") })
     }
 
+    @Test fun promptThatStartsDuringCompensationIsNeverInterrupted() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"deleted":["prompt-123"]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[[0,"prompt-123",{},[],[]]],"queue_pending":[]}"""))
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, FailingJobStore()).submit(request) }
+        }
+
+        assertEquals(listOf("POST", "GET", "POST", "GET"), transport.methods)
+        assertFalse(transport.urls.any { it.endsWith("/interrupt") })
+    }
+
     @Test fun existingPromptIdCollisionDoesNotDeleteRemoteJob() {
         val transport = FakeTransport().apply {
             responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
