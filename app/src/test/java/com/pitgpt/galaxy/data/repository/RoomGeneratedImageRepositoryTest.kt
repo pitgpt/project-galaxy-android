@@ -4,12 +4,18 @@ import androidx.room.Room
 import com.pitgpt.galaxy.core.model.GeneratedImageAsset
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
+import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
+import com.pitgpt.galaxy.data.local.entity.GeneratedImageEntity
 import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.media.MediaEncryptionKeyProvider
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -94,6 +100,57 @@ class RoomGeneratedImageRepositoryTest {
     }
 
     @Test
+    fun preservesCiphertextWhenMetadataReadBackFails() = runBlocking {
+        val insertFailure = IllegalStateException("metadata insert failed")
+        val readBackFailure = IllegalStateException("metadata read-back failed")
+        val failingRepository = RoomGeneratedImageRepository(
+            failingDao(
+                insertAction = { throw insertFailure },
+                getAction = { throw readBackFailure }
+            ),
+            mediaStore
+        )
+        val request = request("conversation-readback-failure")
+        val bytes = ByteArray(40) { (it + 3).toByte() }
+
+        val failure = runCatching {
+            failingRepository.save(request, asset(request.id, bytes), bytes)
+        }.exceptionOrNull()
+
+        assertEquals("metadata insert failed", failure?.message)
+        assertTrue(
+            "A failed metadata read-back must be attached to the original insert failure",
+            failure?.suppressed?.any { it.message == readBackFailure.message } == true
+        )
+        val encryptedFile = mediaDirectory.listFiles { file -> file.extension == "gcm" }!!.single()
+        assertArrayEquals(
+            bytes,
+            mediaStore.read(encryptedFile.nameWithoutExtension, "image/png")
+        )
+    }
+
+    @Test
+    fun deletesCiphertextWhenMetadataReadBackConfirmsNoRow() = runBlocking {
+        val insertFailure = IllegalStateException("metadata insert failed")
+        val failingRepository = RoomGeneratedImageRepository(
+            failingDao(
+                insertAction = { throw insertFailure },
+                getAction = { null }
+            ),
+            mediaStore
+        )
+        val request = request("conversation-metadata-absent")
+        val bytes = ByteArray(40) { (it + 5).toByte() }
+
+        val failure = runCatching {
+            failingRepository.save(request, asset(request.id, bytes), bytes)
+        }.exceptionOrNull()
+
+        assertEquals("metadata insert failed", failure?.message)
+        assertTrue(mediaDirectory.listFiles { file -> file.extension == "gcm" }.orEmpty().isEmpty())
+    }
+
+    @Test
     fun listsOnlyImagesForRequestedConversation() = runBlocking {
         val first = request("conversation-a")
         val second = request("conversation-b")
@@ -140,6 +197,36 @@ class RoomGeneratedImageRepositoryTest {
         }
     }
 
+    @Test
+    fun encryptedMediaFileOperationsUseTheInjectedIoDispatcher() = runBlocking {
+        val dispatcher = RecordingDispatcher()
+        try {
+            val ioRepository = RoomGeneratedImageRepository(database.generatedImageDao(), mediaStore, dispatcher)
+            val request = request("conversation-io")
+            val bytes = ByteArray(48) { (it + 1).toByte() }
+
+            val saved = ioRepository.save(request, asset(request.id, bytes), bytes)
+            assertArrayEquals(bytes, ioRepository.read(saved.assetId))
+            ioRepository.delete(saved.assetId)
+
+            assertTrue(dispatcher.threadNames.size >= 3)
+            assertTrue(dispatcher.threadNames.all { it == RecordingDispatcher.THREAD_NAME })
+        } finally {
+            dispatcher.close()
+        }
+    }
+
+    private fun failingDao(
+        insertAction: suspend (GeneratedImageEntity) -> Unit,
+        getAction: suspend (String) -> GeneratedImageEntity?
+    ): GeneratedImageDao = object : GeneratedImageDao {
+        override suspend fun insert(entity: GeneratedImageEntity) = insertAction(entity)
+        override suspend fun get(assetId: String) = getAction(assetId)
+        override suspend fun getForRequest(requestId: String): GeneratedImageEntity? = null
+        override suspend fun listForConversation(conversationId: String): List<GeneratedImageEntity> = emptyList()
+        override suspend fun delete(assetId: String): Int = 0
+    }
+
     private fun request(conversationId: String) = ImageGenerationRequest(
         id = "request-${conversationId}",
         conversationId = conversationId,
@@ -169,5 +256,27 @@ class RoomGeneratedImageRepositoryTest {
         private val key: SecretKey = SecretKeySpec(ByteArray(32) { (it + 1).toByte() }, "AES")
         override fun getOrCreateKey(): SecretKey = key
         override fun getExistingKey(): SecretKey = key
+    }
+
+    private class RecordingDispatcher : CoroutineDispatcher() {
+        private val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, THREAD_NAME)
+        }
+        val threadNames = CopyOnWriteArrayList<String>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            executor.execute {
+                threadNames += Thread.currentThread().name
+                block.run()
+            }
+        }
+
+        fun close() {
+            executor.shutdown()
+        }
+
+        companion object {
+            const val THREAD_NAME = "galaxy-media-io-test"
+        }
     }
 }
