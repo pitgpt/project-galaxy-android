@@ -72,6 +72,8 @@ class RoomGeneratedImageRepository(
 
         var mediaSaved = false
         try {
+            // Finish the atomic ciphertext write even if the caller is cancelled, so the
+            // compensation path can reliably remove it before cancellation is rethrown.
             withContext(NonCancellable + ioDispatcher) {
                 mediaStore.save(stored.assetId, stored.mimeType, imageBytes)
                 mediaSaved = true
