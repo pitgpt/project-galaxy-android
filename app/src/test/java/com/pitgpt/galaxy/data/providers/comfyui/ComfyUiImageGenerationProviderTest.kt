@@ -46,7 +46,7 @@ class ComfyUiImageGenerationProviderTest {
             .getJSONObject("inputs").getString("text"))
     }
 
-    @Test fun lostSubmissionAcknowledgementKeepsIntentAndRetryDoesNotResubmit() {
+    @Test fun lostSubmissionAcknowledgementKeepsIntentAndRetryDoesNotResubmit() = runBlocking {
         val transport = FakeTransport().apply {
             failure = IOException("simulated connection loss after request write")
         }
@@ -68,7 +68,7 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(listOf("POST"), transport.methods)
     }
 
-    @Test fun conflictResponseKeepsIntentForQueueHistoryReconciliation() {
+    @Test fun conflictResponseKeepsIntentForQueueHistoryReconciliation() = runBlocking {
         val promptId = stablePromptId(request)
         val transport = FakeTransport().apply {
             responses.add(ComfyUiApiResponse(409, "{}"))
@@ -87,7 +87,7 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(listOf("POST"), transport.methods)
     }
 
-    @Test fun cancellationDuringSubmissionKeepsIntentAndRetryDoesNotResubmit() {
+    @Test fun cancellationDuringSubmissionKeepsIntentAndRetryDoesNotResubmit() = runBlocking {
         val transport = FakeTransport().apply {
             failure = CancellationException("simulated caller cancellation")
         }
@@ -102,7 +102,7 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(expectedPromptId, cancellation.promptId)
         assertEquals(ComfyUiJobRecord(expectedPromptId, request.id, request.createdAtEpochMillis,
             submissionStarted = true), store.get(expectedPromptId))
-        assertEquals(expectedPromptId, runBlocking { activeProvider.submit(request) })
+        assertEquals(expectedPromptId, activeProvider.submit(request))
         assertEquals(listOf("POST"), transport.methods)
     }
 
