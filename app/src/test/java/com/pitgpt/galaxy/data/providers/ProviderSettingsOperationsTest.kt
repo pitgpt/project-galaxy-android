@@ -3,6 +3,8 @@ package com.pitgpt.galaxy.data.providers
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiNodeInput
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProviderSettingsOperationsTest {
@@ -82,6 +84,28 @@ class ProviderSettingsOperationsTest {
         val result = settings.withProviderRemoved("first")
 
         assertEquals(workflow, result.comfyUiWorkflow)
+    }
+
+    @Test
+    fun providerSettingsStringRedactsApiKeysAndImportedWorkflowContent() {
+        val secretApiKey = "provider-api-key-do-not-log"
+        val privateWorkflowText = "private-workflow-prompt-do-not-log"
+        val provider = first.copy(apiKey = secretApiKey)
+        val workflow = ComfyUiWorkflowTemplate(
+            id = "private-workflow",
+            workflowJson = """{"1":{"inputs":{"text":"$privateWorkflowText"}}}""",
+            positivePrompt = ComfyUiNodeInput("1", "text")
+        )
+        val settings = ProviderSettings(
+            providers = listOf(provider),
+            comfyUiWorkflow = workflow
+        )
+
+        assertFalse(provider.toString().contains(secretApiKey))
+        assertTrue(provider.toString().contains("apiKeyConfigured=true"))
+        assertFalse(workflow.toString().contains(privateWorkflowText))
+        assertFalse(settings.toString().contains(secretApiKey))
+        assertFalse(settings.toString().contains(privateWorkflowText))
     }
 
     @Test
