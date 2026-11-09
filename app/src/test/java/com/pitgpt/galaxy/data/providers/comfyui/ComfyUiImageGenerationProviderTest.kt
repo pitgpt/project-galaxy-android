@@ -271,6 +271,12 @@ class ComfyUiImageGenerationProviderTest {
         override suspend fun get(promptId: String): ComfyUiJobRecord? =
             record.takeIf { it.promptId == promptId }
 
+        override suspend fun markSubmissionStarted(promptId: String): Boolean {
+            if (record.promptId != promptId || record.submissionStarted) return false
+            record = record.copy(submissionStarted = true)
+            return true
+        }
+
         override suspend fun markCancelled(promptId: String) {
             markStarted.complete(Unit)
             allowMark.await()
@@ -287,6 +293,8 @@ class ComfyUiImageGenerationProviderTest {
 
         override suspend fun get(promptId: String): ComfyUiJobRecord? =
             existing.takeIf { it.promptId == promptId }
+
+        override suspend fun markSubmissionStarted(promptId: String): Boolean = false
 
         override suspend fun markCancelled(promptId: String) = Unit
     }
@@ -319,6 +327,8 @@ class ComfyUiImageGenerationProviderTest {
             throw IllegalStateException("simulated SQLCipher readback failure")
         }
 
+        override suspend fun markSubmissionStarted(promptId: String): Boolean = false
+
         override suspend fun markCancelled(promptId: String) = Unit
     }
 
@@ -328,6 +338,8 @@ class ComfyUiImageGenerationProviderTest {
         }
 
         override suspend fun get(promptId: String): ComfyUiJobRecord? = null
+
+        override suspend fun markSubmissionStarted(promptId: String): Boolean = false
 
         override suspend fun markCancelled(promptId: String) = Unit
     }
