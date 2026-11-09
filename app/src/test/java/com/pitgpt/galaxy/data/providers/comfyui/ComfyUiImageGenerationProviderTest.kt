@@ -118,6 +118,32 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(64, asset.sha256.length)
     }
 
+    @Test fun completedImageReturnsMetadataAndBytesFromOneDownload() = runBlocking {
+        val png = ByteArray(24)
+        byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a).copyInto(png)
+        "IHDR".toByteArray().copyInto(png, 12)
+        png[18] = 2; png[19] = 0
+        png[22] = 3; png[23] = 0
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """
+                {"prompt-123":{"status":{"status_str":"success","completed":true},
+                "outputs":{"9":{"images":[{"filename":"lila.png","subfolder":"renders","type":"output"}]}}}}
+            """.trimIndent()))
+            binary = ComfyUiBinaryResponse(200, "image/png", png)
+        }
+        val store = InMemoryComfyUiJobStore().apply {
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis))
+        }
+
+        val result = provider(transport, store).completedImage("prompt-123")
+
+        assertEquals(request.id, result.asset.requestId)
+        assertEquals(png.size.toLong(), result.asset.byteSize)
+        assertEquals("image/png", result.mimeType)
+        assertTrue(result.bytes.contentEquals(png))
+        assertEquals(1, transport.urls.count { it.contains("/view?") })
+    }
+
     private fun provider(
         transport: FakeTransport,
         store: InMemoryComfyUiJobStore = InMemoryComfyUiJobStore()
