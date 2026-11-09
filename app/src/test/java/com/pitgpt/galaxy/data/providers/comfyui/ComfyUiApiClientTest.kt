@@ -28,6 +28,7 @@ class ComfyUiApiClientTest {
         seed = 42L,
         createdAtEpochMillis = 1L
     )
+    private val promptId = "11111111-1111-4111-8111-111111111111"
     private val template = ComfyUiWorkflowTemplate(
         id = "lila-v1",
         workflowJson = """{
@@ -86,15 +87,16 @@ class ComfyUiApiClientTest {
     @Test
     fun submitsPromptAndReturnsProviderPromptId() = runBlocking {
         val transport = FakeTransport().apply {
-            jsonResponse = ComfyUiApiResponse(200, """{"prompt_id":"job_123","number":7,"node_errors":{}}""")
+            jsonResponse = ComfyUiApiResponse(200, """{"prompt_id":"$promptId","number":7,"node_errors":{}}""")
         }
-        val result = ComfyUiApiClient(transport).submit(config, template, request, "galaxy-client")
+        val result = ComfyUiApiClient(transport).submit(config, template, request, "galaxy-client", promptId)
 
-        assertEquals("job_123", result.promptId)
+        assertEquals(promptId, result.promptId)
         assertEquals(7L, result.queueNumber)
         assertEquals("POST", transport.method)
         assertEquals("http://192.168.1.20:8188/prompt", transport.url)
         val payload = JSONObject(String(transport.requestBody!!, Charsets.UTF_8))
+        assertEquals(promptId, payload.getString("prompt_id"))
         assertEquals("galaxy-client", payload.getString("client_id"))
         assertEquals("silver-haired adult heroine",
             payload.getJSONObject("prompt").getJSONObject("1").getJSONObject("inputs").getString("text"))
@@ -102,14 +104,15 @@ class ComfyUiApiClientTest {
     }
 
     @Test
-    fun rejectsInvalidPromptIdFromProvider() {
+    fun rejectsInvalidClientPromptIdBeforeNetworkCall() {
         runBlocking {
-            val transport = FakeTransport().apply {
-                jsonResponse = ComfyUiApiResponse(200, """{"prompt_id":"../admin"}""")
+            val transport = FakeTransport()
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking {
+                    ComfyUiApiClient(transport).submit(config, template, request, "client-1", "../admin")
+                }
             }
-            assertThrows(ComfyUiApiException::class.java) {
-                runBlocking { ComfyUiApiClient(transport).submit(config, template, request, "client-1") }
-            }
+            assertEquals(null, transport.url)
         }
     }
 
