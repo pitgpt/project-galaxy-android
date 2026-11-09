@@ -21,10 +21,11 @@ data class AiProviderConfig(
     val apiKey: String,
     val model: String
 ) {
-    /** Keep credentials out of accidental debug logging and exception messages. */
+    /** Keep user-controlled endpoint metadata and credentials out of accidental logs. */
     override fun toString(): String =
-        "AiProviderConfig(id=$id, name=$name, baseUrl=$baseUrl, " +
-            "apiKeyConfigured=${apiKey.isNotBlank()}, model=$model)"
+        "AiProviderConfig(idConfigured=${id.isNotBlank()}, nameConfigured=${name.isNotBlank()}, " +
+            "baseUrlConfigured=${baseUrl.isNotBlank()}, apiKeyConfigured=${apiKey.isNotBlank()}, " +
+            "modelConfigured=${model.isNotBlank()})"
 }
 
 data class ProviderSettings(
@@ -34,7 +35,13 @@ data class ProviderSettings(
     val voiceModel: String? = null,
     val comfyUi: ComfyUiSavedSettings? = null,
     val comfyUiWorkflow: ComfyUiWorkflowTemplate? = null
-)
+) {
+    /** Avoid leaking user-controlled model identifiers through generated data-class output. */
+    override fun toString(): String =
+        "ProviderSettings(providerCount=${providers.size}, activeProviderConfigured=${!activeProviderId.isNullOrBlank()}, " +
+            "textModelConfigured=${!textModel.isNullOrBlank()}, voiceModelConfigured=${!voiceModel.isNullOrBlank()}, " +
+            "comfyUiConfigured=${comfyUi != null}, workflowConfigured=${comfyUiWorkflow != null})"
+}
 
 /**
  * Raised when previously saved encrypted settings cannot be read.
