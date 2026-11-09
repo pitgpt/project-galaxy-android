@@ -4,6 +4,8 @@ import androidx.room.Room
 import com.pitgpt.galaxy.core.model.GeneratedImageAsset
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
+import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
+import com.pitgpt.galaxy.data.local.entity.GeneratedImageEntity
 import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.media.MediaEncryptionKeyProvider
 import java.nio.file.Files
@@ -64,6 +66,88 @@ class RoomGeneratedImageRepositoryTest {
         assertEquals(request.characterId, saved.characterId)
         assertArrayEquals(bytes, repository.read(saved.assetId))
         assertEquals(saved, repository.get(saved.assetId))
+    }
+
+    @Test
+    fun repeatedSaveForSameRequestReturnsExistingEncryptedAsset() = runBlocking {
+        val request = request("conversation-a")
+        val bytes = ByteArray(48) { (it * 5).toByte() }
+
+        val first = repository.save(request, asset(request.id, bytes), bytes)
+        val second = repository.save(request, asset(request.id, bytes), bytes)
+
+        assertEquals(first, second)
+        assertEquals(first, repository.getForRequest(request.id))
+        assertEquals(1, mediaDirectory.listFiles { file -> file.extension == "gcm" }?.size)
+        assertArrayEquals(bytes, repository.read(first.assetId))
+    }
+
+    @Test
+    fun conflictingResultForSameRequestDoesNotReplaceOriginalCiphertext() = runBlocking {
+        val request = request("conversation-a")
+        val originalBytes = ByteArray(48) { (it * 5).toByte() }
+        val differentBytes = ByteArray(48) { (it * 7).toByte() }
+        val original = repository.save(request, asset(request.id, originalBytes), originalBytes)
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                repository.save(request, asset(request.id, differentBytes), differentBytes)
+            }
+        }
+
+        assertArrayEquals(originalBytes, repository.read(original.assetId))
+        assertEquals(1, mediaDirectory.listFiles { file -> file.extension == "gcm" }?.size)
+    }
+
+    @Test
+    fun preservesCiphertextWhenMetadataReadBackFails() = runBlocking {
+        val insertFailure = IllegalStateException("metadata insert failed")
+        val readBackFailure = IllegalStateException("metadata read-back failed")
+        val failingRepository = RoomGeneratedImageRepository(
+            failingDao(
+                insertAction = { throw insertFailure },
+                getAction = { throw readBackFailure }
+            ),
+            mediaStore
+        )
+        val request = request("conversation-readback-failure")
+        val bytes = ByteArray(40) { (it + 3).toByte() }
+
+        val failure = runCatching {
+            failingRepository.save(request, asset(request.id, bytes), bytes)
+        }.exceptionOrNull()
+
+        assertEquals("metadata insert failed", failure?.message)
+        assertTrue(
+            "A failed metadata read-back must be attached to the original insert failure",
+            failure?.suppressed?.any { it.message == readBackFailure.message } == true
+        )
+        val encryptedFile = mediaDirectory.listFiles { file -> file.extension == "gcm" }!!.single()
+        assertArrayEquals(
+            bytes,
+            mediaStore.read(encryptedFile.nameWithoutExtension, "image/png")
+        )
+    }
+
+    @Test
+    fun deletesCiphertextWhenMetadataReadBackConfirmsNoRow() = runBlocking {
+        val insertFailure = IllegalStateException("metadata insert failed")
+        val failingRepository = RoomGeneratedImageRepository(
+            failingDao(
+                insertAction = { throw insertFailure },
+                getAction = { null }
+            ),
+            mediaStore
+        )
+        val request = request("conversation-metadata-absent")
+        val bytes = ByteArray(40) { (it + 5).toByte() }
+
+        val failure = runCatching {
+            failingRepository.save(request, asset(request.id, bytes), bytes)
+        }.exceptionOrNull()
+
+        assertEquals("metadata insert failed", failure?.message)
+        assertTrue(mediaDirectory.listFiles { file -> file.extension == "gcm" }.orEmpty().isEmpty())
     }
 
     @Test
@@ -130,6 +214,17 @@ class RoomGeneratedImageRepositoryTest {
         } finally {
             dispatcher.close()
         }
+    }
+
+    private fun failingDao(
+        insertAction: suspend (GeneratedImageEntity) -> Unit,
+        getAction: suspend (String) -> GeneratedImageEntity?
+    ): GeneratedImageDao = object : GeneratedImageDao {
+        override suspend fun insert(entity: GeneratedImageEntity) = insertAction(entity)
+        override suspend fun get(assetId: String) = getAction(assetId)
+        override suspend fun getForRequest(requestId: String): GeneratedImageEntity? = null
+        override suspend fun listForConversation(conversationId: String): List<GeneratedImageEntity> = emptyList()
+        override suspend fun delete(assetId: String): Int = 0
     }
 
     private fun request(conversationId: String) = ImageGenerationRequest(

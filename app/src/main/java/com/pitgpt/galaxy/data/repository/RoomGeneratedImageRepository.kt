@@ -13,6 +13,8 @@ import java.util.UUID
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -24,17 +26,35 @@ class RoomGeneratedImageRepository(
     private val mediaStore: EncryptedMediaStore,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : GeneratedImageRepository {
+    private val saveMutex = Mutex()
+
     override suspend fun save(
         request: ImageGenerationRequest,
         asset: GeneratedImageAsset,
         imageBytes: ByteArray
-    ): StoredGeneratedImage {
+    ): StoredGeneratedImage = saveMutex.withLock {
         require(asset.requestId == request.id) { "Generated image belongs to a different request" }
         require(asset.byteSize == imageBytes.size.toLong()) { "Generated image byte size does not match its payload" }
         require(asset.mimeType in SUPPORTED_MIME_TYPES) { "Generated image MIME type is unsupported" }
         require(imageBytes.isNotEmpty()) { "Generated image payload must not be empty" }
         require(sha256(imageBytes).equals(asset.sha256, ignoreCase = true)) {
             "Generated image checksum does not match its payload"
+        }
+
+        dao.getForRequest(request.id)?.toDomain()?.let { existing ->
+            check(
+                existing.conversationId == request.conversationId &&
+                    existing.characterId == request.characterId
+            ) { "The generation request ID is already associated with different Galaxy context" }
+            check(
+                existing.mimeType == asset.mimeType &&
+                    existing.width == asset.width &&
+                    existing.height == asset.height &&
+                    existing.byteSize == asset.byteSize &&
+                    existing.sha256.equals(asset.sha256, ignoreCase = true) &&
+                    existing.createdAtEpochMillis == asset.createdAtEpochMillis
+            ) { "A different image is already persisted for this generation request" }
+            return@withLock existing
         }
 
         val stored = StoredGeneratedImage(
@@ -60,12 +80,17 @@ class RoomGeneratedImageRepository(
             }
             dao.insert(stored.toEntity())
         } catch (failure: Exception) {
-            val metadataCommitted = runCatching {
+            // Delete ciphertext only after the database confirms that no metadata row
+            // committed. A failed read-back is an unknown state, so preserve the file.
+            val metadataAbsent = try {
                 withContext(NonCancellable) {
-                    dao.get(stored.assetId)?.toDomain() == stored
+                    dao.get(stored.assetId) == null
                 }
-            }.getOrDefault(false)
-            if (mediaSaved && !metadataCommitted) {
+            } catch (lookupFailure: Exception) {
+                failure.addSuppressed(lookupFailure)
+                false
+            }
+            if (mediaSaved && metadataAbsent) {
                 runCatching {
                     withContext(NonCancellable + ioDispatcher) {
                         mediaStore.delete(stored.assetId)
@@ -74,7 +99,12 @@ class RoomGeneratedImageRepository(
             }
             throw failure
         }
-        return stored
+        stored
+    }
+
+    override suspend fun getForRequest(requestId: String): StoredGeneratedImage? {
+        require(requestId.isNotBlank()) { "Generation request ID must not be blank" }
+        return dao.getForRequest(requestId)?.toDomain()
     }
 
     override suspend fun get(assetId: String): StoredGeneratedImage? {
@@ -105,7 +135,6 @@ class RoomGeneratedImageRepository(
         requireValidAssetId(assetId)
         val removed = dao.delete(assetId)
         check(removed == 1) { "Generated image metadata was not found" }
-        // If file deletion fails, only orphaned ciphertext remains; no metadata exposes it.
         withContext(NonCancellable + ioDispatcher) {
             mediaStore.delete(assetId)
         }

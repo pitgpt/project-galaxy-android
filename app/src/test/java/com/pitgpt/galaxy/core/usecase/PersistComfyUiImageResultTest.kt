@@ -7,6 +7,9 @@ import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
 import java.security.MessageDigest
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -50,6 +53,26 @@ class PersistGeneratedImageResultTest {
     }
 
     @Test
+    fun returnsExistingRequestResultWithoutDownloadingAgain() = runBlocking {
+        val source = FakeSource(
+            GeneratedImagePayload(validAsset, "image/png", bytes, sha256(bytes)),
+            delayMillis = 10
+        )
+        val repository = FakeRepository()
+        val useCase = PersistGeneratedImageResult(source, repository)
+
+        val (first, second) = coroutineScope {
+            val firstCall = async { useCase(request, "prompt-1") }
+            val secondCall = async { useCase(request, "prompt-1") }
+            firstCall.await() to secondCall.await()
+        }
+
+        assertEquals(first, second)
+        assertEquals(1, source.downloadCalls)
+        assertEquals(1, repository.saveCalls)
+    }
+
+    @Test
     fun rejectsWrongRequestBeforeRepositoryWrite() = runBlocking {
         val source = FakeSource(GeneratedImagePayload(
             validAsset.copy(requestId = "other-request"), "image/png", bytes, sha256(bytes)
@@ -80,11 +103,15 @@ class PersistGeneratedImageResultTest {
             .joinToString("") { "%02x".format(it) }
 
     private class FakeSource(
-        private val result: GeneratedImagePayload
+        private val result: GeneratedImagePayload,
+        private val delayMillis: Long = 0
     ) : GeneratedImageResultSource {
         var requestedJobId: String? = null
+        var downloadCalls: Int = 0
         override suspend fun completedImage(providerJobId: String): GeneratedImagePayload {
             requestedJobId = providerJobId
+            downloadCalls++
+            if (delayMillis > 0) delay(delayMillis)
             return result
         }
     }
@@ -92,6 +119,8 @@ class PersistGeneratedImageResultTest {
     private class FakeRepository : GeneratedImageRepository {
         var savedRequest: ImageGenerationRequest? = null
         var savedBytes: ByteArray? = null
+        var savedResult: StoredGeneratedImage? = null
+        var saveCalls: Int = 0
 
         override suspend fun save(
             request: ImageGenerationRequest,
@@ -100,6 +129,7 @@ class PersistGeneratedImageResultTest {
         ): StoredGeneratedImage {
             savedRequest = request
             savedBytes = imageBytes.copyOf()
+            saveCalls++
             return StoredGeneratedImage(
                 assetId = "galaxy-asset-1",
                 requestId = request.id,
@@ -111,8 +141,11 @@ class PersistGeneratedImageResultTest {
                 byteSize = asset.byteSize,
                 sha256 = asset.sha256,
                 createdAtEpochMillis = asset.createdAtEpochMillis
-            )
+            ).also { savedResult = it }
         }
+
+        override suspend fun getForRequest(requestId: String): StoredGeneratedImage? =
+            savedResult?.takeIf { it.requestId == requestId }
 
         override suspend fun get(assetId: String): StoredGeneratedImage? = null
         override suspend fun listForConversation(conversationId: String): List<StoredGeneratedImage> = emptyList()
