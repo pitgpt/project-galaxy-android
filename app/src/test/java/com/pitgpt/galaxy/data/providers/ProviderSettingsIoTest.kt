@@ -24,12 +24,12 @@ class ProviderSettingsIoTest {
                 )
             )
 
-            assertEquals(ProviderSettings(), io.load())
+            assertEquals("load returns initial settings", ProviderSettings(), io.load())
             io.save(expected)
 
-            assertEquals(expected, repository.settings)
-            assertEquals("galaxy-settings-io-test", repository.loadThread)
-            assertEquals("galaxy-settings-io-test", repository.saveThread)
+            assertEquals("save persists exact settings", expected, repository.settings)
+            assertEquals("load executes on configured dispatcher", "galaxy-settings-io-test", repository.loadThread)
+            assertEquals("save executes on configured dispatcher", "galaxy-settings-io-test", repository.saveThread)
         } finally {
             dispatcher.close()
         }
