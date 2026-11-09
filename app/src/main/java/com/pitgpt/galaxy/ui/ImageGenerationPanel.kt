@@ -50,6 +50,18 @@ internal fun imageGenerationStatusLabel(state: ImageGenerationState): String =
         ImageGenerationState.CANCELLED -> "Отменено"
     }
 
+internal suspend fun <T> refreshStatusPreservingCancellation(
+    currentStatus: T?,
+    refresh: suspend () -> T
+): T? =
+    try {
+        refresh()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        currentStatus
+    }
+
 /**
  * First interactive ComfyUI surface. It submits through the saved encrypted settings,
  * polls the provider, and persists completed bytes only through the encrypted media repository.
@@ -225,9 +237,9 @@ internal fun ImageGenerationPanel(
                             throw cancelled
                         } catch (_: Exception) {
                             panelError = "Отмена не подтверждена. Задание могло уже перейти к выполнению."
-                            status = runCatching {
+                            status = refreshStatusPreservingCancellation(status) {
                                 GetImageGenerationStatus(selectedRuntime.provider).invoke(selectedJobId)
-                            }.getOrNull() ?: status
+                            }
                         } finally {
                             isCancelling = false
                         }
