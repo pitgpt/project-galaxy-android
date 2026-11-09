@@ -5,6 +5,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.nio.file.Files
 import java.security.KeyStore
+import java.util.UUID
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
@@ -18,23 +19,26 @@ import org.junit.runner.RunWith
 class EncryptedMediaStoreKeystoreInstrumentedTest {
     private lateinit var directory: File
     private lateinit var keyStore: KeyStore
-    private val keyProvider = AndroidKeystoreMediaKeyProvider()
+    private lateinit var keyAlias: String
+    private lateinit var keyProvider: AndroidKeystoreMediaKeyProvider
 
     @Before
     fun setUp() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
+        keyAlias = "galaxy_media_test_${UUID.randomUUID()}"
         keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply {
             load(null)
-            if (containsAlias(MEDIA_KEY_ALIAS)) deleteEntry(MEDIA_KEY_ALIAS)
+            if (containsAlias(keyAlias)) deleteEntry(keyAlias)
         }
+        keyProvider = AndroidKeystoreMediaKeyProvider(keyAlias)
         directory = Files.createTempDirectory(context.cacheDir.toPath(), "galaxy-media-keystore-").toFile()
     }
 
     @After
     fun tearDown() {
         directory.deleteRecursively()
-        if (::keyStore.isInitialized && keyStore.containsAlias(MEDIA_KEY_ALIAS)) {
-            keyStore.deleteEntry(MEDIA_KEY_ALIAS)
+        if (::keyStore.isInitialized && ::keyAlias.isInitialized && keyStore.containsAlias(keyAlias)) {
+            keyStore.deleteEntry(keyAlias)
         }
     }
 
@@ -58,7 +62,7 @@ class EncryptedMediaStoreKeystoreInstrumentedTest {
         val assetFile = File(directory, "existing_asset.gcm")
         val originalCiphertext = assetFile.readBytes()
 
-        keyStore.deleteEntry(MEDIA_KEY_ALIAS)
+        keyStore.deleteEntry(keyAlias)
 
         val readFailure = runCatching { store.read("existing_asset", "image/jpeg") }.exceptionOrNull()
         assertTrue("Reading with a missing key must fail closed", readFailure is IllegalStateException)
@@ -70,7 +74,7 @@ class EncryptedMediaStoreKeystoreInstrumentedTest {
         assertTrue(assetFile.isFile)
         assertArrayEquals(originalCiphertext, assetFile.readBytes())
         assertFalse(File(directory, "new_asset.gcm").exists())
-        assertFalse("A replacement Keystore key must not be generated", keyStore.containsAlias(MEDIA_KEY_ALIAS))
+        assertFalse("A replacement Keystore key must not be generated", keyStore.containsAlias(keyAlias))
     }
 
     private fun containsBytes(container: ByteArray, candidate: ByteArray): Boolean {
@@ -82,6 +86,5 @@ class EncryptedMediaStoreKeystoreInstrumentedTest {
 
     private companion object {
         const val ANDROID_KEY_STORE = "AndroidKeyStore"
-        const val MEDIA_KEY_ALIAS = "galaxy_media_aes_gcm_v1"
     }
 }
