@@ -45,6 +45,7 @@ class RoomComfyUiJobStoreTest {
 
         assertEquals(record, store.get("prompt-123"))
         assertNull(store.get("unknown-prompt"))
+        assertEquals(listOf(record), store.all())
     }
 
     @Test
@@ -56,6 +57,17 @@ class RoomComfyUiJobStoreTest {
         val saved = store.get("prompt-123")
         assertTrue(saved!!.cancelled)
         assertEquals("request-456", saved.requestId)
+    }
+
+    @Test
+    fun deleteRemovesOnlyTheSelectedSubmissionIntent() = runBlocking {
+        store.put(ComfyUiJobRecord("prompt-1", "request-1", 1L))
+        store.put(ComfyUiJobRecord("prompt-2", "request-2", 2L))
+
+        store.delete("prompt-1")
+
+        assertNull(store.get("prompt-1"))
+        assertEquals(listOf(ComfyUiJobRecord("prompt-2", "request-2", 2L)), store.all())
     }
 
     @Test
