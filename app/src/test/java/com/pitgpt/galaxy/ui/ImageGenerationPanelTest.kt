@@ -5,6 +5,8 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -42,5 +44,24 @@ class ImageGenerationPanelTest {
         }
 
         assertSame(cancellation, thrown)
+    }
+
+    @Test
+    fun rejectsInvalidOrExcessiveGeneratedImageDimensions() {
+        assertFalse(isSafeGeneratedImageDimensions(0, 1024))
+        assertFalse(isSafeGeneratedImageDimensions(8193, 1))
+        assertFalse(isSafeGeneratedImageDimensions(8192, 2049))
+        assertTrue(isSafeGeneratedImageDimensions(1024, 1024))
+        assertTrue(isSafeGeneratedImageDimensions(8192, 2048))
+    }
+
+    @Test
+    fun downsamplesLargeGeneratedImagesForMemoryBoundedPreview() {
+        assertEquals(1, generatedImagePreviewSampleSize(1024, 1024))
+        assertEquals(2, generatedImagePreviewSampleSize(4096, 2048))
+        assertEquals(4, generatedImagePreviewSampleSize(8192, 2048))
+        assertThrows(IllegalArgumentException::class.java) {
+            generatedImagePreviewSampleSize(8192, 2049)
+        }
     }
 }
