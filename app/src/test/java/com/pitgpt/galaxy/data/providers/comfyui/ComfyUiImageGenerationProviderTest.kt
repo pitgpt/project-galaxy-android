@@ -39,7 +39,7 @@ class ComfyUiImageGenerationProviderTest {
         }
         val store = InMemoryComfyUiJobStore()
         assertEquals(promptId, provider(transport, store).submit(request))
-        assertEquals(ComfyUiJobRecord(promptId, request.id, 1234L), store.get(promptId))
+        assertEquals(ComfyUiJobRecord(promptId, request.id, 1234L, submissionStarted = true), store.get(promptId))
         val payload = JSONObject(String(transport.bodies.single()!!, Charsets.UTF_8))
         assertEquals(promptId, payload.getString("prompt_id"))
         assertEquals(request.prompt, payload.getJSONObject("prompt").getJSONObject("1")
@@ -59,8 +59,8 @@ class ComfyUiImageGenerationProviderTest {
 
         val expectedPromptId = stablePromptId(request)
         assertEquals(expectedPromptId, failure.promptId)
-        assertEquals(ComfyUiJobRecord(expectedPromptId, request.id, request.createdAtEpochMillis),
-            store.get(expectedPromptId))
+        assertEquals(ComfyUiJobRecord(expectedPromptId, request.id, request.createdAtEpochMillis,
+            submissionStarted = true), store.get(expectedPromptId))
         assertEquals(listOf("POST"), transport.methods)
 
         // Retrying the same logical request returns its journaled ID without a second POST.
@@ -80,8 +80,8 @@ class ComfyUiImageGenerationProviderTest {
         }
 
         val expectedPromptId = stablePromptId(request)
-        assertEquals(ComfyUiJobRecord(expectedPromptId, request.id, request.createdAtEpochMillis),
-            store.get(expectedPromptId))
+        assertEquals(ComfyUiJobRecord(expectedPromptId, request.id, request.createdAtEpochMillis,
+            submissionStarted = true), store.get(expectedPromptId))
         assertEquals(expectedPromptId, runBlocking { activeProvider.submit(request) })
         assertEquals(listOf("POST"), transport.methods)
     }
@@ -114,8 +114,8 @@ class ComfyUiImageGenerationProviderTest {
         val store = CommitThenFailJobStore()
 
         assertEquals(promptId, provider(transport, store).submit(request))
-        assertEquals(ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis),
-            store.get(promptId))
+        assertEquals(ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis,
+            submissionStarted = true), store.get(promptId))
         assertEquals(listOf("POST"), transport.methods)
     }
 
@@ -300,6 +300,12 @@ class ComfyUiImageGenerationProviderTest {
         }
 
         override suspend fun get(promptId: String): ComfyUiJobRecord? = records[promptId]
+
+        override suspend fun markSubmissionStarted(promptId: String): Boolean {
+            val record = records[promptId] ?: return false
+            records[promptId] = record.copy(submissionStarted = true)
+            return true
+        }
 
         override suspend fun markCancelled(promptId: String) = Unit
     }
