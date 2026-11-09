@@ -36,7 +36,7 @@ class EncryptedMediaStoreKeystoreInstrumentedTest {
 
     @After
     fun tearDown() {
-        directory.deleteRecursively()
+        if (::directory.isInitialized) directory.deleteRecursively()
         if (::keyStore.isInitialized && ::keyAlias.isInitialized && keyStore.containsAlias(keyAlias)) {
             keyStore.deleteEntry(keyAlias)
         }
@@ -70,7 +70,10 @@ class EncryptedMediaStoreKeystoreInstrumentedTest {
         val saveFailure = runCatching {
             store.save("new_asset", "image/jpeg", byteArrayOf(6, 7, 8))
         }.exceptionOrNull()
-        assertTrue("Saving beside existing ciphertext must not replace a missing key", saveFailure is IllegalStateException)
+        assertTrue(
+            "Saving beside existing ciphertext must not replace a missing key",
+            saveFailure is IllegalStateException
+        )
         assertTrue(assetFile.isFile)
         assertArrayEquals(originalCiphertext, assetFile.readBytes())
         assertFalse(File(directory, "new_asset.gcm").exists())
