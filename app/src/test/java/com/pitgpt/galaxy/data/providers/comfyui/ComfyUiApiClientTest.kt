@@ -211,6 +211,18 @@ class ComfyUiApiClientTest {
     }
 
     @Test
+    fun apiResponseStringDoesNotExposeResponseBody() {
+        val privateResponse = "private-prompt-and-token-do-not-log"
+        val response = ComfyUiApiResponse(500, """{"error":"$privateResponse"}""")
+
+        val rendered = response.toString()
+
+        assertFalse(rendered.contains(privateResponse))
+        assertTrue(rendered.contains("statusCode=500"))
+        assertTrue(rendered.contains("bodyChars="))
+    }
+
+    @Test
     fun doesNotIncludeProviderErrorBodyInException() = runBlocking {
         val transport = FakeTransport().apply {
             jsonResponse = ComfyUiApiResponse(401, """{"error":"secret-token-must-not-leak"}""")
