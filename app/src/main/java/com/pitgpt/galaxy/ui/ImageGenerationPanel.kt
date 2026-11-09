@@ -62,6 +62,37 @@ internal suspend fun <T> refreshStatusPreservingCancellation(
         currentStatus
     }
 
+private const val MAX_GENERATED_IMAGE_DIMENSION = 8_192
+private const val MAX_GENERATED_IMAGE_PIXELS = 16L * 1_024 * 1_024
+private const val MAX_GENERATED_IMAGE_PREVIEW_DIMENSION = 2_048
+
+internal fun isSafeGeneratedImageDimensions(width: Int, height: Int): Boolean =
+    width in 1..MAX_GENERATED_IMAGE_DIMENSION &&
+        height in 1..MAX_GENERATED_IMAGE_DIMENSION &&
+        width.toLong() * height.toLong() <= MAX_GENERATED_IMAGE_PIXELS
+
+internal fun generatedImagePreviewSampleSize(width: Int, height: Int): Int {
+    require(isSafeGeneratedImageDimensions(width, height)) {
+        "Generated image dimensions exceed the preview limit"
+    }
+    var sampleSize = 1
+    while (maxOf(width / sampleSize, height / sampleSize) > MAX_GENERATED_IMAGE_PREVIEW_DIMENSION) {
+        sampleSize *= 2
+    }
+    return sampleSize
+}
+
+internal fun decodeGeneratedImage(bytes: ByteArray): ImageBitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (!isSafeGeneratedImageDimensions(bounds.outWidth, bounds.outHeight)) return null
+
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = generatedImagePreviewSampleSize(bounds.outWidth, bounds.outHeight)
+    }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
+}
+
 /**
  * First interactive ComfyUI surface. It submits through the saved encrypted settings,
  * polls the provider, and persists completed bytes only through the encrypted media repository.
@@ -118,7 +149,7 @@ internal fun ImageGenerationPanel(
                             val plaintext = app.generatedImages.read(stored.assetId)
                             val decoded = withContext(Dispatchers.Default) {
                                 try {
-                                    BitmapFactory.decodeByteArray(plaintext, 0, plaintext.size)?.asImageBitmap()
+                                    decodeGeneratedImage(plaintext)
                                 } finally {
                                     plaintext.fill(0)
                                 }
