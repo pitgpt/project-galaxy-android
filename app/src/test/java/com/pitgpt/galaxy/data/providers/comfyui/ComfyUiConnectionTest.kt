@@ -1,10 +1,12 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class ComfyUiConnectionTest {
@@ -107,6 +109,20 @@ class ComfyUiConnectionTest {
         assertEquals(401, result.httpStatusCode)
         assertEquals("ComfyUI rejected the configured access token", result.message)
         assertFalse(result.message.contains("secret-token-should-not-appear"))
+    }
+
+    @Test
+    fun propagatesCancellationInsteadOfTreatingEndpointAsUnavailable() = runBlocking {
+        val cancellation = CancellationException("probe cancelled")
+        val probe = ComfyUiConnectionProbe(ComfyUiHttpTransport { _, _, _, _, _ ->
+            throw cancellation
+        })
+
+        val thrown = runCatching {
+            probe(ComfyUiConnectionConfig("http://192.168.1.25:8188"))
+        }.exceptionOrNull()
+
+        assertSame(cancellation, thrown)
     }
 
     @Test
