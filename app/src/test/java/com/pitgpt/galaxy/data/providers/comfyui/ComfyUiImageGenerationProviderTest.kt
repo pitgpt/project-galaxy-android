@@ -113,6 +113,21 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(listOf("POST"), transport.methods)
     }
 
+    @Test fun readbackFailureDoesNotAttemptRemoteCompensation() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+        }
+
+        val failure = assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, ReadbackFailingJobStore()).submit(request) }
+        }
+
+        assertEquals("simulated SQLCipher write failure", failure.message)
+        assertEquals(1, failure.suppressed.size)
+        assertEquals("simulated SQLCipher readback failure", failure.suppressed.single().message)
+        assertEquals(listOf("POST"), transport.methods)
+    }
+
     @Test fun queuedCancellationDeletesOnlyThatPrompt() = runBlocking {
         val transport = FakeTransport().apply {
             responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
@@ -244,6 +259,18 @@ class ComfyUiImageGenerationProviderTest {
         override suspend fun markCancelled(promptId: String) = Unit
     }
 
+    private class ReadbackFailingJobStore : ComfyUiJobStore {
+        override suspend fun put(record: ComfyUiJobRecord) {
+            throw IllegalStateException("simulated SQLCipher write failure")
+        }
+
+        override suspend fun get(promptId: String): ComfyUiJobRecord? {
+            throw IllegalStateException("simulated SQLCipher readback failure")
+        }
+
+        override suspend fun markCancelled(promptId: String) = Unit
+    }
+
     private class FailingJobStore : ComfyUiJobStore {
         override suspend fun put(record: ComfyUiJobRecord) {
             throw IllegalStateException("simulated SQLCipher write failure")
@@ -256,7 +283,7 @@ class ComfyUiImageGenerationProviderTest {
 
     private fun provider(
         transport: FakeTransport,
-        store: InMemoryComfyUiJobStore = InMemoryComfyUiJobStore()
+        store: ComfyUiJobStore = InMemoryComfyUiJobStore()
     ) = ComfyUiImageGenerationProvider(config, template, "galaxy-test", ComfyUiApiClient(transport), store)
 
     private class FakeTransport : ComfyUiApiTransport {
