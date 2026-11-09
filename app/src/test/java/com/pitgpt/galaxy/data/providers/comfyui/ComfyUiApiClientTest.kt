@@ -63,6 +63,17 @@ class ComfyUiApiClientTest {
     }
 
     @Test
+    fun validatesExplicitMappingsBeforeTemplateIsSaved() {
+        val broken = template.copy(
+            width = ComfyUiNodeInput("3", "missing_input")
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            broken.validateMappings()
+        }
+    }
+
+    @Test
     fun refusesMissingMappedWorkflowInput() {
         val broken = template.copy(
             positivePrompt = ComfyUiNodeInput("1", "missing_input")

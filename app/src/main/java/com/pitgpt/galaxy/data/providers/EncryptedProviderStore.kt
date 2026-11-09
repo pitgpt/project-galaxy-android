@@ -41,8 +41,12 @@ class ProviderSettingsLoadException(cause: Throwable) :
     IllegalStateException("Saved provider settings could not be decrypted or parsed.", cause)
 
 /** Device-local encrypted provider settings. The ciphertext is excluded from Android backup. */
-class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
-    private val prefs = context.applicationContext.getSharedPreferences("galaxy_provider_vault", Context.MODE_PRIVATE)
+class EncryptedProviderStore internal constructor(
+    context: Context,
+    prefsName: String = "galaxy_provider_vault",
+    private val keyAlias: String = KEY_ALIAS
+) : ProviderSettingsRepository {
+    private val prefs = context.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
 
     @Synchronized
     override fun load(): ProviderSettings {
@@ -102,7 +106,7 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
                     height = node("height"),
                     seed = node("seed")
                 )
-            }
+            }.also { it?.validateMappings() }
             ProviderSettings(
                 providers,
                 root.optString("activeProviderId").takeIf { it.isNotBlank() },
@@ -119,6 +123,7 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
 
     @Synchronized
     override fun save(settings: ProviderSettings) {
+        settings.comfyUiWorkflow?.validateMappings()
         val comfyUi = settings.comfyUi?.let { value ->
             JSONObject()
                 .put("lanBaseUrl", value.lanBaseUrl ?: JSONObject.NULL)
@@ -161,28 +166,28 @@ class EncryptedProviderStore(context: Context) : ProviderSettingsRepository {
         // then retire even an invalidated Keystore key so a fresh key can be generated.
         check(prefs.edit().remove(DATA_KEY).commit()) { "Could not clear provider settings." }
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (store.containsAlias(KEY_ALIAS)) store.deleteEntry(KEY_ALIAS)
+        if (store.containsAlias(keyAlias)) store.deleteEntry(keyAlias)
     }
 
     private fun existingKey(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        return store.getKey(KEY_ALIAS, null) as? SecretKey
+        return store.getKey(keyAlias, null) as? SecretKey
             ?: throw IllegalStateException("The encryption key for saved provider settings is missing.")
     }
 
     private fun getOrCreateKey(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val aliasExists = store.containsAlias(KEY_ALIAS)
+        val aliasExists = store.containsAlias(keyAlias)
         requireProviderKeyCreationAllowed(
             hasStoredCiphertext = prefs.contains(DATA_KEY),
             keyAliasExists = aliasExists
         )
         if (aliasExists) {
-            return store.getKey(KEY_ALIAS, null) as? SecretKey
+            return store.getKey(keyAlias, null) as? SecretKey
                 ?: throw IllegalStateException("The provider encryption key exists but is unavailable.")
         }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
-            init(KeyGenParameterSpec.Builder(KEY_ALIAS,
+            init(KeyGenParameterSpec.Builder(keyAlias,
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)

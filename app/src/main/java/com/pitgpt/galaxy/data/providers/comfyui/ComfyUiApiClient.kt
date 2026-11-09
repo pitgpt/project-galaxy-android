@@ -171,11 +171,17 @@ data class ComfyUiWorkflowTemplate(
         }
     }
 
+    /** Validates every explicitly mapped node and input before a template is persisted. */
+    fun validateMappings() {
+        validateMappings(JSONObject(workflowJson))
+    }
+
     fun buildPrompt(request: ImageGenerationRequest): JSONObject {
         require(request.workflowId == null || request.workflowId == id) {
             "The request references a different workflow"
         }
         val graph = JSONObject(workflowJson)
+        validateMappings(graph)
         setInput(graph, positivePrompt, request.prompt)
         negativePrompt?.let { setInput(graph, it, request.negativePrompt.orEmpty()) }
         width?.let { setInput(graph, it, request.width) }
@@ -184,13 +190,22 @@ data class ComfyUiWorkflowTemplate(
         return graph
     }
 
+    private fun validateMappings(graph: JSONObject) {
+        listOfNotNull(positivePrompt, negativePrompt, width, height, seed)
+            .forEach { mappedInputs(graph, it) }
+    }
+
     private fun setInput(graph: JSONObject, target: ComfyUiNodeInput, value: Any) {
+        mappedInputs(graph, target).put(target.inputName, value)
+    }
+
+    private fun mappedInputs(graph: JSONObject, target: ComfyUiNodeInput): JSONObject {
         val node = graph.optJSONObject(target.nodeId)
             ?: throw IllegalArgumentException("Workflow is missing a mapped node")
         val inputs = node.optJSONObject("inputs")
             ?: throw IllegalArgumentException("Workflow mapped node has no inputs object")
         require(inputs.has(target.inputName)) { "Workflow is missing a mapped input" }
-        inputs.put(target.inputName, value)
+        return inputs
     }
 
     companion object {
