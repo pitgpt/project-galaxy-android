@@ -68,6 +68,25 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(listOf("POST"), transport.methods)
     }
 
+    @Test fun conflictResponseKeepsIntentForQueueHistoryReconciliation() {
+        val promptId = stablePromptId(request)
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(409, "{}"))
+        }
+        val store = InMemoryComfyUiJobStore()
+
+        val failure = assertThrows(ComfyUiSubmissionUncertainException::class.java) {
+            runBlocking { provider(transport, store).submit(request) }
+        }
+
+        assertEquals(promptId, failure.promptId)
+        assertEquals(
+            ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis, submissionStarted = true),
+            store.get(promptId)
+        )
+        assertEquals(listOf("POST"), transport.methods)
+    }
+
     @Test fun cancellationDuringSubmissionKeepsIntentAndRetryDoesNotResubmit() {
         val transport = FakeTransport().apply {
             failure = CancellationException("simulated caller cancellation")
