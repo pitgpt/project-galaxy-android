@@ -39,6 +39,38 @@ class ComfyUiImageGenerationProviderTest {
             .getJSONObject("inputs").getString("text"))
     }
 
+    @Test fun pendingSubmissionIsRemovedWhenJobCorrelationCannotBeStored() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"deleted":["prompt-123"]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""))
+            responses.add(ComfyUiApiResponse(200, """{}"""))
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, FailingJobStore()).submit(request) }
+        }
+
+        assertEquals(listOf("POST", "GET", "POST", "GET", "GET"), transport.methods)
+        assertTrue(String(transport.bodies[2]!!, Charsets.UTF_8).contains("prompt-123"))
+        assertFalse(transport.urls.any { it.endsWith("/interrupt") })
+    }
+
+    @Test fun runningSubmissionIsNeverInterruptedWhenJobCorrelationCannotBeStored() {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":2}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[[0,"prompt-123",{},[],[]]],"queue_pending":[]}"""))
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, FailingJobStore()).submit(request) }
+        }
+
+        assertEquals(listOf("POST", "GET"), transport.methods)
+        assertFalse(transport.urls.any { it.endsWith("/interrupt") })
+    }
+
     @Test fun queuedCancellationDeletesOnlyThatPrompt() = runBlocking {
         val transport = FakeTransport().apply {
             responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
@@ -142,6 +174,16 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals("image/png", result.mimeType)
         assertTrue(result.bytes.contentEquals(png))
         assertEquals(1, transport.urls.count { it.contains("/view?") })
+    }
+
+    private class FailingJobStore : ComfyUiJobStore {
+        override suspend fun put(record: ComfyUiJobRecord) {
+            throw IllegalStateException("simulated SQLCipher write failure")
+        }
+
+        override suspend fun get(promptId: String): ComfyUiJobRecord? = null
+
+        override suspend fun markCancelled(promptId: String) = Unit
     }
 
     private fun provider(
