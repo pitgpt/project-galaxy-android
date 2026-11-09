@@ -36,6 +36,7 @@ class ComfyUiRuntimeFactoryTest {
     fun factorySharesJobStoreAndWiresCompletedResultToImageRepository() {
         runBlocking {
             val png = testPng()
+            val expectedPng = png.copyOf()
             val transport = FakeTransport(png).apply {
                 responses.add(
                     ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":1}""")
@@ -67,7 +68,7 @@ class ComfyUiRuntimeFactoryTest {
             assertEquals("stored-asset", stored.assetId)
             assertEquals(request.id, images.savedRequest?.id)
             assertEquals("image/png", images.savedAsset?.mimeType)
-            assertArrayEquals(png, images.savedBytes!!)
+            assertArrayEquals(expectedPng, images.savedBytes!!)
             assertEquals(1, transport.binaryDownloads)
         }
     }
