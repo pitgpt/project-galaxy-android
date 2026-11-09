@@ -40,6 +40,7 @@ class PersistGeneratedImageResultTest {
 
     @Test
     fun persistsValidatedBytesAndReturnsGalaxyOwnedMetadata() = runBlocking {
+        val expectedBytes = bytes.copyOf()
         val source = FakeSource(GeneratedImagePayload(
             validAsset, "image/png", bytes, sha256(bytes)
         ))
@@ -48,7 +49,8 @@ class PersistGeneratedImageResultTest {
 
         assertEquals("prompt-1", source.requestedJobId)
         assertEquals(request.id, repository.savedRequest?.id)
-        assertTrue(repository.savedBytes!!.contentEquals(bytes))
+        assertTrue(repository.savedBytes!!.contentEquals(expectedBytes))
+        assertTrue("Downloaded plaintext must be cleared after persistence", bytes.all { it == 0.toByte() })
         assertEquals("galaxy-asset-1", saved.assetId)
     }
 
@@ -82,6 +84,25 @@ class PersistGeneratedImageResultTest {
         assertThrows(IllegalStateException::class.java) {
             runBlocking { PersistGeneratedImageResult(source, repository)(request, "prompt-1") }
         }
+        assertEquals(null, repository.savedRequest)
+    }
+
+    @Test
+    fun clearsDownloadedPlaintextWhenMetadataValidationFails() = runBlocking {
+        val downloaded = bytes.copyOf()
+        val source = FakeSource(GeneratedImagePayload(
+            validAsset.copy(requestId = "other-request"),
+            "image/png",
+            downloaded,
+            sha256(downloaded)
+        ))
+        val repository = FakeRepository()
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { PersistGeneratedImageResult(source, repository)(request, "prompt-1") }
+        }
+
+        assertTrue("Rejected plaintext payload must also be cleared", downloaded.all { it == 0.toByte() })
         assertEquals(null, repository.savedRequest)
     }
 
