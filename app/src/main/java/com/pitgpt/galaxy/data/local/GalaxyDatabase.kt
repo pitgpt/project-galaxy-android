@@ -5,10 +5,12 @@ import androidx.room.RoomDatabase
 import com.pitgpt.galaxy.data.local.dao.CharacterDao
 import com.pitgpt.galaxy.data.local.dao.ComfyUiJobDao
 import com.pitgpt.galaxy.data.local.dao.ConversationMessageDao
+import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
 import com.pitgpt.galaxy.data.local.dao.MemoryDao
 import com.pitgpt.galaxy.data.local.entity.CharacterEntity
 import com.pitgpt.galaxy.data.local.entity.ComfyUiJobEntity
 import com.pitgpt.galaxy.data.local.entity.ConversationMessageEntity
+import com.pitgpt.galaxy.data.local.entity.GeneratedImageEntity
 import com.pitgpt.galaxy.data.local.entity.MemoryEntity
 
 @Database(
@@ -16,9 +18,10 @@ import com.pitgpt.galaxy.data.local.entity.MemoryEntity
         CharacterEntity::class,
         ConversationMessageEntity::class,
         MemoryEntity::class,
-        ComfyUiJobEntity::class
+        ComfyUiJobEntity::class,
+        GeneratedImageEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class GalaxyDatabase : RoomDatabase() {
@@ -26,4 +29,5 @@ abstract class GalaxyDatabase : RoomDatabase() {
     abstract fun conversationMessageDao(): ConversationMessageDao
     abstract fun memoryDao(): MemoryDao
     abstract fun comfyUiJobDao(): ComfyUiJobDao
+    abstract fun generatedImageDao(): GeneratedImageDao
 }
