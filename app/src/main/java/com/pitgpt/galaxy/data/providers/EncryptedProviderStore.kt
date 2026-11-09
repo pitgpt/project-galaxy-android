@@ -20,7 +20,12 @@ data class AiProviderConfig(
     val baseUrl: String,
     val apiKey: String,
     val model: String
-)
+) {
+    /** Keep credentials out of accidental debug logging and exception messages. */
+    override fun toString(): String =
+        "AiProviderConfig(id=$id, name=$name, baseUrl=$baseUrl, " +
+            "apiKeyConfigured=${apiKey.isNotBlank()}, model=$model)"
+}
 
 data class ProviderSettings(
     val providers: List<AiProviderConfig> = emptyList(),
