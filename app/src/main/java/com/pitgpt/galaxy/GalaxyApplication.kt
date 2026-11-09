@@ -52,9 +52,8 @@ class GalaxyApplication : Application() {
     ): ComfyUiRuntime = comfyUiRuntimeFactory.create(config, template, clientId)
 
     /**
-     * Loads the saved encrypted LAN/VPN settings on Dispatchers.IO, probes the preferred
-     * route, and creates a runtime only when one configured endpoint is reachable.
-     * The caller must still provide a reviewed, versioned workflow template.
+     * Loads saved connection settings from the encrypted vault and uses the caller-supplied
+     * reviewed workflow template. Vault I/O runs on Dispatchers.IO.
      */
     suspend fun createComfyUiRuntimeFromSavedSettings(
         template: ComfyUiWorkflowTemplate,
@@ -64,6 +63,17 @@ class GalaxyApplication : Application() {
             ?: throw IllegalStateException("ComfyUI connection settings are not configured")
         return comfyUiRuntimeFactory.createFromSettings(settings, template, clientId)
     }
+
+    /**
+     * Loads both the saved connection and saved workflow from the encrypted vault, then probes
+     * the selected LAN/VPN route before returning a runtime. Missing configuration fails closed.
+     */
+    suspend fun createComfyUiRuntimeFromSavedSettings(
+        clientId: String
+    ): ComfyUiRuntime = comfyUiRuntimeFactory.createFromProviderSettings(
+        settings = providerSettingsIo.load(),
+        clientId = clientId
+    )
 
     fun realtimeSessionProvider(tokenProvider: GalaxyAccessTokenProvider): HttpRealtimeSessionProvider =
         HttpRealtimeSessionProvider(BuildConfig.GALAXY_API_BASE_URL, tokenProvider)

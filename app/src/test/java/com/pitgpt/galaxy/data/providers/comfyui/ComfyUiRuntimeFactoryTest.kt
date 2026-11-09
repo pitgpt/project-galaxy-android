@@ -5,11 +5,13 @@ import com.pitgpt.galaxy.core.model.ImageGenerationState
 import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.data.providers.ComfyUiSavedSettings
+import com.pitgpt.galaxy.data.providers.ProviderSettings
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ComfyUiRuntimeFactoryTest {
@@ -143,12 +145,70 @@ class ComfyUiRuntimeFactoryTest {
         assertFalse(error.message.orEmpty().contains("vpn-secret"))
     }
 
+    @Test
+    fun createFromProviderSettingsUsesTheSavedWorkflowAndEndpoint() = runBlocking {
+        val transport = FakeTransport(testPng()).apply {
+            responses.add(
+                ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":1}""")
+            )
+        }
+        val jobs = InMemoryComfyUiJobStore()
+        val factory = ComfyUiRuntimeFactory(
+            jobs = jobs,
+            images = RecordingImageRepository(),
+            client = ComfyUiApiClient(transport)
+        )
+        val settings = ProviderSettings(
+            comfyUi = ComfyUiSavedSettings(
+                lanBaseUrl = "http://192.168.1.20:8188",
+                lanBearerToken = "lan-secret"
+            ),
+            comfyUiWorkflow = template
+        )
+        val selector = ComfyUiEndpointSelector {
+            ComfyUiProbeResult(true, 200, "ComfyUI reachable")
+        }
+
+        val runtime = factory.createFromProviderSettings(settings, "galaxy-client", selector)
+        val promptId = runtime.provider.submit(request)
+
+        assertEquals("prompt-123", promptId)
+        assertEquals(listOf("http://192.168.1.20:8188/prompt"), transport.urls)
+        assertEquals(listOf("lan-secret"), transport.bearerTokens)
+        assertTrue(transport.requestBodies.single().orEmpty().contains("\"text\":\"A test image\""))
+        assertEquals(
+            ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis),
+            jobs.get(promptId)
+        )
+    }
+
+    @Test
+    fun createFromProviderSettingsFailsClosedWhenWorkflowIsMissing() {
+        val factory = ComfyUiRuntimeFactory(
+            jobs = InMemoryComfyUiJobStore(),
+            images = RecordingImageRepository(),
+            client = ComfyUiApiClient(FakeTransport(testPng()))
+        )
+        val settings = ProviderSettings(
+            comfyUi = ComfyUiSavedSettings(lanBaseUrl = "http://192.168.1.20:8188")
+        )
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                factory.createFromProviderSettings(settings, "galaxy-client")
+            }
+        }
+
+        assertEquals("ComfyUI workflow template is not configured", error.message)
+    }
+
     private class FakeTransport(
         private val png: ByteArray
     ) : ComfyUiApiTransport {
         val responses = ArrayDeque<ComfyUiApiResponse>()
         val urls = mutableListOf<String>()
         val bearerTokens = mutableListOf<String?>()
+        val requestBodies = mutableListOf<String?>()
         var binaryDownloads = 0
 
         override suspend fun execute(
@@ -162,6 +222,7 @@ class ComfyUiRuntimeFactoryTest {
         ): ComfyUiApiResponse {
             urls += url
             bearerTokens += bearerToken
+            requestBodies += body?.toString(Charsets.UTF_8)
             return responses.removeFirst()
         }
 
