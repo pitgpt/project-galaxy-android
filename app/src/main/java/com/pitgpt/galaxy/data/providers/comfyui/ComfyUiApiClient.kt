@@ -13,7 +13,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
-import java.util.UUID
 import java.nio.charset.StandardCharsets
 
 data class ComfyUiApiResponse(val statusCode: Int, val body: String) {
