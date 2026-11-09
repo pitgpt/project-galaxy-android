@@ -3,6 +3,7 @@ package com.pitgpt.galaxy.data.providers.comfyui
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.core.usecase.PersistGeneratedImageResult
 import com.pitgpt.galaxy.data.providers.ComfyUiSavedSettings
+import com.pitgpt.galaxy.data.providers.ProviderSettings
 
 /**
  * Application-scoped ComfyUI runtime components for one configured workflow endpoint.
@@ -58,7 +59,7 @@ class ComfyUiRuntimeFactory(
 
     /**
      * Resolves the saved LAN/VPN preference with a bounded ComfyUI probe before creating
-     * a runtime. The caller still supplies an explicit versioned workflow template.
+     * a runtime. The caller supplies an explicit, validated workflow template.
      */
     suspend fun createFromSettings(
         settings: ComfyUiSavedSettings,
@@ -70,5 +71,22 @@ class ComfyUiRuntimeFactory(
         val endpoint = resolution.selectedEndpoint
             ?: throw ComfyUiEndpointUnavailableException(resolution.attempts)
         return create(endpoint, template, clientId)
+    }
+
+    /**
+     * Builds a runtime from the complete encrypted provider-settings snapshot.
+     * Both connection settings and the validated workflow must exist; no default workflow
+     * or endpoint is synthesized when saved configuration is incomplete.
+     */
+    suspend fun createFromProviderSettings(
+        settings: ProviderSettings,
+        clientId: String,
+        selector: ComfyUiEndpointSelector = ComfyUiEndpointSelector()
+    ): ComfyUiRuntime {
+        val connection = settings.comfyUi
+            ?: throw IllegalStateException("ComfyUI connection settings are not configured")
+        val template = settings.comfyUiWorkflow
+            ?: throw IllegalStateException("ComfyUI workflow template is not configured")
+        return createFromSettings(connection, template, clientId, selector)
     }
 }
