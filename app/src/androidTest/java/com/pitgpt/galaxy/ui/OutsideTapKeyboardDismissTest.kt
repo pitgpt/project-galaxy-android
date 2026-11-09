@@ -93,7 +93,7 @@ class OutsideTapKeyboardDismissTest {
         composeRule.onNodeWithTag("input").assertIsFocused()
         composeRule.onNodeWithTag("outside").performTouchInput {
             down(center)
-            moveBy(Offset(0f, -80f), durationMillis = 100)
+            moveBy(Offset(0f, -80f), delayMillis = 100)
             up()
         }
         composeRule.onNodeWithTag("input").assertIsFocused()
