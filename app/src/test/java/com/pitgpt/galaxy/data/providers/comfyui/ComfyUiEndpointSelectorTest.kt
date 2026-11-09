@@ -1,9 +1,11 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -73,6 +75,23 @@ class ComfyUiEndpointSelectorTest {
         assertEquals(vpn, result.selectedEndpoint)
         assertEquals(ComfyUiRoute.VPN, result.selectedRoute)
         assertEquals(listOf(vpn.normalizedBaseUrl), attempted)
+    }
+
+    @Test
+    fun propagatesProbeCancellationWithoutFallingBackToVpn() = runBlocking {
+        val cancellation = CancellationException("LAN probe cancelled")
+        val attempted = mutableListOf<ComfyUiConnectionConfig>()
+        val selector = ComfyUiEndpointSelector { config ->
+            attempted += config
+            throw cancellation
+        }
+
+        val thrown = runCatching {
+            selector.resolve(ComfyUiEndpointOptions(lan = lan, vpn = vpn))
+        }.exceptionOrNull()
+
+        assertSame(cancellation, thrown)
+        assertEquals(listOf(lan), attempted)
     }
 
     @Test
