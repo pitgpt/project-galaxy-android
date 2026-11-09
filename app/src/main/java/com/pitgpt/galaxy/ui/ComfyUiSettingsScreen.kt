@@ -137,9 +137,9 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
 
     LaunchedEffect(settingsIo) {
         try {
-            applyLoadedSettings(settingsIo.load())
-        } catch (_: Exception) {
-            loadFailed = true
+            captureComfyUiSettingsResult { settingsIo.load() }
+                .onSuccess(::applyLoadedSettings)
+                .onFailure { loadFailed = true }
         } finally {
             loading = false
         }
@@ -198,11 +198,15 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                         loading = true
                         scope.launch {
                             try {
-                                applyLoadedSettings(settingsIo.load())
-                                status = "Настройки прочитаны."
-                            } catch (_: Exception) {
-                                loadFailed = true
-                                status = "Хранилище пока недоступно. Исходные данные сохранены."
+                                captureComfyUiSettingsResult { settingsIo.load() }
+                                    .onSuccess {
+                                        applyLoadedSettings(it)
+                                        status = "Настройки прочитаны."
+                                    }
+                                    .onFailure {
+                                        loadFailed = true
+                                        status = "Хранилище пока недоступно. Исходные данные сохранены."
+                                    }
                             } finally {
                                 loading = false
                             }
@@ -356,15 +360,23 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                         checking = true
                         status = "Проверяю подключение…"
                         scope.launch {
-                            status = try {
-                                val resolution = ComfyUiEndpointSelector().resolve(candidate().toEndpointOptions())
-                                resolution.attempts.joinToString(separator = "\n") {
-                                    "${it.route}: ${it.message}"
-                                }.ifBlank { "Не удалось проверить подключение." }
-                            } catch (_: Exception) {
-                                "Проверь адреса, режим маршрута и токены. Секреты не были выведены."
+                            try {
+                                val result = captureComfyUiSettingsResult {
+                                    ComfyUiEndpointSelector().resolve(candidate().toEndpointOptions())
+                                }
+                                status = result.fold(
+                                    onSuccess = { resolution ->
+                                        resolution.attempts.joinToString(separator = "\n") {
+                                            "${it.route}: ${it.message}"
+                                        }.ifBlank { "Не удалось проверить подключение." }
+                                    },
+                                    onFailure = {
+                                        "Проверь адреса, режим маршрута и токены. Секреты не были выведены."
+                                    }
+                                )
+                            } finally {
+                                checking = false
                             }
-                            checking = false
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -380,16 +392,19 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                             saving = true
                             scope.launch {
                                 try {
-                                    val current = settingsIo.load()
-                                    settingsIo.save(current.copy(comfyUi = next))
-                                    persistedComfyUi = next
-                                    status = "Настройки ComfyUI сохранены в зашифрованном хранилище."
-                                    lanToken = ""
-                                    vpnToken = ""
-                                    clearLanToken = false
-                                    clearVpnToken = false
-                                } catch (_: Exception) {
-                                    status = "Не удалось сохранить настройки. Проверь адреса и доступность Android Keystore."
+                                    captureComfyUiSettingsResult {
+                                        val current = settingsIo.load()
+                                        settingsIo.save(current.copy(comfyUi = next))
+                                    }.onSuccess {
+                                        persistedComfyUi = next
+                                        status = "Настройки ComfyUI сохранены в зашифрованном хранилище."
+                                        lanToken = ""
+                                        vpnToken = ""
+                                        clearLanToken = false
+                                        clearVpnToken = false
+                                    }.onFailure {
+                                        status = "Не удалось сохранить настройки. Проверь адреса и доступность Android Keystore."
+                                    }
                                 } finally {
                                     saving = false
                                 }
