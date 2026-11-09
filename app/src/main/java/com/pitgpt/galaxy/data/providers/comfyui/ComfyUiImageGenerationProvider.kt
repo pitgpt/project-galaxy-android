@@ -134,7 +134,11 @@ class ComfyUiImageGenerationProvider(
         check(!client.hasHistory(config, providerJobId)) {
             "ComfyUI job completed or entered history while queued cancellation was being verified"
         }
-        jobs.markCancelled(providerJobId)
+        // The remote deletion is already confirmed; finish durable local bookkeeping even
+        // if the UI coroutine is cancelled while the SQLCipher write is pending.
+        withContext(NonCancellable) {
+            jobs.markCancelled(providerJobId)
+        }
     }
 
     override suspend fun result(providerJobId: String): GeneratedImageAsset =

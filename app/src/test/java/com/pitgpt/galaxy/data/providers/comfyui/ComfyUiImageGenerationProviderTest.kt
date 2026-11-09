@@ -1,6 +1,8 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -144,6 +146,26 @@ class ComfyUiImageGenerationProviderTest {
         assertFalse(transport.urls.any { it.endsWith("/interrupt") })
     }
 
+    @Test fun cancellationAfterRemoteDeleteStillPersistsLocalCancelledState() = runBlocking {
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"deleted":["prompt-123"]}"""))
+            responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""))
+        }
+        val store = PausingMarkCancelledJobStore(
+            ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis)
+        )
+        val cancellation = launch { provider(transport, store).cancel("prompt-123") }
+
+        store.markStarted.await()
+        cancellation.cancel()
+        store.allowMark.complete(Unit)
+        cancellation.join()
+
+        assertTrue(store.get("prompt-123")!!.cancelled)
+        assertEquals(listOf("GET", "POST", "GET", "GET"), transport.methods)
+    }
+
     @Test fun completedJobIsNotMarkedCancelledWhenItFinishesDuringQueueDeletion() {
         val transport = FakeTransport().apply {
             responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[[1,"prompt-123",{},[],[]]]}"""))
@@ -231,6 +253,27 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals("image/png", result.mimeType)
         assertTrue(result.bytes.contentEquals(png))
         assertEquals(1, transport.urls.count { it.contains("/view?") })
+    }
+
+    private class PausingMarkCancelledJobStore(
+        initial: ComfyUiJobRecord
+    ) : ComfyUiJobStore {
+        private var record = initial
+        val markStarted = CompletableDeferred<Unit>()
+        val allowMark = CompletableDeferred<Unit>()
+
+        override suspend fun put(record: ComfyUiJobRecord) {
+            this.record = record
+        }
+
+        override suspend fun get(promptId: String): ComfyUiJobRecord? =
+            record.takeIf { it.promptId == promptId }
+
+        override suspend fun markCancelled(promptId: String) {
+            markStarted.complete(Unit)
+            allowMark.await()
+            record = record.copy(cancelled = true)
+        }
     }
 
     private class ExistingJobStore(
