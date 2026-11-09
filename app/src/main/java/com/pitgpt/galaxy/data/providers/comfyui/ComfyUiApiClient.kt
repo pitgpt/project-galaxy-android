@@ -208,6 +208,13 @@ data class ComfyUiWorkflowTemplate(
         return inputs
     }
 
+    /** Avoid dumping imported workflow content into logs through generated data-class output. */
+    override fun toString(): String =
+        "ComfyUiWorkflowTemplate(id=$id, workflowJsonChars=${workflowJson.length}, " +
+            "positivePrompt=$positivePrompt, negativePromptConfigured=${negativePrompt != null}, " +
+            "widthConfigured=${width != null}, heightConfigured=${height != null}, " +
+            "seedConfigured=${seed != null})"
+
     companion object {
         const val MAX_WORKFLOW_JSON_CHARS = 2 * 1024 * 1024
     }
