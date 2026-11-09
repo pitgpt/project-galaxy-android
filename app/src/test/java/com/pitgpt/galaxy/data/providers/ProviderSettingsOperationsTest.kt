@@ -47,6 +47,23 @@ class ProviderSettingsOperationsTest {
     }
 
     @Test
+    fun removingAiProviderPreservesComfyUiConnectionSettings() {
+        val comfyUi = ComfyUiSavedSettings(
+            lanBaseUrl = "http://192.168.1.20:8188",
+            lanBearerToken = "local-secret"
+        )
+        val settings = ProviderSettings(
+            providers = listOf(first, second),
+            activeProviderId = "first",
+            comfyUi = comfyUi
+        )
+
+        val result = settings.withProviderRemoved("first")
+
+        assertEquals(comfyUi, result.comfyUi)
+    }
+
+    @Test
     fun refusesReplacementKeyWhenEncryptedSettingsExistButKeystoreAliasIsMissing() {
         org.junit.Assert.assertThrows(IllegalStateException::class.java) {
             requireProviderKeyCreationAllowed(hasStoredCiphertext = true, keyAliasExists = false)

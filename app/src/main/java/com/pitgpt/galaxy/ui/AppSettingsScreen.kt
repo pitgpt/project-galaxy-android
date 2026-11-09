@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.sp
 fun AppSettingsScreen(
     onBack: () -> Unit,
     onOpenProviders: () -> Unit,
+    onOpenComfyUi: () -> Unit,
     onOpenMemory: () -> Unit
 ) {
     Column(
@@ -67,6 +68,17 @@ fun AppSettingsScreen(
                     color = Color(0xFFB8C7E5),
                     fontSize = 11.sp
                 )
+            }
+        }
+        Button(
+            onClick = onOpenComfyUi,
+            modifier = Modifier.fillMaxWidth().height(58.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Text("COMFYUI", color = Color.White)
+                Text("Домашний компьютер, LAN и VPN", color = Color(0xFFB8C7E5), fontSize = 11.sp)
             }
         }
     }
