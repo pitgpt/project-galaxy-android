@@ -89,6 +89,8 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
     LaunchedEffect(settingsIo) {
         try {
             applyLoadedSettings(settingsIo.load().comfyUi)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             loadFailed = true
         } finally {
@@ -151,6 +153,8 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                             try {
                                 applyLoadedSettings(settingsIo.load().comfyUi)
                                 status = "Настройки прочитаны."
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
                             } catch (_: Exception) {
                                 loadFailed = true
                                 status = "Хранилище пока недоступно. Исходные данные сохранены."
@@ -256,6 +260,8 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                                     vpnToken = ""
                                     clearLanToken = false
                                     clearVpnToken = false
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
                                 } catch (_: Exception) {
                                     status = "Не удалось сохранить настройки. Проверь адреса и доступность Android Keystore."
                                 } finally {
