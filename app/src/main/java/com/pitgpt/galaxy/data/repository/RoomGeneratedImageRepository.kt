@@ -10,6 +10,10 @@ import com.pitgpt.galaxy.data.local.entity.toEntity
 import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /**
  * Coordinates encrypted binary storage with SQLCipher-backed metadata.
@@ -17,7 +21,8 @@ import java.util.UUID
  */
 class RoomGeneratedImageRepository(
     private val dao: GeneratedImageDao,
-    private val mediaStore: EncryptedMediaStore
+    private val mediaStore: EncryptedMediaStore,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : GeneratedImageRepository {
     override suspend fun save(
         request: ImageGenerationRequest,
@@ -45,13 +50,21 @@ class RoomGeneratedImageRepository(
             createdAtEpochMillis = asset.createdAtEpochMillis
         )
 
-        mediaStore.save(stored.assetId, stored.mimeType, imageBytes)
+        var mediaSaved = false
         try {
+            withContext(NonCancellable + ioDispatcher) {
+                mediaStore.save(stored.assetId, stored.mimeType, imageBytes)
+                mediaSaved = true
+            }
             dao.insert(stored.toEntity())
         } catch (failure: Exception) {
-            runCatching { mediaStore.delete(stored.assetId) }
-                .exceptionOrNull()
-                ?.let(failure::addSuppressed)
+            if (mediaSaved) {
+                runCatching {
+                    withContext(NonCancellable + ioDispatcher) {
+                        mediaStore.delete(stored.assetId)
+                    }
+                }.exceptionOrNull()?.let(failure::addSuppressed)
+            }
             throw failure
         }
         return stored
@@ -71,7 +84,9 @@ class RoomGeneratedImageRepository(
         requireValidAssetId(assetId)
         val metadata = dao.get(assetId)?.toDomain()
             ?: throw IllegalArgumentException("Generated image metadata was not found")
-        val bytes = mediaStore.read(assetId, metadata.mimeType)
+        val bytes = withContext(ioDispatcher) {
+            mediaStore.read(assetId, metadata.mimeType)
+        }
         check(bytes.size.toLong() == metadata.byteSize) { "Stored generated image size does not match its metadata" }
         check(sha256(bytes).equals(metadata.sha256, ignoreCase = true)) {
             "Stored generated image checksum does not match its metadata"
@@ -83,8 +98,9 @@ class RoomGeneratedImageRepository(
         requireValidAssetId(assetId)
         val removed = dao.delete(assetId)
         check(removed == 1) { "Generated image metadata was not found" }
-        // If file deletion fails, only orphaned ciphertext remains; no metadata exposes it.
-        mediaStore.delete(assetId)
+        withContext(NonCancellable + ioDispatcher) {
+            mediaStore.delete(assetId)
+        }
     }
 
     private fun requireValidAssetId(assetId: String) {
