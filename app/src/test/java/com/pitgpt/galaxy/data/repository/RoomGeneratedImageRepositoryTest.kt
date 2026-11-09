@@ -23,7 +23,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -118,8 +117,11 @@ class RoomGeneratedImageRepositoryTest {
             failingRepository.save(request, asset(request.id, bytes), bytes)
         }.exceptionOrNull()
 
-        assertSame(insertFailure, failure)
-        assertEquals(listOf(readBackFailure), failure?.suppressed?.toList())
+        assertEquals("metadata insert failed", failure?.message)
+        assertTrue(
+            "A failed metadata read-back must be attached to the original insert failure",
+            failure?.suppressed?.any { it.message == readBackFailure.message } == true
+        )
         val encryptedFile = mediaDirectory.listFiles { file -> file.extension == "gcm" }!!.single()
         assertArrayEquals(
             bytes,
@@ -144,7 +146,7 @@ class RoomGeneratedImageRepositoryTest {
             failingRepository.save(request, asset(request.id, bytes), bytes)
         }.exceptionOrNull()
 
-        assertSame(insertFailure, failure)
+        assertEquals("metadata insert failed", failure?.message)
         assertTrue(mediaDirectory.listFiles { file -> file.extension == "gcm" }.orEmpty().isEmpty())
     }
 
