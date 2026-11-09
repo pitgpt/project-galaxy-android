@@ -92,7 +92,6 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             .build()
         try {
             opened.openHelper.writableDatabase
-            keyBytes.fill(0)
             return opened
         } catch (failure: Exception) {
             keyBytes.fill(0)
