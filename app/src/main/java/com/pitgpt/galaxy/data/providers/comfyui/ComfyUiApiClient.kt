@@ -15,7 +15,11 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
 
-data class ComfyUiApiResponse(val statusCode: Int, val body: String)
+data class ComfyUiApiResponse(val statusCode: Int, val body: String) {
+    /** API error/history bodies can contain user prompts or workflow details; never stringify them. */
+    override fun toString(): String =
+        "ComfyUiApiResponse(statusCode=$statusCode, bodyChars=${body.length})"
+}
 
 data class ComfyUiBinaryResponse(
     val statusCode: Int,
@@ -207,6 +211,13 @@ data class ComfyUiWorkflowTemplate(
         require(inputs.has(target.inputName)) { "Workflow is missing a mapped input" }
         return inputs
     }
+
+    /** Avoid exposing user-controlled workflow IDs or imported graph metadata in logs. */
+    override fun toString(): String =
+        "ComfyUiWorkflowTemplate(configured=${id.isNotBlank()}, workflowJsonChars=${workflowJson.length}, " +
+            "positivePromptConfigured=true, negativePromptConfigured=${negativePrompt != null}, " +
+            "widthConfigured=${width != null}, heightConfigured=${height != null}, " +
+            "seedConfigured=${seed != null})"
 
     companion object {
         const val MAX_WORKFLOW_JSON_CHARS = 2 * 1024 * 1024

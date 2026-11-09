@@ -32,9 +32,9 @@ data class ComfyUiConnectionConfig(
         }
     }
 
-    /** Avoid leaking bearer credentials through generated data-class logging. */
+    /** Avoid exposing endpoint details or bearer credentials through accidental logging. */
     override fun toString(): String =
-        "ComfyUiConnectionConfig(baseUrl=$normalizedBaseUrl, " +
+        "ComfyUiConnectionConfig(endpointConfigured=${normalizedBaseUrl.isNotBlank()}, " +
             "bearerTokenConfigured=${bearerToken != null}, " +
             "connectTimeoutMillis=$connectTimeoutMillis, " +
             "readTimeoutMillis=$readTimeoutMillis)"
