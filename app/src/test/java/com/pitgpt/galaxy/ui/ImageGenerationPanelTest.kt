@@ -21,6 +21,21 @@ class ImageGenerationPanelTest {
     }
 
     @Test
+    fun nonTerminalProviderStatesRemainActiveAfterStatusPollingFailure() {
+        assertFalse(isTerminalImageGenerationState(ImageGenerationState.QUEUED))
+        assertFalse(isTerminalImageGenerationState(ImageGenerationState.RUNNING))
+        assertTrue(isTerminalImageGenerationState(ImageGenerationState.COMPLETED))
+        assertTrue(isTerminalImageGenerationState(ImageGenerationState.FAILED))
+        assertTrue(isTerminalImageGenerationState(ImageGenerationState.CANCELLED))
+        assertTrue(
+            imageGenerationNavigationLocked(
+                isSubmitting = false,
+                hasActiveJob = !isTerminalImageGenerationState(ImageGenerationState.RUNNING)
+            )
+        )
+    }
+
+    @Test
     fun mapsEveryProviderStateToARussianLabel() {
         assertEquals("В очереди", imageGenerationStatusLabel(ImageGenerationState.QUEUED))
         assertEquals("Выполняется", imageGenerationStatusLabel(ImageGenerationState.RUNNING))

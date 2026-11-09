@@ -53,6 +53,11 @@ internal fun imageGenerationStatusLabel(state: ImageGenerationState): String =
         ImageGenerationState.CANCELLED -> "Отменено"
     }
 
+internal fun isTerminalImageGenerationState(state: ImageGenerationState?): Boolean =
+    state == ImageGenerationState.COMPLETED ||
+        state == ImageGenerationState.FAILED ||
+        state == ImageGenerationState.CANCELLED
+
 internal suspend fun <T> refreshStatusPreservingCancellation(
     currentStatus: T?,
     refresh: suspend () -> T
@@ -111,6 +116,8 @@ internal fun ImageGenerationPanel(
     var runtime by remember { mutableStateOf<ComfyUiRuntime?>(null) }
     var setupError by remember { mutableStateOf<String?>(null) }
     var retryKey by remember { mutableStateOf(0) }
+    var statusRetryKey by remember { mutableStateOf(0) }
+    var statusNeedsRetry by remember { mutableStateOf(false) }
     var prompt by remember { mutableStateOf("") }
     var request by remember { mutableStateOf<ImageGenerationRequest?>(null) }
     var jobId by remember { mutableStateOf<String?>(null) }
@@ -136,7 +143,8 @@ internal fun ImageGenerationPanel(
         }
     }
 
-    LaunchedEffect(runtime, jobId, request) {
+    LaunchedEffect(runtime, jobId, request, statusRetryKey) {
+        statusNeedsRetry = false
         val activeRuntime = runtime ?: return@LaunchedEffect
         val activeJobId = jobId ?: return@LaunchedEffect
         val activeRequest = request ?: return@LaunchedEffect
@@ -179,7 +187,8 @@ internal fun ImageGenerationPanel(
             throw cancelled
         } catch (_: Exception) {
             panelError = "Не удалось получить результат. Проверь подключение и повтори попытку."
-            terminal = true
+            terminal = isTerminalImageGenerationState(status?.state)
+            statusNeedsRetry = !terminal
         } finally {
             if (terminal) activeChanged.value(false)
         }
@@ -258,6 +267,15 @@ internal fun ImageGenerationPanel(
             Text("Статус: ${imageGenerationStatusLabel(current.state)}", fontSize = 12.sp)
             current.progressPercent?.let { Text("Прогресс: $it%", fontSize = 11.sp) }
         }
+        if (statusNeedsRetry) {
+            Button(
+                onClick = {
+                    panelError = null
+                    statusNeedsRetry = false
+                    statusRetryKey++
+                }
+            ) { Text("ПОВТОРИТЬ ПРОВЕРКУ") }
+        }
         if (status?.state == ImageGenerationState.QUEUED && !isCancelling) {
             Button(
                 enabled = !isPersisting,
@@ -269,6 +287,7 @@ internal fun ImageGenerationPanel(
                         try {
                             CancelImageGeneration(selectedRuntime.provider).invoke(selectedJobId)
                             status = ImageGenerationStatus(ImageGenerationState.CANCELLED)
+                            statusNeedsRetry = false
                             onActiveChanged(false)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
@@ -276,6 +295,10 @@ internal fun ImageGenerationPanel(
                             panelError = "Отмена не подтверждена. Задание могло уже перейти к выполнению."
                             status = refreshStatusPreservingCancellation(status) {
                                 GetImageGenerationStatus(selectedRuntime.provider).invoke(selectedJobId)
+                            }
+                            if (isTerminalImageGenerationState(status?.state)) {
+                                statusNeedsRetry = false
+                                onActiveChanged(false)
                             }
                         } finally {
                             isCancelling = false
@@ -308,6 +331,7 @@ internal fun ImageGenerationPanel(
                     request = null
                     jobId = null
                     status = null
+                    statusNeedsRetry = false
                     image = null
                     panelError = null
                     prompt = ""
