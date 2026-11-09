@@ -8,8 +8,12 @@ import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.media.MediaEncryptionKeyProvider
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -109,6 +113,25 @@ class RoomGeneratedImageRepositoryTest {
         }
     }
 
+    @Test
+    fun encryptedMediaFileOperationsUseTheInjectedIoDispatcher() = runBlocking {
+        val dispatcher = RecordingDispatcher()
+        try {
+            val ioRepository = RoomGeneratedImageRepository(database.generatedImageDao(), mediaStore, dispatcher)
+            val request = request("conversation-io")
+            val bytes = ByteArray(48) { (it + 1).toByte() }
+
+            val saved = ioRepository.save(request, asset(request.id, bytes), bytes)
+            assertArrayEquals(bytes, ioRepository.read(saved.assetId))
+            ioRepository.delete(saved.assetId)
+
+            assertTrue(dispatcher.threadNames.size >= 3)
+            assertTrue(dispatcher.threadNames.all { it == RecordingDispatcher.THREAD_NAME })
+        } finally {
+            dispatcher.close()
+        }
+    }
+
     private fun request(conversationId: String) = ImageGenerationRequest(
         id = "request-${conversationId}",
         conversationId = conversationId,
@@ -138,5 +161,27 @@ class RoomGeneratedImageRepositoryTest {
         private val key: SecretKey = SecretKeySpec(ByteArray(32) { (it + 1).toByte() }, "AES")
         override fun getOrCreateKey(): SecretKey = key
         override fun getExistingKey(): SecretKey = key
+    }
+
+    private class RecordingDispatcher : CoroutineDispatcher() {
+        private val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, THREAD_NAME)
+        }
+        val threadNames = CopyOnWriteArrayList<String>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            executor.execute {
+                threadNames += Thread.currentThread().name
+                block.run()
+            }
+        }
+
+        fun close() {
+            executor.shutdown()
+        }
+
+        companion object {
+            const val THREAD_NAME = "galaxy-media-io-test"
+        }
     }
 }
