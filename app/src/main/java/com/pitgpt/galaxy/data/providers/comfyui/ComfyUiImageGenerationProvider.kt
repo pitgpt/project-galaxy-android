@@ -10,6 +10,7 @@ import com.pitgpt.galaxy.core.repository.ImageGenerationProvider
 import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 
 data class ComfyUiJobRecord(
@@ -66,17 +67,29 @@ class ComfyUiImageGenerationProvider(
     override suspend fun submit(request: ImageGenerationRequest): String {
         require(request.referenceAssetIds.isEmpty()) { "This ComfyUI workflow does not support reference images yet" }
         val submitted = client.submit(config, template, request, clientId)
+        val record = ComfyUiJobRecord(submitted.promptId, request.id, request.createdAtEpochMillis)
         try {
-            jobs.put(ComfyUiJobRecord(submitted.promptId, request.id, request.createdAtEpochMillis))
+            jobs.put(record)
         } catch (failure: Exception) {
-            // The remote prompt already exists. Try to remove it only if ComfyUI still reports it
-            // as pending; never use the global interrupt endpoint or cancel a running prompt.
+            var registrationConfirmed = false
             try {
                 withContext(NonCancellable) {
-                    compensateUnpersistedSubmission(submitted.promptId)
+                    // A database write can fail after commit, or the remote ID can collide with an
+                    // existing record. Confirm local state before attempting remote cleanup.
+                    val existing = jobs.get(submitted.promptId)
+                    when {
+                        existing == record -> registrationConfirmed = true
+                        existing != null -> throw IllegalStateException(
+                            "The ComfyUI prompt ID is already associated with another Galaxy request; remote prompt left untouched"
+                        )
+                        else -> compensateUnpersistedSubmission(submitted.promptId)
+                    }
                 }
             } catch (compensationFailure: Exception) {
                 failure.addSuppressed(compensationFailure)
+            }
+            if (registrationConfirmed && failure !is CancellationException) {
+                return submitted.promptId
             }
             throw failure
         }
