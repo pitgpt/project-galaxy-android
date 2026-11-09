@@ -24,6 +24,9 @@ class RoomComfyUiJobStore(
     override suspend fun all(): List<ComfyUiJobRecord> =
         dao.getAll().map { it.toRecord() }
 
+    override suspend fun markSubmissionStarted(promptId: String): Boolean =
+        dao.markSubmissionStarted(promptId) == 1
+
     override suspend fun delete(promptId: String) {
         check(dao.delete(promptId) == 1) {
             "ComfyUI job could not be removed from the local submission journal"
@@ -40,13 +43,15 @@ class RoomComfyUiJobStore(
         promptId = promptId,
         requestId = requestId,
         createdAtEpochMillis = createdAtEpochMillis,
-        cancelled = cancelled
+        cancelled = cancelled,
+        submissionStarted = submissionStarted
     )
 
     private fun ComfyUiJobEntity.toRecord() = ComfyUiJobRecord(
         promptId = promptId,
         requestId = requestId,
         createdAtEpochMillis = createdAtEpochMillis,
-        cancelled = cancelled
+        cancelled = cancelled,
+        submissionStarted = submissionStarted
     )
 }
