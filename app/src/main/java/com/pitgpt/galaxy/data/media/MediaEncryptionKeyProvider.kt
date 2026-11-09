@@ -13,19 +13,21 @@ interface MediaEncryptionKeyProvider {
 }
 
 /** Device-bound media key. Reading never creates a replacement for a missing key. */
-class AndroidKeystoreMediaKeyProvider : MediaEncryptionKeyProvider {
+class AndroidKeystoreMediaKeyProvider internal constructor(
+    private val keyAlias: String = KEY_ALIAS
+) : MediaEncryptionKeyProvider {
     @Synchronized
     override fun getOrCreateKey(): SecretKey {
         val keyStore = loadKeyStore()
-        if (keyStore.containsAlias(KEY_ALIAS)) {
-            return keyStore.getKey(KEY_ALIAS, null) as? SecretKey
+        if (keyStore.containsAlias(keyAlias)) {
+            return keyStore.getKey(keyAlias, null) as? SecretKey
                 ?: error("The Galaxy media encryption key exists but is unavailable.")
         }
 
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEY_STORE).run {
             init(
                 KeyGenParameterSpec.Builder(
-                    KEY_ALIAS,
+                    keyAlias,
                     KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
                 )
                     .setKeySize(KEY_BITS)
@@ -41,7 +43,7 @@ class AndroidKeystoreMediaKeyProvider : MediaEncryptionKeyProvider {
     @Synchronized
     override fun getExistingKey(): SecretKey {
         val keyStore = loadKeyStore()
-        return keyStore.getKey(KEY_ALIAS, null) as? SecretKey
+        return keyStore.getKey(keyAlias, null) as? SecretKey
             ?: error("The Galaxy media encryption key is missing; encrypted media was preserved.")
     }
 
