@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.geometry.Rect
@@ -25,6 +26,7 @@ import androidx.compose.ui.platform.SoftwareKeyboardController
  * The observer runs in the final pointer pass and never consumes events, so
  * child buttons, scroll containers and text fields keep their normal behavior.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Stable
 class OutsideTapKeyboardDismissState internal constructor(
     private val focusManager: FocusManager,
@@ -88,6 +90,7 @@ class OutsideTapKeyboardDismissState internal constructor(
         Modifier.onGloballyPositioned { textFieldBounds[key] = it.boundsInRoot() }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun rememberOutsideTapKeyboardDismissState(): OutsideTapKeyboardDismissState {
     val focusManager = LocalFocusManager.current
