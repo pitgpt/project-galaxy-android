@@ -208,10 +208,10 @@ data class ComfyUiWorkflowTemplate(
         return inputs
     }
 
-    /** Avoid dumping imported workflow content into logs through generated data-class output. */
+    /** Avoid exposing user-controlled workflow IDs or imported graph metadata in logs. */
     override fun toString(): String =
-        "ComfyUiWorkflowTemplate(id=$id, workflowJsonChars=${workflowJson.length}, " +
-            "positivePrompt=$positivePrompt, negativePromptConfigured=${negativePrompt != null}, " +
+        "ComfyUiWorkflowTemplate(configured=${id.isNotBlank()}, workflowJsonChars=${workflowJson.length}, " +
+            "positivePromptConfigured=true, negativePromptConfigured=${negativePrompt != null}, " +
             "widthConfigured=${width != null}, heightConfigured=${height != null}, " +
             "seedConfigured=${seed != null})"
 
