@@ -34,6 +34,14 @@ object GalaxyDatabaseFactory {
         }
     }
 
+    internal val MIGRATION_4_5 = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE comfyui_jobs ADD COLUMN submissionStarted INTEGER NOT NULL DEFAULT 0"
+            )
+        }
+    }
+
     internal val MIGRATION_3_4 = object : Migration(3, 4) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL(
@@ -107,7 +115,7 @@ object GalaxyDatabaseFactory {
             DATABASE_NAME
         )
             .openHelperFactory(SupportOpenHelperFactory(passphraseBytes, null, true))
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .build()
 
         try {
