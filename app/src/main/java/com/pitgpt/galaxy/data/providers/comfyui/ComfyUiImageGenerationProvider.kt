@@ -131,7 +131,7 @@ class ComfyUiImageGenerationProvider(
         } catch (failure: ComfyUiApiException) {
             val status = failure.httpStatusCode
             val definitelyRejected = status != null && status in 400..499 &&
-                status != 408 && status != 429
+                status != 408 && status != 409 && status != 429
             if (definitelyRejected) {
                 try {
                     withContext(NonCancellable) { jobs.delete(promptId) }
