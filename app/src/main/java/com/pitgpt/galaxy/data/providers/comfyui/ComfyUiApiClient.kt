@@ -15,7 +15,11 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
 
-data class ComfyUiApiResponse(val statusCode: Int, val body: String)
+data class ComfyUiApiResponse(val statusCode: Int, val body: String) {
+    /** API error/history bodies can contain user prompts or workflow details; never stringify them. */
+    override fun toString(): String =
+        "ComfyUiApiResponse(statusCode=$statusCode, bodyChars=${body.length})"
+}
 
 data class ComfyUiBinaryResponse(
     val statusCode: Int,
