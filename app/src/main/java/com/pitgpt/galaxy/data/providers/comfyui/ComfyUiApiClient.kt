@@ -13,6 +13,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.util.UUID
 import java.nio.charset.StandardCharsets
 
 data class ComfyUiApiResponse(val statusCode: Int, val body: String) {
@@ -277,10 +278,13 @@ class ComfyUiApiClient(
         config: ComfyUiConnectionConfig,
         template: ComfyUiWorkflowTemplate,
         request: ImageGenerationRequest,
-        clientId: String
+        clientId: String,
+        promptId: String
     ): ComfyUiSubmittedPrompt {
         require(clientId.matches(Regex("[A-Za-z0-9_-]{1,128}"))) { "ComfyUI client ID is invalid" }
+        require(CLIENT_PROMPT_ID_PATTERN.matches(promptId)) { "ComfyUI client prompt ID must be a canonical UUID" }
         val payload = JSONObject()
+            .put("prompt_id", promptId)
             .put("prompt", template.buildPrompt(request))
             .put("client_id", clientId)
         val response = jsonRequest(config, "POST", config.endpoint("/prompt"), payload)
@@ -480,6 +484,8 @@ class ComfyUiApiClient(
 
     companion object {
         private val PROMPT_ID_PATTERN = Regex("[A-Za-z0-9_-]{1,128}")
+        private val CLIENT_PROMPT_ID_PATTERN =
+            Regex("[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
         private val SUPPORTED_IMAGE_MIME_TYPES = setOf("image/png", "image/jpeg", "image/webp")
         const val MAX_JSON_RESPONSE_BYTES = 1_048_576
         const val MAX_IMAGE_BYTES = 25 * 1024 * 1024
