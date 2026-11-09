@@ -78,7 +78,12 @@ class RoomGeneratedImageRepository(
             }
             dao.insert(stored.toEntity())
         } catch (failure: Exception) {
-            if (mediaSaved) {
+            val metadataCommitted = runCatching {
+                withContext(NonCancellable) {
+                    dao.get(stored.assetId)?.toDomain() == stored
+                }
+            }.getOrDefault(false)
+            if (mediaSaved && !metadataCommitted) {
                 runCatching {
                     withContext(NonCancellable + ioDispatcher) {
                         mediaStore.delete(stored.assetId)
