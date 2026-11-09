@@ -1,6 +1,5 @@
 package com.pitgpt.galaxy.data.media
 
-import android.security.keystore.KeyStoreException
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
