@@ -94,11 +94,12 @@ class ComfyUiImageGenerationProviderTest {
         val store = InMemoryComfyUiJobStore()
         val activeProvider = provider(transport, store)
 
-        assertThrows(CancellationException::class.java) {
+        val cancellation = assertThrows(ComfyUiSubmissionCancelledException::class.java) {
             runBlocking { activeProvider.submit(request) }
         }
 
         val expectedPromptId = stablePromptId(request)
+        assertEquals(expectedPromptId, cancellation.promptId)
         assertEquals(ComfyUiJobRecord(expectedPromptId, request.id, request.createdAtEpochMillis,
             submissionStarted = true), store.get(expectedPromptId))
         assertEquals(expectedPromptId, runBlocking { activeProvider.submit(request) })
