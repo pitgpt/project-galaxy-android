@@ -125,9 +125,8 @@ class ComfyUiImageGenerationProvider(
             }
             return promptId
         } catch (cancelled: CancellationException) {
-            // SUBMISSION_STARTED is durable before the HTTP call. The request may have reached
-            // ComfyUI, so retain the ID and never enqueue a replacement automatically.
-            throw cancelled
+            // Preserve structured cancellation while carrying the durable ID back to the UI.
+            throw ComfyUiSubmissionCancelledException(promptId, cancelled)
         } catch (failure: ComfyUiApiException) {
             val status = failure.httpStatusCode
             val definitelyRejected = status != null && status in 400..499 &&
@@ -239,3 +238,12 @@ class ComfyUiImageGenerationProvider(
 class ComfyUiSubmissionUncertainException(
     val promptId: String
 ) : IOException("ComfyUI submission outcome is unknown; check the existing prompt before retrying")
+
+
+/** Cancellation after the durable submission claim; the prompt ID remains recoverable. */
+class ComfyUiSubmissionCancelledException(
+    val promptId: String,
+    cause: CancellationException
+) : CancellationException("ComfyUI submission was cancelled after its durable claim") {
+    init { initCause(cause) }
+}
