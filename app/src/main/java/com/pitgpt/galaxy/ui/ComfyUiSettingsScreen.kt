@@ -36,12 +36,25 @@ import com.pitgpt.galaxy.data.providers.ProviderSettingsIo
 import com.pitgpt.galaxy.data.providers.resolveComfyUiBearerToken
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiEndpointSelector
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRoutePreference
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 private val ComfyNight = Color(0xFF080B18)
 private val ComfyText = Color.White
 private val ComfyMuted = Color(0xFF9AA8C5)
 private val ComfyAccent = Color(0xFFB8D9FF)
+
+internal suspend fun <T> withFallbackPreservingCancellation(
+    block: suspend () -> T,
+    fallback: (Exception) -> T
+): T =
+    try {
+        block()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        fallback(error)
+    }
 
 @Composable
 fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
@@ -210,14 +223,15 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
                         checking = true
                         status = "Проверяю подключение…"
                         scope.launch {
-                            status = try {
-                                val resolution = ComfyUiEndpointSelector().resolve(candidate().toEndpointOptions())
-                                resolution.attempts.joinToString(separator = "\n") {
-                                    "${it.route}: ${it.message}"
-                                }.ifBlank { "Не удалось проверить подключение." }
-                            } catch (_: Exception) {
-                                "Проверь адреса, режим маршрута и токены. Секреты не были выведены."
-                            }
+                            status = withFallbackPreservingCancellation(
+                                block = {
+                                    val resolution = ComfyUiEndpointSelector().resolve(candidate().toEndpointOptions())
+                                    resolution.attempts.joinToString(separator = "\n") {
+                                        "${it.route}: ${it.message}"
+                                    }.ifBlank { "Не удалось проверить подключение." }
+                                },
+                                fallback = { "Проверь адреса, режим маршрута и токены. Секреты не были выведены." }
+                            )
                             checking = false
                         }
                     },
