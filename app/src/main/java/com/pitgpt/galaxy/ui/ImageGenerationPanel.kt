@@ -248,11 +248,11 @@ internal fun ImageGenerationPanel(
             )
         }
         panelError?.let { Text(it, fontSize = 11.sp) }
-        if (status?.state in setOf(
-                ImageGenerationState.COMPLETED,
-                ImageGenerationState.FAILED,
-                ImageGenerationState.CANCELLED
-            )
+        if (status?.state?.let { state ->
+                state == ImageGenerationState.COMPLETED ||
+                    state == ImageGenerationState.FAILED ||
+                    state == ImageGenerationState.CANCELLED
+            } == true
         ) {
             Button(
                 onClick = {
