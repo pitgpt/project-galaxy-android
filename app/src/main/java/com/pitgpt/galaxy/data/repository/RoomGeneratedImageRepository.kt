@@ -80,12 +80,17 @@ class RoomGeneratedImageRepository(
             }
             dao.insert(stored.toEntity())
         } catch (failure: Exception) {
-            val metadataCommitted = runCatching {
+            // Delete ciphertext only after the database confirms that no metadata row
+            // committed. A failed read-back is an unknown state, so preserve the file.
+            val metadataAbsent = try {
                 withContext(NonCancellable) {
-                    dao.get(stored.assetId)?.toDomain() == stored
+                    dao.get(stored.assetId) == null
                 }
-            }.getOrDefault(false)
-            if (mediaSaved && !metadataCommitted) {
+            } catch (lookupFailure: Exception) {
+                failure.addSuppressed(lookupFailure)
+                false
+            }
+            if (mediaSaved && metadataAbsent) {
                 runCatching {
                     withContext(NonCancellable + ioDispatcher) {
                         mediaStore.delete(stored.assetId)
