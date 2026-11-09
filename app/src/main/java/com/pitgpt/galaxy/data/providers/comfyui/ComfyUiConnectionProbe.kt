@@ -1,5 +1,6 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
@@ -94,6 +95,8 @@ class ComfyUiConnectionProbe(
                 readTimeoutMillis = config.readTimeoutMillis,
                 maxResponseBytes = MAX_RESPONSE_BYTES
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             return ComfyUiProbeResult(
                 reachable = false,
