@@ -40,8 +40,9 @@ import kotlinx.coroutines.launch
 internal fun clearGeneratedImagePreview(bitmap: ImageBitmap) {
     val androidBitmap = runCatching { bitmap.asAndroidBitmap() }.getOrNull() ?: return
     if (!androidBitmap.isRecycled) {
+        // Compose may still hold a draw node for the previous frame. Clear pixels, but do not
+        // recycle a bitmap that the rendering pipeline may still reference; GC releases it later.
         runCatching { androidBitmap.eraseColor(android.graphics.Color.TRANSPARENT) }
-        runCatching { androidBitmap.recycle() }
     }
 }
 
