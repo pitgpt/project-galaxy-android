@@ -8,6 +8,8 @@ import com.pitgpt.galaxy.core.model.ImageGenerationState
 import com.pitgpt.galaxy.core.model.ImageGenerationStatus
 import com.pitgpt.galaxy.core.repository.ImageGenerationProvider
 import com.pitgpt.galaxy.core.repository.GeneratedImageResultSource
+import java.io.IOException
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
@@ -17,7 +19,8 @@ data class ComfyUiJobRecord(
     val promptId: String,
     val requestId: String,
     val createdAtEpochMillis: Long,
-    val cancelled: Boolean = false
+    val cancelled: Boolean = false,
+    val submissionStarted: Boolean = false
 )
 
 /** Store only correlation metadata; production implementation must use SQLCipher. */
@@ -25,6 +28,9 @@ interface ComfyUiJobStore {
     suspend fun put(record: ComfyUiJobRecord)
     suspend fun get(promptId: String): ComfyUiJobRecord?
     suspend fun markCancelled(promptId: String)
+    suspend fun all(): List<ComfyUiJobRecord> = emptyList()
+    suspend fun markSubmissionStarted(promptId: String): Boolean
+    suspend fun delete(promptId: String) = Unit
 }
 
 /** Development/test only. Process death loses request correlation. */
@@ -34,6 +40,20 @@ class InMemoryComfyUiJobStore : ComfyUiJobStore {
         check(records.putIfAbsent(record.promptId, record) == null) { "ComfyUI job is already registered" }
     }
     override suspend fun get(promptId: String) = records[promptId]
+    override suspend fun all(): List<ComfyUiJobRecord> = records.values.toList()
+    override suspend fun markSubmissionStarted(promptId: String): Boolean {
+        var claimed = false
+        records.computeIfPresent(promptId) { _, record ->
+            if (!record.submissionStarted) {
+                claimed = true
+                record.copy(submissionStarted = true)
+            } else {
+                record
+            }
+        }
+        return claimed
+    }
+    override suspend fun delete(promptId: String) { records.remove(promptId) }
     override suspend fun markCancelled(promptId: String) {
         records.computeIfPresent(promptId) { _, value -> value.copy(cancelled = true) }
     }
@@ -66,50 +86,63 @@ class ComfyUiImageGenerationProvider(
 
     override suspend fun submit(request: ImageGenerationRequest): String {
         require(request.referenceAssetIds.isEmpty()) { "This ComfyUI workflow does not support reference images yet" }
-        val submitted = client.submit(config, template, request, clientId)
-        val record = ComfyUiJobRecord(submitted.promptId, request.id, request.createdAtEpochMillis)
-        try {
-            jobs.put(record)
-        } catch (failure: Exception) {
-            var registrationConfirmed = false
+        // Validate the local workflow before writing an intent or making a network request.
+        template.buildPrompt(request)
+
+        // Derive one canonical ComfyUI UUID from the immutable Galaxy request ID.
+        val promptId = UUID.nameUUIDFromBytes(request.id.toByteArray(Charsets.UTF_8)).toString()
+        val record = ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis)
+        val existing = jobs.get(promptId)
+        if (existing != null) {
+            check(existing.requestId == request.id) {
+                "The stable ComfyUI prompt ID is already associated with another Galaxy request"
+            }
+            if (existing.submissionStarted) return promptId
+        } else {
             try {
-                withContext(NonCancellable) {
-                    // A database write can fail after commit, or the remote ID can collide with an
-                    // existing record. Confirm local state before attempting remote cleanup.
-                    val existing = jobs.get(submitted.promptId)
-                    when {
-                        existing == record -> registrationConfirmed = true
-                        existing != null -> throw IllegalStateException(
-                            "The ComfyUI prompt ID is already associated with another Galaxy request; remote prompt left untouched"
-                        )
-                        else -> compensateUnpersistedSubmission(submitted.promptId)
-                    }
+                jobs.put(record)
+            } catch (failure: Exception) {
+                // Room may report an acknowledgement failure after the row was committed.
+                // Continue only when a read-back proves that the exact PREPARED intent is durable.
+                val committed = try {
+                    jobs.get(promptId)
+                } catch (readbackFailure: Exception) {
+                    failure.addSuppressed(readbackFailure)
+                    throw failure
                 }
-            } catch (compensationFailure: Exception) {
-                failure.addSuppressed(compensationFailure)
+                if (committed != record) throw failure
             }
-            if (registrationConfirmed && failure !is CancellationException) {
-                return submitted.promptId
+        }
+
+        // This conditional SQL update is the single-writer claim. Only one concurrent caller
+        // may transition PREPARED -> SUBMISSION_STARTED and issue POST /prompt.
+        if (!jobs.markSubmissionStarted(promptId)) return promptId
+
+        try {
+            val submitted = client.submit(config, template, request, clientId, promptId)
+            check(submitted.promptId == promptId) {
+                "ComfyUI did not honor the stable prompt ID; automatic retry is unsafe"
             }
-            throw failure
-        }
-        return submitted.promptId
-    }
-
-    private suspend fun compensateUnpersistedSubmission(promptId: String) {
-        val before = client.queue(config)
-        if (promptId in before.runningPromptIds || promptId !in before.pendingPromptIds) return
-
-        client.deleteQueued(config, promptId)
-        val after = client.queue(config)
-        check(promptId !in after.runningPromptIds) {
-            "ComfyUI started the prompt while local job registration was failing; no interrupt was attempted"
-        }
-        check(promptId !in after.pendingPromptIds) {
-            "ComfyUI did not confirm removal of the unregistered pending prompt"
-        }
-        check(!client.hasHistory(config, promptId)) {
-            "ComfyUI recorded the prompt before queued compensation completed"
+            return promptId
+        } catch (cancelled: CancellationException) {
+            // Preserve structured cancellation while carrying the durable ID back to the UI.
+            throw ComfyUiSubmissionCancelledException(promptId, cancelled)
+        } catch (failure: ComfyUiApiException) {
+            val status = failure.httpStatusCode
+            val definitelyRejected = status != null && status in 400..499 &&
+                status != 408 && status != 409 && status != 429
+            if (definitelyRejected) {
+                try {
+                    withContext(NonCancellable) { jobs.delete(promptId) }
+                } catch (_: Exception) {
+                    throw ComfyUiSubmissionUncertainException(promptId)
+                }
+                throw failure
+            }
+            throw ComfyUiSubmissionUncertainException(promptId)
+        } catch (_: Exception) {
+            // Keep the started intent after timeout, disconnect, malformed response or 5xx.
+            throw ComfyUiSubmissionUncertainException(promptId)
         }
     }
 
@@ -198,4 +231,19 @@ class ComfyUiImageGenerationProvider(
     }
 
     private companion object { const val PNG_MIME = "image/png" }
+}
+
+
+/** Carries the durable prompt ID when the remote submission acknowledgement is ambiguous. */
+class ComfyUiSubmissionUncertainException(
+    val promptId: String
+) : IOException("ComfyUI submission outcome is unknown; check the existing prompt before retrying")
+
+
+/** Cancellation after the durable submission claim; the prompt ID remains recoverable. */
+class ComfyUiSubmissionCancelledException(
+    val promptId: String,
+    cause: CancellationException
+) : CancellationException("ComfyUI submission was cancelled after its durable claim") {
+    init { initCause(cause) }
 }

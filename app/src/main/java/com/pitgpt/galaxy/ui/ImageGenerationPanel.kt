@@ -34,6 +34,8 @@ import com.pitgpt.galaxy.core.usecase.CancelImageGeneration
 import com.pitgpt.galaxy.core.usecase.GetImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.SubmitImageGeneration
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionCancelledException
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionUncertainException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -186,7 +188,11 @@ internal fun ImageGenerationPanel(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            panelError = "Не удалось получить результат. Проверь подключение и повтори попытку."
+            panelError = if (status == null) {
+                "Состояние задания пока не подтверждено. Повтори проверку статуса; повторная отправка заблокирована."
+            } else {
+                "Не удалось получить результат. Проверь подключение и повтори попытку."
+            }
             terminal = isTerminalImageGenerationState(status?.state)
             statusNeedsRetry = !terminal
         } finally {
@@ -250,8 +256,23 @@ internal fun ImageGenerationPanel(
                         jobId = submittedJobId
                         status = ImageGenerationStatus(ImageGenerationState.QUEUED)
                         onActiveChanged(true)
+                    } catch (cancelled: ComfyUiSubmissionCancelledException) {
+                        request = requestToSubmit
+                        jobId = cancelled.promptId
+                        status = null
+                        panelError = "Отправка прервана после передачи управления сети. Проверяю сохранённый ID; повторная отправка заблокирована."
+                        onActiveChanged(true)
+                        throw cancelled
                     } catch (cancelled: CancellationException) {
                         throw cancelled
+                    } catch (uncertain: ComfyUiSubmissionUncertainException) {
+                        // Keep the original request and stable prompt ID so the user can only
+                        // reconcile status; tapping Create again must not enqueue a duplicate.
+                        request = requestToSubmit
+                        jobId = uncertain.promptId
+                        status = null
+                        panelError = "Приём задания не подтверждён. Проверяю сохранённый ID; повторная отправка заблокирована."
+                        onActiveChanged(true)
                     } catch (_: Exception) {
                         panelError = "Не удалось отправить задание. Проверь ComfyUI и сохранённый workflow."
                     } finally {

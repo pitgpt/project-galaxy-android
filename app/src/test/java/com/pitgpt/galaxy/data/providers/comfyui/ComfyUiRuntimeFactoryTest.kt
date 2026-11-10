@@ -6,6 +6,7 @@ import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.data.providers.ComfyUiSavedSettings
 import com.pitgpt.galaxy.data.providers.ProviderSettings
+import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -37,14 +38,15 @@ class ComfyUiRuntimeFactoryTest {
         runBlocking {
             val png = testPng()
             val expectedPng = png.copyOf()
+            val expectedPromptId = stablePromptId(request)
             val transport = FakeTransport(png).apply {
                 responses.add(
-                    ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":1}""")
+                    ComfyUiApiResponse(200, """{"prompt_id":"$expectedPromptId","number":1}""")
                 )
                 responses.add(
                     ComfyUiApiResponse(
                         200,
-                        """{"prompt-123":{"status":{"status_str":"success","completed":true},"outputs":{"1":{"images":[{"filename":"result.png","subfolder":"","type":"output"}]}}}}"""
+                        """{"$expectedPromptId":{"status":{"status_str":"success","completed":true},"outputs":{"1":{"images":[{"filename":"result.png","subfolder":"","type":"output"}]}}}}"""
                     )
                 )
             }
@@ -57,9 +59,9 @@ class ComfyUiRuntimeFactoryTest {
             ).create(config, template, "galaxy-client")
 
             val promptId = runtime.provider.submit(request)
-            assertEquals("prompt-123", promptId)
+            assertEquals(expectedPromptId, promptId)
             assertEquals(
-                ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis),
+                ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis, submissionStarted = true),
                 jobs.get(promptId)
             )
 
@@ -148,9 +150,10 @@ class ComfyUiRuntimeFactoryTest {
 
     @Test
     fun createFromProviderSettingsUsesTheSavedWorkflowAndEndpoint() = runBlocking {
+        val expectedPromptId = stablePromptId(request)
         val transport = FakeTransport(testPng()).apply {
             responses.add(
-                ComfyUiApiResponse(200, """{"prompt_id":"prompt-123","number":1}""")
+                ComfyUiApiResponse(200, """{"prompt_id":"$expectedPromptId","number":1}""")
             )
         }
         val jobs = InMemoryComfyUiJobStore()
@@ -173,12 +176,12 @@ class ComfyUiRuntimeFactoryTest {
         val runtime = factory.createFromProviderSettings(settings, "galaxy-client", selector)
         val promptId = runtime.provider.submit(request)
 
-        assertEquals("prompt-123", promptId)
+        assertEquals(expectedPromptId, promptId)
         assertEquals(listOf("http://192.168.1.20:8188/prompt"), transport.urls)
         assertEquals(listOf("lan-secret"), transport.bearerTokens)
         assertTrue(transport.requestBodies.single().orEmpty().contains("\"text\":\"A test image\""))
         assertEquals(
-            ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis),
+            ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis, submissionStarted = true),
             jobs.get(promptId)
         )
     }
@@ -275,6 +278,9 @@ class ComfyUiRuntimeFactoryTest {
         override suspend fun read(assetId: String): ByteArray = error("Not used by this test")
         override suspend fun delete(assetId: String) = Unit
     }
+
+    private fun stablePromptId(request: ImageGenerationRequest): String =
+        UUID.nameUUIDFromBytes(request.id.toByteArray(Charsets.UTF_8)).toString()
 
     private fun testPng(): ByteArray {
         val bytes = ByteArray(24)

@@ -21,7 +21,7 @@ import com.pitgpt.galaxy.data.local.entity.MemoryEntity
         ComfyUiJobEntity::class,
         GeneratedImageEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class GalaxyDatabase : RoomDatabase() {
