@@ -1,7 +1,10 @@
 package com.pitgpt.galaxy.ui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
+import com.pitgpt.galaxy.data.providers.comfyui.InMemoryComfyUiJobStore
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -28,6 +31,32 @@ class ImageGenerationPanelTest {
         )
 
         assertEquals(newestSelectedCharacter, restored?.request)
+        assertNull(restored?.job)
+        assertTrue(restored?.canResumeSafely == true)
+    }
+
+    @Test
+    fun restoresSavedRequestWithoutWaitingForNetworkRuntime() = runBlocking {
+        val saved = request("offline-recovery", "character-a", 15L)
+        val requestStore = object : ImageGenerationRequestStore {
+            override suspend fun put(request: ImageGenerationRequest) = Unit
+            override suspend fun get(requestId: String): ImageGenerationRequest? =
+                saved.takeIf { it.id == requestId }
+            override suspend fun all(): List<ImageGenerationRequest> = listOf(saved)
+            override suspend fun latestForCharacter(characterId: String): ImageGenerationRequest? =
+                saved.takeIf { it.characterId == characterId }
+            override suspend fun delete(requestId: String) = Unit
+        }
+
+        // This recovery lookup has no runtime or network dependency, so local state
+        // remains available even when the saved ComfyUI endpoint cannot be reached.
+        val restored = loadLatestRecoverableImageGenerationRequest(
+            characterId = "character-a",
+            requestStore = requestStore,
+            jobStore = InMemoryComfyUiJobStore()
+        )
+
+        assertEquals(saved, restored?.request)
         assertNull(restored?.job)
         assertTrue(restored?.canResumeSafely == true)
     }
