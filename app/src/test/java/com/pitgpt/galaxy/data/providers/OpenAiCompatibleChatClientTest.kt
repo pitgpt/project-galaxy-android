@@ -102,7 +102,7 @@ class OpenAiCompatibleChatClientTest {
 
     @Test fun rejectsInvalidJsonResponseWithoutExposingResponseBody() {
         val transport = ProviderHttpTransport { _, _, _ ->
-            ProviderHttpResponse(200, """{"error":"private provider diagnostic"""")
+            ProviderHttpResponse(200, "not-json")
         }
 
         val error = assertThrows(ProviderResponseException::class.java) {
