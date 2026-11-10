@@ -4,7 +4,11 @@ import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.InMemoryComfyUiJobStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runBlocking
+import kotlin.coroutines.CoroutineContext
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -91,6 +95,27 @@ class ImageGenerationPanelTest {
 
         assertFalse(restored?.canResumeSafely ?: true)
         assertEquals("prompt-started", restored?.job?.promptId)
+    }
+
+
+    @Test
+    fun clearsDecryptedBytesWhenPreviewDispatchIsCancelled() = runBlocking {
+        val plaintext = byteArrayOf(1, 2, 3, 4)
+        val rejectingDispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                throw CancellationException("Preview dispatch was cancelled")
+            }
+        }
+
+        var cancelled = false
+        try {
+            decodeGeneratedImageAndClearBytes(plaintext, rejectingDispatcher)
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+
+        assertTrue(cancelled)
+        assertArrayEquals(ByteArray(plaintext.size), plaintext)
     }
 
     private fun request(id: String, characterId: String, createdAt: Long) =
