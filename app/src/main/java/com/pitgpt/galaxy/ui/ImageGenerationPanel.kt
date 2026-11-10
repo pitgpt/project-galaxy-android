@@ -41,6 +41,7 @@ import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionCancelledExcept
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionUncertainException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -145,6 +146,16 @@ internal fun decodeGeneratedImage(bytes: ByteArray): ImageBitmap? {
     return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
 }
 
+internal suspend fun decodeGeneratedImageAndClearBytes(
+    bytes: ByteArray,
+    dispatcher: CoroutineDispatcher = Dispatchers.Default
+): ImageBitmap? = try {
+    withContext(dispatcher) { decodeGeneratedImage(bytes) }
+} finally {
+    // Keep plaintext cleanup outside withContext: cancellation can prevent its block from starting.
+    bytes.fill(0)
+}
+
 /**
  * First interactive ComfyUI surface. It submits through the saved encrypted settings,
  * polls the provider, and persists completed bytes only through the encrypted media repository.
@@ -240,13 +251,7 @@ internal fun ImageGenerationPanel(
                         try {
                             val stored = activeRuntime.persistCompletedResult(activeRequest, activeJobId)
                             val plaintext = app.generatedImages.read(stored.assetId)
-                            val decoded = withContext(Dispatchers.Default) {
-                                try {
-                                    decodeGeneratedImage(plaintext)
-                                } finally {
-                                    plaintext.fill(0)
-                                }
-                            }
+                            val decoded = decodeGeneratedImageAndClearBytes(plaintext)
                             image = decoded
                             if (decoded == null) {
                                 panelError = "Изображение сохранено, но его не удалось открыть."
