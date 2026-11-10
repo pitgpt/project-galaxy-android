@@ -249,6 +249,7 @@ internal fun ImageGenerationPanel(
             }
             terminal = isTerminalImageGenerationState(status?.state)
             statusNeedsRetry = !terminal
+        }
     }
 
     Column(

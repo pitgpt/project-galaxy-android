@@ -539,7 +539,7 @@ private fun ConversationScreen(
                 Spacer(Modifier.weight(1f))
                 TextButton(
                     onClick = { showImageGeneration = !showImageGeneration },
-                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting, imageGenerationActive)
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting)
                 ) {
                     Text(if (showImageGeneration) "К ЧАТУ" else "ОБРАЗ", color = Ice, fontSize = 9.sp)
                 }
