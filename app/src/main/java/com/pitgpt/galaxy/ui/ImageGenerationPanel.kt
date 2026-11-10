@@ -32,6 +32,8 @@ import com.pitgpt.galaxy.core.model.ImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.CancelImageGeneration
 import com.pitgpt.galaxy.core.usecase.GetImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.SubmitImageGeneration
+import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionCancelledException
@@ -74,6 +76,23 @@ internal fun latestRecoverableImageGenerationRequest(
     return RecoverableImageGenerationRequest(
         request = latest,
         job = jobs.firstOrNull { it.requestId == latest.id }
+    )
+}
+
+/**
+ * Loads durable recovery state independently of the network runtime. A saved request
+ * must remain visible when ComfyUI is offline or its endpoint probe has not completed.
+ */
+internal suspend fun loadLatestRecoverableImageGenerationRequest(
+    characterId: String,
+    requestStore: ImageGenerationRequestStore,
+    jobStore: ComfyUiJobStore
+): RecoverableImageGenerationRequest? {
+    val latest = requestStore.latestForCharacter(characterId) ?: return null
+    return latestRecoverableImageGenerationRequest(
+        characterId = characterId,
+        requests = listOf(latest),
+        jobs = jobStore.all()
     )
 }
 
@@ -167,18 +186,15 @@ internal fun ImageGenerationPanel(
         }
     }
 
-    LaunchedEffect(runtime, characterId) {
-        if (runtime == null || request != null || isRestoring) return@LaunchedEffect
+    LaunchedEffect(app, characterId) {
+        if (request != null || isRestoring) return@LaunchedEffect
         isRestoring = true
         try {
-            val latestRequest = app.imageGenerationRequests.latestForCharacter(characterId)
-            val restored = latestRequest?.let {
-                latestRecoverableImageGenerationRequest(
-                    characterId = characterId,
-                    requests = listOf(it),
-                    jobs = app.comfyUiJobStore.all()
-                )
-            }
+            val restored = loadLatestRecoverableImageGenerationRequest(
+                characterId = characterId,
+                requestStore = app.imageGenerationRequests,
+                jobStore = app.comfyUiJobStore
+            )
             if (restored != null) {
                 request = restored.request
                 prompt = restored.request.prompt
