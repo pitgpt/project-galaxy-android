@@ -249,6 +249,66 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(768, asset.height)
         assertEquals(png.size.toLong(), asset.byteSize)
         assertEquals(64, asset.sha256.length)
+        assertTrue("Metadata-only result must clear downloaded plaintext", png.all { it == 0.toByte() })
+    }
+
+    @Test fun completedImageClearsBytesWhenMimeTypeIsNotPng() = runBlocking {
+        val jpeg = byteArrayOf(0xff.toByte(), 0xd8.toByte(), 0xff.toByte(), 0x01)
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{
+                "prompt-123":{"status":{"status_str":"success","completed":true},
+                "outputs":{"9":{"images":[{"filename":"lila.jpg","subfolder":"renders","type":"output"}]}}}
+            }"""))
+            binary = ComfyUiBinaryResponse(200, "image/jpeg", jpeg)
+        }
+        val store = InMemoryComfyUiJobStore().apply {
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis))
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, store).completedImage("prompt-123") }
+        }
+        assertTrue("Rejected non-PNG plaintext must be cleared", jpeg.all { it == 0.toByte() })
+    }
+
+    @Test fun completedImageClearsBytesWhenPngDimensionsAreInvalid() = runBlocking {
+        val png = ByteArray(24)
+        byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a).copyInto(png)
+        "IHDR".toByteArray().copyInto(png, 12)
+        png[18] = 0; png[19] = 0
+        png[22] = 3; png[23] = 0
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """{
+                "prompt-123":{"status":{"status_str":"success","completed":true},
+                "outputs":{"9":{"images":[{"filename":"lila.png","subfolder":"renders","type":"output"}]}}}
+            }"""))
+            binary = ComfyUiBinaryResponse(200, "image/png", png)
+        }
+        val store = InMemoryComfyUiJobStore().apply {
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis))
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { provider(transport, store).completedImage("prompt-123") }
+        }
+        assertTrue("Invalid PNG plaintext must be cleared", png.all { it == 0.toByte() })
+    }
+
+    @Test fun downloadClearsBytesWhenImageSignatureIsInvalid() = runBlocking {
+        val invalid = byteArrayOf(1, 2, 3, 4, 5)
+        val transport = FakeTransport().apply {
+            binary = ComfyUiBinaryResponse(200, "image/png", invalid)
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                ComfyUiApiClient(transport).download(
+                    config,
+                    ComfyUiImageReference("invalid.png", "renders", "output")
+                )
+            }
+        }
+        assertTrue("Rejected binary response bytes must be cleared", invalid.all { it == 0.toByte() })
     }
 
     @Test fun completedImageReturnsMetadataAndBytesFromOneDownload() = runBlocking {
