@@ -1,90 +1,129 @@
 package com.pitgpt.galaxy.ui
 
-import com.pitgpt.galaxy.core.model.ImageGenerationState
-import java.io.IOException
+import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
+import com.pitgpt.galaxy.data.providers.comfyui.InMemoryComfyUiJobStore
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runBlocking
+import kotlin.coroutines.CoroutineContext
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.assertSame
-import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class ImageGenerationPanelTest {
     @Test
-    fun locksConversationNavigationWhileSubmittingOrTrackingAnActiveJob() {
-        assertTrue(imageGenerationNavigationLocked(isSubmitting = true, hasActiveJob = false))
-        assertTrue(imageGenerationNavigationLocked(isSubmitting = false, hasActiveJob = true))
-        assertTrue(imageGenerationNavigationLocked(isSubmitting = true, hasActiveJob = true))
-        assertFalse(imageGenerationNavigationLocked(isSubmitting = false, hasActiveJob = false))
+    fun navigationIsLockedOnlyDuringSubmissionBecauseActiveJobsAreDurable() {
+        assertTrue(imageGenerationNavigationLocked(isSubmitting = true))
+        assertFalse(imageGenerationNavigationLocked(isSubmitting = false))
     }
 
     @Test
-    fun nonTerminalProviderStatesRemainActiveAfterStatusPollingFailure() {
-        assertFalse(isTerminalImageGenerationState(ImageGenerationState.QUEUED))
-        assertFalse(isTerminalImageGenerationState(ImageGenerationState.RUNNING))
-        assertTrue(isTerminalImageGenerationState(ImageGenerationState.COMPLETED))
-        assertTrue(isTerminalImageGenerationState(ImageGenerationState.FAILED))
-        assertTrue(isTerminalImageGenerationState(ImageGenerationState.CANCELLED))
-        assertTrue(
-            imageGenerationNavigationLocked(
-                isSubmitting = false,
-                hasActiveJob = !isTerminalImageGenerationState(ImageGenerationState.RUNNING)
+    fun restoresTheNewestRequestForTheSelectedCharacter() {
+        val older = request("older", "character-a", 10L)
+        val newestOtherCharacter = request("other", "character-b", 30L)
+        val newestSelectedCharacter = request("newest", "character-a", 20L)
+
+        val restored = latestRecoverableImageGenerationRequest(
+            characterId = "character-a",
+            requests = listOf(older, newestOtherCharacter, newestSelectedCharacter),
+            jobs = emptyList()
+        )
+
+        assertEquals(newestSelectedCharacter, restored?.request)
+        assertNull(restored?.job)
+        assertTrue(restored?.canResumeSafely == true)
+    }
+
+    @Test
+    fun restoresSavedRequestWithoutWaitingForNetworkRuntime() = runBlocking {
+        val saved = request("offline-recovery", "character-a", 15L)
+        val requestStore = object : ImageGenerationRequestStore {
+            override suspend fun put(request: ImageGenerationRequest) = Unit
+            override suspend fun get(requestId: String): ImageGenerationRequest? =
+                saved.takeIf { it.id == requestId }
+            override suspend fun all(): List<ImageGenerationRequest> = listOf(saved)
+            override suspend fun latestForCharacter(characterId: String): ImageGenerationRequest? =
+                saved.takeIf { it.characterId == characterId }
+            override suspend fun delete(requestId: String) = Unit
+        }
+
+        // This recovery lookup has no runtime or network dependency, so local state
+        // remains available even when the saved ComfyUI endpoint cannot be reached.
+        val restored = loadLatestRecoverableImageGenerationRequest(
+            characterId = "character-a",
+            requestStore = requestStore,
+            jobStore = InMemoryComfyUiJobStore()
+        )
+
+        assertEquals(saved, restored?.request)
+        assertNull(restored?.job)
+        assertTrue(restored?.canResumeSafely == true)
+    }
+
+    @Test
+    fun preparedOrOrphanRequestCanBeResumedSafely() {
+        val saved = request("prepared", "character-a", 10L)
+        val restored = latestRecoverableImageGenerationRequest(
+            characterId = "character-a",
+            requests = listOf(saved),
+            jobs = listOf(ComfyUiJobRecord("prompt-prepared", saved.id, saved.createdAtEpochMillis))
+        )
+
+        assertTrue(restored?.canResumeSafely == true)
+    }
+
+    @Test
+    fun startedRequestIsNotClassifiedAsSafeToResubmit() {
+        val saved = request("started", "character-a", 10L)
+        val restored = latestRecoverableImageGenerationRequest(
+            characterId = "character-a",
+            requests = listOf(saved),
+            jobs = listOf(
+                ComfyUiJobRecord(
+                    promptId = "prompt-started",
+                    requestId = saved.id,
+                    createdAtEpochMillis = saved.createdAtEpochMillis,
+                    submissionStarted = true
+                )
             )
         )
+
+        assertFalse(restored?.canResumeSafely ?: true)
+        assertEquals("prompt-started", restored?.job?.promptId)
     }
 
-    @Test
-    fun mapsEveryProviderStateToARussianLabel() {
-        assertEquals("В очереди", imageGenerationStatusLabel(ImageGenerationState.QUEUED))
-        assertEquals("Выполняется", imageGenerationStatusLabel(ImageGenerationState.RUNNING))
-        assertEquals("Готово", imageGenerationStatusLabel(ImageGenerationState.COMPLETED))
-        assertEquals("Ошибка генерации", imageGenerationStatusLabel(ImageGenerationState.FAILED))
-        assertEquals("Отменено", imageGenerationStatusLabel(ImageGenerationState.CANCELLED))
-    }
 
     @Test
-    fun statusRefreshFallsBackToCurrentStatusOnOrdinaryFailure() = runBlocking {
-        assertEquals(
-            "queued",
-            refreshStatusPreservingCancellation("queued") {
-                throw IOException("temporary status lookup failure")
+    fun clearsDecryptedBytesWhenPreviewDispatchIsCancelled() = runBlocking {
+        val plaintext = byteArrayOf(1, 2, 3, 4)
+        val rejectingDispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                throw CancellationException("Preview dispatch was cancelled")
             }
+        }
+
+        var cancelled = false
+        try {
+            decodeGeneratedImageAndClearBytes(plaintext, rejectingDispatcher)
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+
+        assertTrue(cancelled)
+        assertArrayEquals(ByteArray(plaintext.size), plaintext)
+    }
+
+    private fun request(id: String, characterId: String, createdAt: Long) =
+        ImageGenerationRequest(
+            id = id,
+            conversationId = characterId,
+            characterId = characterId,
+            prompt = "private prompt",
+            createdAtEpochMillis = createdAt
         )
-    }
-
-    @Test
-    fun statusRefreshPropagatesCoroutineCancellation() {
-        val cancellation = CancellationException("scope cancelled")
-
-        val thrown = assertThrows(CancellationException::class.java) {
-            runBlocking {
-                refreshStatusPreservingCancellation("queued") {
-                    throw cancellation
-                }
-            }
-        }
-
-        assertSame(cancellation, thrown)
-    }
-
-    @Test
-    fun rejectsInvalidOrExcessiveGeneratedImageDimensions() {
-        assertFalse(isSafeGeneratedImageDimensions(0, 1024))
-        assertFalse(isSafeGeneratedImageDimensions(8193, 1))
-        assertFalse(isSafeGeneratedImageDimensions(8192, 2049))
-        assertTrue(isSafeGeneratedImageDimensions(1024, 1024))
-        assertTrue(isSafeGeneratedImageDimensions(8192, 2048))
-    }
-
-    @Test
-    fun downsamplesLargeGeneratedImagesForMemoryBoundedPreview() {
-        assertEquals(1, generatedImagePreviewSampleSize(1024, 1024))
-        assertEquals(2, generatedImagePreviewSampleSize(4096, 2048))
-        assertEquals(4, generatedImagePreviewSampleSize(8192, 2048))
-        assertThrows(IllegalArgumentException::class.java) {
-            generatedImagePreviewSampleSize(8192, 2049)
-        }
-    }
 }

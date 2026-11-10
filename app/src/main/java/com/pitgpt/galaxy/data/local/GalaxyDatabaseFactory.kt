@@ -75,6 +75,35 @@ object GalaxyDatabaseFactory {
         }
     }
 
+    internal val MIGRATION_5_6 = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS image_generation_requests (
+                    requestId TEXT NOT NULL PRIMARY KEY,
+                    conversationId TEXT NOT NULL,
+                    characterId TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    negativePrompt TEXT,
+                    preferredMimeType TEXT,
+                    workflowId TEXT,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    seed INTEGER,
+                    referenceAssetIdsJson TEXT NOT NULL,
+                    createdAtEpochMillis INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_image_generation_requests_conversationId_createdAtEpochMillis ON image_generation_requests(conversationId, createdAtEpochMillis)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_image_generation_requests_characterId_createdAtEpochMillis ON image_generation_requests(characterId, createdAtEpochMillis)"
+            )
+        }
+    }
+
     private val encryptor = PlaintextDatabaseEncryptor()
 
     @Volatile
@@ -118,7 +147,7 @@ object GalaxyDatabaseFactory {
             DATABASE_NAME
         )
             .openHelperFactory(SupportOpenHelperFactory(passphraseBytes, null, true))
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .build()
 
         try {

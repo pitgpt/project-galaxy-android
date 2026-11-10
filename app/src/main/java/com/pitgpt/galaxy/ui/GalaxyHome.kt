@@ -494,7 +494,6 @@ private fun ConversationScreen(
     var isSending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var showImageGeneration by remember { mutableStateOf(false) }
-    var imageGenerationActive by remember { mutableStateOf(false) }
     var imageGenerationSubmitting by remember { mutableStateOf(false) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -533,14 +532,14 @@ private fun ConversationScreen(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 TextButton(
                     onClick = onBack,
-                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting, imageGenerationActive)
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting)
                 ) {
                     Text("‹  НАЗАД", color = Ice)
                 }
                 Spacer(Modifier.weight(1f))
                 TextButton(
                     onClick = { showImageGeneration = !showImageGeneration },
-                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting, imageGenerationActive)
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting)
                 ) {
                     Text(if (showImageGeneration) "К ЧАТУ" else "ОБРАЗ", color = Ice, fontSize = 9.sp)
                 }
@@ -559,13 +558,14 @@ private fun ConversationScreen(
             }
             Spacer(Modifier.height(12.dp))
             if (showImageGeneration) {
-                ImageGenerationPanel(
-                    app = app,
-                    characterId = characterId,
-                    modifier = Modifier.weight(1f),
-                    onActiveChanged = { imageGenerationActive = it },
-                    onSubmittingChanged = { imageGenerationSubmitting = it }
-                )
+                CharacterScopedGenerationPanel(characterId) {
+                    ImageGenerationPanel(
+                        app = app,
+                        characterId = characterId,
+                        modifier = Modifier.weight(1f),
+                        onSubmittingChanged = { imageGenerationSubmitting = it }
+                    )
+                }
             } else if (loadError != null) {
                 Column(
                     Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),

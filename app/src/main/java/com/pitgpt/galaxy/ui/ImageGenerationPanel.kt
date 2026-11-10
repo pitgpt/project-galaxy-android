@@ -15,10 +15,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
@@ -33,18 +33,21 @@ import com.pitgpt.galaxy.core.model.ImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.CancelImageGeneration
 import com.pitgpt.galaxy.core.usecase.GetImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.SubmitImageGeneration
+import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionCancelledException
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionUncertainException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-internal fun imageGenerationNavigationLocked(isSubmitting: Boolean, hasActiveJob: Boolean): Boolean =
-    isSubmitting || hasActiveJob
+internal fun imageGenerationNavigationLocked(isSubmitting: Boolean): Boolean = isSubmitting
 
 internal fun imageGenerationStatusLabel(state: ImageGenerationState): String =
     when (state) {
@@ -54,6 +57,46 @@ internal fun imageGenerationStatusLabel(state: ImageGenerationState): String =
         ImageGenerationState.FAILED -> "Ошибка генерации"
         ImageGenerationState.CANCELLED -> "Отменено"
     }
+
+internal data class RecoverableImageGenerationRequest(
+    val request: ImageGenerationRequest,
+    val job: ComfyUiJobRecord?
+) {
+    val canResumeSafely: Boolean
+        get() = job == null || !job.submissionStarted
+}
+
+internal fun latestRecoverableImageGenerationRequest(
+    characterId: String,
+    requests: List<ImageGenerationRequest>,
+    jobs: List<ComfyUiJobRecord>
+): RecoverableImageGenerationRequest? {
+    val latest = requests.asSequence()
+        .filter { it.characterId == characterId }
+        .maxWithOrNull(compareBy<ImageGenerationRequest> { it.createdAtEpochMillis }.thenBy { it.id })
+        ?: return null
+    return RecoverableImageGenerationRequest(
+        request = latest,
+        job = jobs.firstOrNull { it.requestId == latest.id }
+    )
+}
+
+/**
+ * Loads durable recovery state independently of the network runtime. A saved request
+ * must remain visible when ComfyUI is offline or its endpoint probe has not completed.
+ */
+internal suspend fun loadLatestRecoverableImageGenerationRequest(
+    characterId: String,
+    requestStore: ImageGenerationRequestStore,
+    jobStore: ComfyUiJobStore
+): RecoverableImageGenerationRequest? {
+    val latest = requestStore.latestForCharacter(characterId) ?: return null
+    return latestRecoverableImageGenerationRequest(
+        characterId = characterId,
+        requests = listOf(latest),
+        jobs = jobStore.all()
+    )
+}
 
 internal fun isTerminalImageGenerationState(state: ImageGenerationState?): Boolean =
     state == ImageGenerationState.COMPLETED ||
@@ -103,16 +146,33 @@ internal fun decodeGeneratedImage(bytes: ByteArray): ImageBitmap? {
     return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
 }
 
+internal suspend fun decodeGeneratedImageAndClearBytes(
+    bytes: ByteArray,
+    dispatcher: CoroutineDispatcher = Dispatchers.Default
+): ImageBitmap? = try {
+    withContext(dispatcher) { decodeGeneratedImage(bytes) }
+} finally {
+    // Keep plaintext cleanup outside withContext: cancellation can prevent its block from starting.
+    bytes.fill(0)
+}
+
 /**
  * First interactive ComfyUI surface. It submits through the saved encrypted settings,
  * polls the provider, and persists completed bytes only through the encrypted media repository.
  */
 @Composable
+internal fun CharacterScopedGenerationPanel(
+    characterId: String,
+    content: @Composable () -> Unit
+) {
+    key(characterId) { content() }
+}
+
+@Composable
 internal fun ImageGenerationPanel(
     app: GalaxyApplication,
     characterId: String,
     modifier: Modifier = Modifier,
-    onActiveChanged: (Boolean) -> Unit,
     onSubmittingChanged: (Boolean) -> Unit
 ) {
     var runtime by remember { mutableStateOf<ComfyUiRuntime?>(null) }
@@ -127,11 +187,12 @@ internal fun ImageGenerationPanel(
     var panelError by remember { mutableStateOf<String?>(null) }
     var image by remember { mutableStateOf<ImageBitmap?>(null) }
     var isSubmitting by remember { mutableStateOf(false) }
+    var isRestoring by remember { mutableStateOf(false) }
+    var isPreparedRecovery by remember { mutableStateOf(false) }
     var isCancelling by remember { mutableStateOf(false) }
     var isPersisting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val clientId = remember { UUID.randomUUID().toString() }
-    val activeChanged = rememberUpdatedState(onActiveChanged)
 
     LaunchedEffect(app, clientId, retryKey) {
         runtime = null
@@ -145,7 +206,36 @@ internal fun ImageGenerationPanel(
         }
     }
 
-    LaunchedEffect(runtime, jobId, request, statusRetryKey) {
+    LaunchedEffect(app, characterId) {
+        if (request != null || isRestoring) return@LaunchedEffect
+        isRestoring = true
+        try {
+            val restored = loadLatestRecoverableImageGenerationRequest(
+                characterId = characterId,
+                requestStore = app.imageGenerationRequests,
+                jobStore = app.comfyUiJobStore
+            )
+            if (restored != null) {
+                request = restored.request
+                prompt = restored.request.prompt
+                if (restored.canResumeSafely) {
+                    isPreparedRecovery = true
+                    panelError = "Найден сохранённый запрос, который ещё не отправлялся. Его можно безопасно продолжить."
+                } else {
+                    jobId = requireNotNull(restored.job).promptId
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            panelError = "Не удалось восстановить сохранённое задание. Повтори проверку после подключения к ComfyUI."
+        } finally {
+            isRestoring = false
+        }
+    }
+
+    LaunchedEffect(runtime, jobId, request, statusRetryKey, isPreparedRecovery) {
+        if (isPreparedRecovery) return@LaunchedEffect
         statusNeedsRetry = false
         val activeRuntime = runtime ?: return@LaunchedEffect
         val activeJobId = jobId ?: return@LaunchedEffect
@@ -161,13 +251,7 @@ internal fun ImageGenerationPanel(
                         try {
                             val stored = activeRuntime.persistCompletedResult(activeRequest, activeJobId)
                             val plaintext = app.generatedImages.read(stored.assetId)
-                            val decoded = withContext(Dispatchers.Default) {
-                                try {
-                                    decodeGeneratedImage(plaintext)
-                                } finally {
-                                    plaintext.fill(0)
-                                }
-                            }
+                            val decoded = decodeGeneratedImageAndClearBytes(plaintext)
                             image = decoded
                             if (decoded == null) {
                                 panelError = "Изображение сохранено, но его не удалось открыть."
@@ -195,8 +279,6 @@ internal fun ImageGenerationPanel(
             }
             terminal = isTerminalImageGenerationState(status?.state)
             statusNeedsRetry = !terminal
-        } finally {
-            if (terminal) activeChanged.value(false)
         }
     }
 
@@ -225,10 +307,10 @@ internal fun ImageGenerationPanel(
             label = { Text("Описание изображения") },
             minLines = 3,
             maxLines = 5,
-            enabled = runtime != null && jobId == null && !isSubmitting
+            enabled = runtime != null && (request == null || isPreparedRecovery) && !isSubmitting && !isRestoring
         )
         Button(
-            enabled = runtime != null && prompt.isNotBlank() && jobId == null && !isSubmitting,
+            enabled = runtime != null && prompt.isNotBlank() && request == null && !isSubmitting && !isRestoring,
             onClick = {
                 val selectedRuntime = runtime ?: return@Button
                 val requestToSubmit = try {
@@ -246,35 +328,42 @@ internal fun ImageGenerationPanel(
                     panelError = "Проверь описание изображения."
                     return@Button
                 }
+                request = requestToSubmit
                 isSubmitting = true
                 onSubmittingChanged(true)
                 panelError = null
                 scope.launch {
                     try {
+                        // Save the full request in SQLCipher before the job journal can
+                        // advance to SUBMISSION_STARTED or any network request occurs.
+                        app.imageGenerationRequests.put(requestToSubmit)
                         val submittedJobId = SubmitImageGeneration(selectedRuntime.provider).invoke(requestToSubmit)
-                        request = requestToSubmit
                         jobId = submittedJobId
                         status = ImageGenerationStatus(ImageGenerationState.QUEUED)
-                        onActiveChanged(true)
+                        isPreparedRecovery = false
                     } catch (cancelled: ComfyUiSubmissionCancelledException) {
-                        request = requestToSubmit
                         jobId = cancelled.promptId
                         status = null
+                        statusNeedsRetry = true
+                        isPreparedRecovery = false
                         panelError = "Отправка прервана после передачи управления сети. Проверяю сохранённый ID; повторная отправка заблокирована."
-                        onActiveChanged(true)
                         throw cancelled
                     } catch (cancelled: CancellationException) {
+                        // This generic cancellation occurs before the durable submission claim; resuming the
+                        // same prepared request is safe because no POST /prompt has been started.
+                        isPreparedRecovery = true
+                        panelError = "Отправка отменена до подтверждения передачи серверу. Сохранённый запрос можно продолжить."
                         throw cancelled
                     } catch (uncertain: ComfyUiSubmissionUncertainException) {
-                        // Keep the original request and stable prompt ID so the user can only
-                        // reconcile status; tapping Create again must not enqueue a duplicate.
-                        request = requestToSubmit
                         jobId = uncertain.promptId
                         status = null
+                        statusNeedsRetry = true
+                        isPreparedRecovery = false
                         panelError = "Приём задания не подтверждён. Проверяю сохранённый ID; повторная отправка заблокирована."
-                        onActiveChanged(true)
                     } catch (_: Exception) {
-                        panelError = "Не удалось отправить задание. Проверь ComfyUI и сохранённый workflow."
+                        // No started job means the same saved request can be retried safely.
+                        isPreparedRecovery = true
+                        panelError = "Не удалось отправить задание. Сохранённый запрос оставлен для безопасного повтора."
                     } finally {
                         isSubmitting = false
                         onSubmittingChanged(false)
@@ -284,6 +373,60 @@ internal fun ImageGenerationPanel(
         ) {
             Text(if (isSubmitting) "ОТПРАВКА…" else "СОЗДАТЬ ИЗОБРАЖЕНИЕ")
         }
+        if (isPreparedRecovery && request != null) {
+            Button(
+                enabled = runtime != null && prompt.isNotBlank() && !isSubmitting && !isRestoring,
+                onClick = {
+                    val activeRuntime = runtime ?: return@Button
+                    val savedRequest = request ?: return@Button
+                    val requestToResume = try {
+                        savedRequest.copy(prompt = prompt.trim())
+                    } catch (_: IllegalArgumentException) {
+                        panelError = "Проверь описание изображения."
+                        return@Button
+                    }
+                    isSubmitting = true
+                    onSubmittingChanged(true)
+                    panelError = null
+                    scope.launch {
+                        try {
+                            app.imageGenerationRequests.put(requestToResume)
+                            request = requestToResume
+                            val submittedJobId = SubmitImageGeneration(activeRuntime.provider).invoke(requestToResume)
+                            jobId = submittedJobId
+                            status = ImageGenerationStatus(ImageGenerationState.QUEUED)
+                            isPreparedRecovery = false
+                        } catch (cancelled: ComfyUiSubmissionCancelledException) {
+                            jobId = cancelled.promptId
+                            status = null
+                            statusNeedsRetry = true
+                            isPreparedRecovery = false
+                            panelError = "Отправка прервана после передачи управления сети. Проверяю сохранённый ID; повторная отправка заблокирована."
+                            throw cancelled
+                        } catch (cancelled: CancellationException) {
+                            // This generic cancellation occurs before the durable submission claim; resuming the
+                            // same prepared request is safe because no POST /prompt has been started.
+                            isPreparedRecovery = true
+                            panelError = "Отправка отменена до подтверждения передачи серверу. Сохранённый запрос можно продолжить."
+                            throw cancelled
+                        } catch (uncertain: ComfyUiSubmissionUncertainException) {
+                            jobId = uncertain.promptId
+                            status = null
+                            statusNeedsRetry = true
+                            isPreparedRecovery = false
+                            panelError = "Приём задания не подтверждён. Проверяю сохранённый ID; повторная отправка заблокирована."
+                        } catch (_: Exception) {
+                            isPreparedRecovery = true
+                            panelError = "Не удалось продолжить отправку. Запрос сохранён; повтори попытку после проверки настроек."
+                        } finally {
+                            isSubmitting = false
+                            onSubmittingChanged(false)
+                        }
+                    }
+                }
+            ) { Text("ПРОДОЛЖИТЬ СОХРАНЁННУЮ ОТПРАВКУ") }
+        }
+        if (isRestoring) Text("Восстанавливаю сохранённое задание…", fontSize = 11.sp)
         status?.let { current ->
             Text("Статус: ${imageGenerationStatusLabel(current.state)}", fontSize = 12.sp)
             current.progressPercent?.let { Text("Прогресс: $it%", fontSize = 11.sp) }
@@ -309,7 +452,6 @@ internal fun ImageGenerationPanel(
                             CancelImageGeneration(selectedRuntime.provider).invoke(selectedJobId)
                             status = ImageGenerationStatus(ImageGenerationState.CANCELLED)
                             statusNeedsRetry = false
-                            onActiveChanged(false)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: Exception) {
@@ -319,7 +461,6 @@ internal fun ImageGenerationPanel(
                             }
                             if (isTerminalImageGenerationState(status?.state)) {
                                 statusNeedsRetry = false
-                                onActiveChanged(false)
                             }
                         } finally {
                             isCancelling = false
@@ -351,6 +492,7 @@ internal fun ImageGenerationPanel(
                 onClick = {
                     request = null
                     jobId = null
+                    isPreparedRecovery = false
                     status = null
                     statusNeedsRetry = false
                     image = null
