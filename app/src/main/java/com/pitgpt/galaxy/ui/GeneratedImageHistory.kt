@@ -37,6 +37,14 @@ import java.util.Date
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
+internal fun clearGeneratedImagePreview(bitmap: ImageBitmap) {
+    val androidBitmap = runCatching { bitmap.asAndroidBitmap() }.getOrNull() ?: return
+    if (!androidBitmap.isRecycled) {
+        runCatching { androidBitmap.eraseColor(android.graphics.Color.TRANSPARENT) }
+        runCatching { androidBitmap.recycle() }
+    }
+}
+
 internal fun generatedImageHistoryForConversation(
     conversationId: String,
     images: List<StoredGeneratedImage>
@@ -67,15 +75,7 @@ internal fun GeneratedImageHistory(
     val scope = rememberCoroutineScope()
 
     DisposableEffect(preview) {
-        onDispose {
-            preview?.let { bitmap ->
-                runCatching {
-                    val androidBitmap = bitmap.asAndroidBitmap()
-                    androidBitmap.eraseColor(android.graphics.Color.TRANSPARENT)
-                    androidBitmap.recycle()
-                }
-            }
-        }
+        onDispose { preview?.let(::clearGeneratedImagePreview) }
     }
 
     LaunchedEffect(repository, conversationId, refreshKey) {
