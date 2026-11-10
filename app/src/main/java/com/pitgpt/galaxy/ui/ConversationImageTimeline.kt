@@ -53,14 +53,15 @@ internal fun conversationTimelineEntries(
     messages: List<ConversationMessage>,
     images: List<StoredGeneratedImage>
 ): List<ConversationTimelineEntry> {
-    val messageEntries = messages.asSequence()
-        .filter { it.characterId == characterId }
-        .map(::ConversationTimelineEntry.Message)
-    val imageEntries = images.asSequence()
-        .filter { it.characterId == characterId && it.conversationId == characterId }
-        .map(::ConversationTimelineEntry.GeneratedImage)
-
-    return (messageEntries + imageEntries).sortedWith(
+    val entries = buildList {
+        messages.asSequence()
+            .filter { it.characterId == characterId }
+            .forEach { add(ConversationTimelineEntry.Message(it)) }
+        images.asSequence()
+            .filter { it.characterId == characterId && it.conversationId == characterId }
+            .forEach { add(ConversationTimelineEntry.GeneratedImage(it)) }
+    }
+    return entries.sortedWith(
         compareBy<ConversationTimelineEntry> { it.createdAtEpochMillis }
             .thenBy { if (it is ConversationTimelineEntry.Message) 0 else 1 }
             .thenBy { it.key }
