@@ -56,6 +56,7 @@ import com.pitgpt.galaxy.BuildConfig
 import com.pitgpt.galaxy.GalaxyApplication
 import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
+import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import com.pitgpt.galaxy.core.usecase.GenerateCharacterReply
@@ -495,9 +496,29 @@ private fun ConversationScreen(
     var sendError by remember { mutableStateOf<String?>(null) }
     var showImageGeneration by remember { mutableStateOf(false) }
     var imageGenerationSubmitting by remember { mutableStateOf(false) }
+    var generatedImages by remember(characterId) {
+        mutableStateOf<List<StoredGeneratedImage>>(emptyList())
+    }
+    var generatedImagesLoadError by remember(characterId) { mutableStateOf(false) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val keyboardDismiss = rememberOutsideTapKeyboardDismissState()
+
+    LaunchedEffect(app, characterId, showImageGeneration) {
+        if (!showImageGeneration) {
+            try {
+                generatedImages = app.generatedImages.listForConversation(characterId)
+                generatedImagesLoadError = false
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                generatedImagesLoadError = true
+            }
+        }
+    }
+    val timelineItems = remember(messages, generatedImages, characterId) {
+        conversationTimelineEntries(characterId, messages, generatedImages)
+    }
 
     fun submitDraft() {
         val value = draft.trim()
@@ -520,8 +541,8 @@ private fun ConversationScreen(
             }
         }
     }
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(timelineItems.size) {
+        if (timelineItems.isNotEmpty()) listState.animateScrollToItem(timelineItems.lastIndex)
     }
     Box(
         Modifier.fillMaxSize().background(
@@ -583,7 +604,7 @@ private fun ConversationScreen(
                 Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                     Text("Загружаю историю…", color = Muted, fontSize = 14.sp)
                 }
-            } else if (messages.isEmpty()) {
+            } else if (timelineItems.isEmpty()) {
                 Column(
                     Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.Center,
@@ -605,24 +626,44 @@ private fun ConversationScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     reverseLayout = false
                 ) {
-                    items(messages, key = { it.id }) { message ->
-                        val isUser = message.role == MessageRole.USER
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-                        ) {
-                            Column(
-                                Modifier.fillMaxWidth(0.86f)
-                                    .clip(RoundedCornerShape(18.dp))
-                                    .background(if (isUser) Color(0xFF354779) else Color(0xFF202A46))
-                                    .padding(horizontal = 14.dp, vertical = 11.dp)
-                            ) {
-                                Text(if (isUser) "ТЫ" else characterName.uppercase(),
-                                    color = Ice, fontSize = 9.sp, fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp)
-                                Spacer(Modifier.height(5.dp))
-                                Text(message.content, color = Color.White, fontSize = 15.sp,
-                                    lineHeight = 21.sp)
+                    if (generatedImagesLoadError) {
+                        item {
+                            Text(
+                                "Не удалось обновить историю изображений. Сообщения доступны.",
+                                color = Color(0xFFFFBD88),
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                    items(timelineItems, key = { it.key }) { entry ->
+                        when (entry) {
+                            is ConversationTimelineEntry.Message -> {
+                                val message = entry.value
+                                val isUser = message.role == MessageRole.USER
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                                ) {
+                                    Column(
+                                        Modifier.fillMaxWidth(0.86f)
+                                            .clip(RoundedCornerShape(18.dp))
+                                            .background(if (isUser) Color(0xFF354779) else Color(0xFF202A46))
+                                            .padding(horizontal = 14.dp, vertical = 11.dp)
+                                    ) {
+                                        Text(if (isUser) "ТЫ" else characterName.uppercase(),
+                                            color = Ice, fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                                            letterSpacing = 1.sp)
+                                        Spacer(Modifier.height(5.dp))
+                                        Text(message.content, color = Color.White, fontSize = 15.sp,
+                                            lineHeight = 21.sp)
+                                    }
+                                }
+                            }
+                            is ConversationTimelineEntry.GeneratedImage -> {
+                                GeneratedImageTimelineCard(
+                                    repository = app.generatedImages,
+                                    asset = entry.value
+                                )
                             }
                         }
                     }
