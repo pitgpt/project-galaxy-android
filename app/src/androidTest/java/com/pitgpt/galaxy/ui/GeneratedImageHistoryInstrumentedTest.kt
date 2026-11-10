@@ -25,11 +25,13 @@ class GeneratedImageHistoryInstrumentedTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun clearingGeneratedPreviewRecyclesTheUnderlyingBitmap() {
+    fun clearingGeneratedPreviewErasesPixelsWithoutRecyclingComposeBitmap() {
         val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         try {
+            bitmap.eraseColor(android.graphics.Color.RED)
             clearGeneratedImagePreview(bitmap.asImageBitmap())
-            assertTrue(bitmap.isRecycled)
+            assertEquals(android.graphics.Color.TRANSPARENT, bitmap.getPixel(0, 0))
+            assertTrue(!bitmap.isRecycled)
         } finally {
             if (!bitmap.isRecycled) bitmap.recycle()
         }
