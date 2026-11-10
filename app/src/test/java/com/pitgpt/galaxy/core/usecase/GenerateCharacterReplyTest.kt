@@ -111,6 +111,57 @@ class GenerateCharacterReplyTest {
         assertEquals(emptyList<ConversationMessage>(), conversations.appended)
     }
 
+
+    @Test
+    fun failsClearlyWhenNoActiveProviderIsConfigured() {
+        val characterId = "character-1"
+        val conversations = FakeConversationRepository(
+            listOf(message("user-1", characterId, MessageRole.USER, "Hello", 1L))
+        )
+        var providerCalled = false
+        val client = TextChatProvider { _, _, _ ->
+            providerCalled = true
+            ChatCompletion(text = "Unexpected", model = "test-model")
+        }
+        val useCase = GenerateCharacterReply(
+            conversations = conversations,
+            providerStore = FakeProviderSettingsRepository(ProviderSettings()),
+            client = client
+        )
+
+        val failure = assertThrows(IllegalStateException::class.java) {
+            runBlocking { useCase(characterId, "You are Galaxy.") }
+        }
+
+        assertEquals("No active text provider is configured", failure.message)
+        assertEquals(false, providerCalled)
+        assertEquals(emptyList<ConversationMessage>(), conversations.appended)
+    }
+
+    @Test
+    fun doesNotPersistAssistantReplyWhenProviderRequestFails() {
+        val characterId = "character-1"
+        val conversations = FakeConversationRepository(
+            listOf(message("user-1", characterId, MessageRole.USER, "Hello", 1L))
+        )
+        val networkFailure = IllegalStateException("Provider unavailable")
+        val client = TextChatProvider { _, _, _ -> throw networkFailure }
+        val useCase = GenerateCharacterReply(
+            conversations = conversations,
+            providerStore = FakeProviderSettingsRepository(
+                ProviderSettings(providers = listOf(provider), activeProviderId = provider.id)
+            ),
+            client = client
+        )
+
+        val failure = assertThrows(IllegalStateException::class.java) {
+            runBlocking { useCase(characterId, "You are Galaxy.") }
+        }
+
+        assertEquals(networkFailure, failure)
+        assertEquals(emptyList<ConversationMessage>(), conversations.appended)
+    }
+
     private fun message(
         id: String,
         characterId: String,
