@@ -15,6 +15,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -197,6 +198,10 @@ internal fun ImageGenerationPanel(
     var showHistory by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val clientId = remember { UUID.randomUUID().toString() }
+
+    DisposableEffect(image) {
+        onDispose { image?.let(::clearGeneratedImagePreview) }
+    }
 
     LaunchedEffect(app, clientId, retryKey) {
         runtime = null
