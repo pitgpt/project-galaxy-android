@@ -32,6 +32,11 @@ class RoomImageGenerationRequestStore(
     override suspend fun all(): List<ImageGenerationRequest> =
         dao.getAll().map { it.toDomain() }
 
+    override suspend fun latestForCharacter(characterId: String): ImageGenerationRequest? {
+        require(characterId.isNotBlank()) { "Character ID must not be blank" }
+        return dao.latestForCharacter(characterId)?.toDomain()
+    }
+
     override suspend fun delete(requestId: String) {
         require(requestId.isNotBlank()) { "Generation request ID must not be blank" }
         dao.delete(requestId)

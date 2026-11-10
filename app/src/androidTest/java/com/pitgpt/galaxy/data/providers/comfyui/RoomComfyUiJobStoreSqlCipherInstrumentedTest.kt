@@ -91,6 +91,10 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             "The persisted Room database must not expose the plaintext SQLite header",
             String(header, 0, 15, Charsets.US_ASCII) == "SQLite format 3"
         )
+        val encryptedBytes = databaseFile.readBytes()
+        val encryptedText = String(encryptedBytes, Charsets.ISO_8859_1)
+        assertFalse("Prompt text must not appear in the SQLCipher file", encryptedText.contains("A private prompt"))
+        assertFalse("Negative prompt text must not appear in the SQLCipher file", encryptedText.contains("private negative prompt"))
 
         val reopenedDatabase = openDatabase()
         database = reopenedDatabase

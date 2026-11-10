@@ -20,6 +20,12 @@ interface ImageGenerationRequestDao {
     )
     suspend fun getAll(): List<ImageGenerationRequestEntity>
 
+    @Query(
+        "SELECT * FROM image_generation_requests WHERE characterId = :characterId " +
+            "ORDER BY createdAtEpochMillis DESC, requestId DESC LIMIT 1"
+    )
+    suspend fun latestForCharacter(characterId: String): ImageGenerationRequestEntity?
+
     @Query("DELETE FROM image_generation_requests WHERE requestId = :requestId")
     suspend fun delete(requestId: String)
 }

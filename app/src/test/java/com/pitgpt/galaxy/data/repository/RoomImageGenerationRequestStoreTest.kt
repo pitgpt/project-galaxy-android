@@ -45,6 +45,8 @@ class RoomImageGenerationRequestStoreTest {
 
         assertEquals(older, store.get(older.id))
         assertEquals(listOf(newer, older), store.all())
+        assertEquals(newer, store.latestForCharacter("character-a"))
+        assertNull(store.latestForCharacter("character-missing"))
     }
 
     @Test

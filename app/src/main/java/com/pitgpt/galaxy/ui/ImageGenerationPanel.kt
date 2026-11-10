@@ -171,11 +171,14 @@ internal fun ImageGenerationPanel(
         if (runtime == null || request != null || isRestoring) return@LaunchedEffect
         isRestoring = true
         try {
-            val restored = latestRecoverableImageGenerationRequest(
-                characterId = characterId,
-                requests = app.imageGenerationRequests.all(),
-                jobs = app.comfyUiJobStore.all()
-            )
+            val latestRequest = app.imageGenerationRequests.latestForCharacter(characterId)
+            val restored = latestRequest?.let {
+                latestRecoverableImageGenerationRequest(
+                    characterId = characterId,
+                    requests = listOf(it),
+                    jobs = app.comfyUiJobStore.all()
+                )
+            }
             if (restored != null) {
                 request = restored.request
                 prompt = restored.request.prompt

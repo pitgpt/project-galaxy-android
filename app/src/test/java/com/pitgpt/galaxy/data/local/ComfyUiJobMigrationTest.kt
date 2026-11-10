@@ -107,7 +107,14 @@ class ComfyUiJobMigrationTest {
             SupportSQLiteOpenHelper.Configuration.builder(RuntimeEnvironment.getApplication())
                 .name(null)
                 .callback(object : SupportSQLiteOpenHelper.Callback(5) {
-                    override fun onCreate(db: SupportSQLiteDatabase) = Unit
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL(
+                            "CREATE TABLE comfyui_jobs (promptId TEXT NOT NULL PRIMARY KEY, requestId TEXT NOT NULL, createdAtEpochMillis INTEGER NOT NULL, cancelled INTEGER NOT NULL, submissionStarted INTEGER NOT NULL)"
+                        )
+                        db.execSQL(
+                            "INSERT INTO comfyui_jobs (promptId, requestId, createdAtEpochMillis, cancelled, submissionStarted) VALUES ('existing-prompt', 'existing-request', 777, 0, 1)"
+                        )
+                    }
                     override fun onUpgrade(
                         db: SupportSQLiteDatabase,
                         oldVersion: Int,
@@ -142,6 +149,15 @@ class ComfyUiJobMigrationTest {
             }
             assertTrue(indexes.contains("index_image_generation_requests_conversationId_createdAtEpochMillis"))
             assertTrue(indexes.contains("index_image_generation_requests_characterId_createdAtEpochMillis"))
+
+            db.query(
+                "SELECT requestId, submissionStarted FROM comfyui_jobs WHERE promptId = ?",
+                arrayOf("existing-prompt")
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("existing-request", cursor.getString(0))
+                assertEquals(1, cursor.getInt(1))
+            }
 
             db.execSQL(
                 """

@@ -10,5 +10,6 @@ interface ImageGenerationRequestStore {
     suspend fun put(request: ImageGenerationRequest)
     suspend fun get(requestId: String): ImageGenerationRequest?
     suspend fun all(): List<ImageGenerationRequest>
+    suspend fun latestForCharacter(characterId: String): ImageGenerationRequest?
     suspend fun delete(requestId: String)
 }
