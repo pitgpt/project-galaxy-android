@@ -2,6 +2,7 @@ package com.pitgpt.galaxy.ui
 
 import android.graphics.Bitmap
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -22,6 +23,17 @@ import org.junit.runner.RunWith
 class GeneratedImageHistoryInstrumentedTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun clearingGeneratedPreviewRecyclesTheUnderlyingBitmap() {
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        try {
+            clearGeneratedImagePreview(bitmap.asImageBitmap())
+            assertTrue(bitmap.isRecycled)
+        } finally {
+            if (!bitmap.isRecycled) bitmap.recycle()
+        }
+    }
 
     @Test
     fun historyLoadsMetadataWithoutReadingImageUntilOpenAndClearsPlaintextAfterPreview() {
