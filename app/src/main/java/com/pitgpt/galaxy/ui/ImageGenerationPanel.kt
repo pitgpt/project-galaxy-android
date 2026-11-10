@@ -246,8 +246,6 @@ internal fun ImageGenerationPanel(
             }
             terminal = isTerminalImageGenerationState(status?.state)
             statusNeedsRetry = !terminal
-        } finally {
-        }
     }
 
     Column(
@@ -317,6 +315,10 @@ internal fun ImageGenerationPanel(
                         panelError = "Отправка прервана после передачи управления сети. Проверяю сохранённый ID; повторная отправка заблокирована."
                         throw cancelled
                     } catch (cancelled: CancellationException) {
+                        // This generic cancellation occurs before the durable submission claim; resuming the
+                        // same prepared request is safe because no POST /prompt has been started.
+                        isPreparedRecovery = true
+                        panelError = "Отправка отменена до подтверждения передачи серверу. Сохранённый запрос можно продолжить."
                         throw cancelled
                     } catch (uncertain: ComfyUiSubmissionUncertainException) {
                         jobId = uncertain.promptId
@@ -368,6 +370,10 @@ internal fun ImageGenerationPanel(
                             panelError = "Отправка прервана после передачи управления сети. Проверяю сохранённый ID; повторная отправка заблокирована."
                             throw cancelled
                         } catch (cancelled: CancellationException) {
+                            // This generic cancellation occurs before the durable submission claim; resuming the
+                            // same prepared request is safe because no POST /prompt has been started.
+                            isPreparedRecovery = true
+                            panelError = "Отправка отменена до подтверждения передачи серверу. Сохранённый запрос можно продолжить."
                             throw cancelled
                         } catch (uncertain: ComfyUiSubmissionUncertainException) {
                             jobId = uncertain.promptId
