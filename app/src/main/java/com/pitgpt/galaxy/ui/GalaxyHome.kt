@@ -516,8 +516,11 @@ private fun ConversationScreen(
             }
         }
     }
-    val timelineItems = remember(messages, generatedImages, characterId) {
-        conversationTimelineEntries(characterId, messages, generatedImages)
+    // ConversationScreen receives a SnapshotStateList through the List interface.
+    // Take a snapshot so remember observes content changes rather than the stable list identity.
+    val timelineMessages = messages.toList()
+    val timelineItems = remember(timelineMessages, generatedImages, characterId) {
+        conversationTimelineEntries(characterId, timelineMessages, generatedImages)
     }
 
     fun submitDraft() {
