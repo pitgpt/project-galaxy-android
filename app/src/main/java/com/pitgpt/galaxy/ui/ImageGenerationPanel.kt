@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -12,7 +13,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -191,8 +194,14 @@ internal fun ImageGenerationPanel(
     var isPreparedRecovery by remember { mutableStateOf(false) }
     var isCancelling by remember { mutableStateOf(false) }
     var isPersisting by remember { mutableStateOf(false) }
+    var isClearingRequest by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val clientId = remember { UUID.randomUUID().toString() }
+
+    DisposableEffect(image) {
+        onDispose { image?.let(::clearGeneratedImagePreview) }
+    }
 
     LaunchedEffect(app, clientId, retryKey) {
         runtime = null
@@ -282,11 +291,28 @@ internal fun ImageGenerationPanel(
         }
     }
 
+    if (showHistory) {
+        GeneratedImageHistory(
+            repository = app.generatedImages,
+            conversationId = characterId,
+            modifier = modifier,
+            onBack = { showHistory = false }
+        )
+        return
+    }
+
     Column(
         modifier = modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ", fontSize = 16.sp)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text("ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ", fontSize = 16.sp)
+            TextButton(onClick = { showHistory = true }) { Text("ИСТОРИЯ") }
+        }
         when {
             runtime != null -> Text(
                 "ComfyUI подключён. Используется workflow из зашифрованных настроек.",
@@ -489,17 +515,36 @@ internal fun ImageGenerationPanel(
             } == true
         ) {
             Button(
+                enabled = !isClearingRequest && !isSubmitting && !isPersisting,
                 onClick = {
-                    request = null
-                    jobId = null
-                    isPreparedRecovery = false
-                    status = null
-                    statusNeedsRetry = false
-                    image = null
-                    panelError = null
-                    prompt = ""
+                    val requestIdToClear = request?.id
+                    isClearingRequest = true
+                    scope.launch {
+                        try {
+                            if (requestIdToClear != null) {
+                                // The encrypted image remains in GeneratedImageRepository history.
+                                // Remove only the dismissed request context so it is not restored
+                                // as the active panel after the next process recreation.
+                                app.imageGenerationRequests.delete(requestIdToClear)
+                            }
+                            request = null
+                            jobId = null
+                            isPreparedRecovery = false
+                            status = null
+                            statusNeedsRetry = false
+                            image = null
+                            panelError = null
+                            prompt = ""
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            panelError = "Не удалось убрать запрос из активной панели. Сохранённое состояние не изменено."
+                        } finally {
+                            isClearingRequest = false
+                        }
+                    }
                 }
-            ) { Text("НОВАЯ ГЕНЕРАЦИЯ") }
+            ) { Text(if (isClearingRequest) "ОЧИЩАЮ…" else "НОВАЯ ГЕНЕРАЦИЯ") }
         }
         Text(
             "Изображение загружается в память и сохраняется только через зашифрованное хранилище Galaxy.",
