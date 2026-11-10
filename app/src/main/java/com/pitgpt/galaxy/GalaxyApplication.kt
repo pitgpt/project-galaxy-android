@@ -4,6 +4,7 @@ import android.app.Application
 import com.pitgpt.galaxy.core.repository.CharacterRepository
 import com.pitgpt.galaxy.core.repository.ConversationRepository
 import com.pitgpt.galaxy.core.repository.MemoryRepository
+import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
 import com.pitgpt.galaxy.core.usecase.InitializeGalaxy
 import com.pitgpt.galaxy.data.auth.SupabaseAuthService
 import com.pitgpt.galaxy.data.auth.SupabaseClientFactory
@@ -15,6 +16,7 @@ import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
 import com.pitgpt.galaxy.data.repository.RoomConversationRepository
 import com.pitgpt.galaxy.data.repository.RoomMemoryRepository
 import com.pitgpt.galaxy.data.repository.RoomGeneratedImageRepository
+import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
 import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
 import com.pitgpt.galaxy.data.providers.ProviderSettingsIo
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiConnectionConfig
@@ -35,6 +37,9 @@ class GalaxyApplication : Application() {
     private val providerSettingsIo by lazy { ProviderSettingsIo(providerStore) }
     val mediaStore: EncryptedMediaStore by lazy { EncryptedMediaStore.fromContext(this) }
     val generatedImages by lazy { RoomGeneratedImageRepository(database.generatedImageDao(), mediaStore) }
+    val imageGenerationRequests: ImageGenerationRequestStore by lazy {
+        RoomImageGenerationRequestStore(database.imageGenerationRequestDao())
+    }
     val comfyUiJobStore: ComfyUiJobStore by lazy { RoomComfyUiJobStore(database.comfyUiJobDao()) }
     private val comfyUiRuntimeFactory by lazy {
         ComfyUiRuntimeFactory(comfyUiJobStore, generatedImages)

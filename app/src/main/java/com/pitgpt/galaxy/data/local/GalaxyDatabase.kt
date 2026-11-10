@@ -6,11 +6,13 @@ import com.pitgpt.galaxy.data.local.dao.CharacterDao
 import com.pitgpt.galaxy.data.local.dao.ComfyUiJobDao
 import com.pitgpt.galaxy.data.local.dao.ConversationMessageDao
 import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
+import com.pitgpt.galaxy.data.local.dao.ImageGenerationRequestDao
 import com.pitgpt.galaxy.data.local.dao.MemoryDao
 import com.pitgpt.galaxy.data.local.entity.CharacterEntity
 import com.pitgpt.galaxy.data.local.entity.ComfyUiJobEntity
 import com.pitgpt.galaxy.data.local.entity.ConversationMessageEntity
 import com.pitgpt.galaxy.data.local.entity.GeneratedImageEntity
+import com.pitgpt.galaxy.data.local.entity.ImageGenerationRequestEntity
 import com.pitgpt.galaxy.data.local.entity.MemoryEntity
 
 @Database(
@@ -19,9 +21,10 @@ import com.pitgpt.galaxy.data.local.entity.MemoryEntity
         ConversationMessageEntity::class,
         MemoryEntity::class,
         ComfyUiJobEntity::class,
-        GeneratedImageEntity::class
+        GeneratedImageEntity::class,
+        ImageGenerationRequestEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class GalaxyDatabase : RoomDatabase() {
@@ -30,4 +33,5 @@ abstract class GalaxyDatabase : RoomDatabase() {
     abstract fun memoryDao(): MemoryDao
     abstract fun comfyUiJobDao(): ComfyUiJobDao
     abstract fun generatedImageDao(): GeneratedImageDao
+    abstract fun imageGenerationRequestDao(): ImageGenerationRequestDao
 }

@@ -39,6 +39,12 @@ data class ImageGenerationRequest(
         }
     }
 
+    override fun toString(): String =
+        "ImageGenerationRequest(id=$id, conversationId=$conversationId, characterId=$characterId, " +
+            "prompt=<redacted>, negativePrompt=${if (negativePrompt == null) "null" else "<redacted>"}, " +
+            "preferredMimeType=$preferredMimeType, workflowId=$workflowId, width=$width, height=$height, " +
+            "seed=$seed, referenceAssetCount=${referenceAssetIds.size}, createdAtEpochMillis=$createdAtEpochMillis)"
+
     companion object {
         const val MAX_PROMPT_LENGTH = 12_000
     }
