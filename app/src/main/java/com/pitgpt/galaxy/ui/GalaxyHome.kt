@@ -558,12 +558,14 @@ private fun ConversationScreen(
             }
             Spacer(Modifier.height(12.dp))
             if (showImageGeneration) {
-                ImageGenerationPanel(
-                    app = app,
-                    characterId = characterId,
-                    modifier = Modifier.weight(1f),
-                    onSubmittingChanged = { imageGenerationSubmitting = it }
-                )
+                CharacterScopedGenerationPanel(characterId) {
+                    ImageGenerationPanel(
+                        app = app,
+                        characterId = characterId,
+                        modifier = Modifier.weight(1f),
+                        onSubmittingChanged = { imageGenerationSubmitting = it }
+                    )
+                }
             } else if (loadError != null) {
                 Column(
                     Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
