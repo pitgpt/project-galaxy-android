@@ -14,14 +14,7 @@ class RoomImageGenerationRequestStore(
     private val dao: ImageGenerationRequestDao
 ) : ImageGenerationRequestStore {
     override suspend fun put(request: ImageGenerationRequest) {
-        val existing = dao.get(request.id)
-        if (existing != null) {
-            check(
-                existing.conversationId == request.conversationId &&
-                    existing.characterId == request.characterId
-            ) { "A generation request ID is already associated with different Galaxy context" }
-        }
-        dao.upsert(request.toEntity())
+        dao.putIfContextMatches(request.toEntity())
     }
 
     override suspend fun get(requestId: String): ImageGenerationRequest? {
