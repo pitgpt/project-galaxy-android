@@ -220,6 +220,26 @@ class RoomGeneratedImageRepositoryTest {
     }
 
     @Test
+    fun restoresImageMetadataWhenEncryptedFileDeletionFails() = runBlocking {
+        val request = request("conversation-delete-recovery")
+        val bytes = ByteArray(40) { (it + 9).toByte() }
+        val saved = repository.save(request, asset(request.id, bytes), bytes)
+        val encryptedPath = java.io.File(mediaDirectory, "${saved.assetId}.gcm")
+
+        assertTrue(encryptedPath.delete())
+        assertTrue(encryptedPath.mkdir())
+
+        val failure = runCatching { repository.delete(saved.assetId) }.exceptionOrNull()
+
+        assertTrue("A filesystem deletion failure must be surfaced", failure is IllegalStateException)
+        assertEquals(
+            "Metadata must be restored when ciphertext could not be removed",
+            saved,
+            repository.get(saved.assetId)
+        )
+    }
+
+    @Test
     fun encryptedMediaFileOperationsUseTheInjectedIoDispatcher() = runBlocking {
         val dispatcher = RecordingDispatcher()
         try {
