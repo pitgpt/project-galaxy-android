@@ -1,7 +1,9 @@
 package com.pitgpt.galaxy.data.providers
 
 import kotlinx.coroutines.runBlocking
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -20,8 +22,24 @@ class OpenAiCompatibleChatClientTest {
         val result = OpenAiCompatibleChatClient(transport).complete(provider, listOf(ChatTurn("user", "Hello")), temperature = null)
         assertEquals("https://api.example.test/v1/chat/completions", capturedUrl)
         assertEquals("test-key", capturedKey)
-        assertEquals("test-model", org.json.JSONObject(capturedBody).getString("model"))
+        assertEquals("test-model", JSONObject(capturedBody).getString("model"))
         assertEquals("Hello from test", result.text)
+    }
+
+    @Test fun sendsOptionalTemperatureInRequestBody() = runBlocking {
+        var capturedBody = ""
+        val transport = ProviderHttpTransport { _, _, body ->
+            capturedBody = body
+            ProviderHttpResponse(200, """{"choices":[{"message":{"content":"Hello"}}]}""")
+        }
+
+        OpenAiCompatibleChatClient(transport).complete(
+            provider,
+            listOf(ChatTurn("user", "Hello")),
+            temperature = 0.4
+        )
+
+        assertEquals(0.4, JSONObject(capturedBody).getDouble("temperature"), 0.0)
     }
 
     @Test fun rejectsInsecureUrlBeforeSendingRequest() {
@@ -31,7 +49,79 @@ class OpenAiCompatibleChatClientTest {
         assertThrows(IllegalArgumentException::class.java) {
             runBlocking { OpenAiCompatibleChatClient(transport).complete(insecure, listOf(ChatTurn("user", "Hi")), temperature = null) }
         }
-        assertEquals(false, called)
+        assertFalse(called)
+    }
+
+    @Test fun rejectsProviderUrlContainingCredentialsQueryOrFragment() {
+        val unsafeUrls = listOf(
+            "https://user:password@api.example.test/v1",
+            "https://api.example.test/v1?token=secret",
+            "https://api.example.test/v1#fragment"
+        )
+        var calls = 0
+        val transport = ProviderHttpTransport { _, _, _ ->
+            calls++
+            ProviderHttpResponse(200, """{"choices":[{"message":{"content":"unexpected"}}]}""")
+        }
+
+        unsafeUrls.forEach { url ->
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking {
+                    OpenAiCompatibleChatClient(transport).complete(
+                        provider.copy(baseUrl = url),
+                        listOf(ChatTurn("user", "Hi")),
+                        temperature = null
+                    )
+                }
+            }
+        }
+
+        assertEquals(0, calls)
+    }
+
+    @Test fun rejectsBlankCredentialsAndUnsupportedTurnsBeforeSendingRequest() {
+        var calls = 0
+        val transport = ProviderHttpTransport { _, _, _ ->
+            calls++
+            ProviderHttpResponse(200, """{"choices":[{"message":{"content":"unexpected"}}]}""")
+        }
+        val client = OpenAiCompatibleChatClient(transport)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { client.complete(provider.copy(apiKey = " "), listOf(ChatTurn("user", "Hi")), null) }
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { client.complete(provider, listOf(ChatTurn("tool", "Hi")), null) }
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { client.complete(provider, listOf(ChatTurn("user", " ")), null) }
+        }
+
+        assertEquals(0, calls)
+    }
+
+    @Test fun rejectsInvalidJsonResponseWithoutExposingResponseBody() {
+        val transport = ProviderHttpTransport { _, _, _ ->
+            ProviderHttpResponse(200, """{"error":"private provider diagnostic"""")
+        }
+
+        val error = assertThrows(ProviderResponseException::class.java) {
+            runBlocking { OpenAiCompatibleChatClient(transport).complete(provider, listOf(ChatTurn("user", "Hi")), null) }
+        }
+
+        assertEquals("Provider returned invalid JSON", error.message)
+    }
+
+    @Test fun rejectsResponseWithoutAssistantText() {
+        val transport = ProviderHttpTransport { _, _, _ ->
+            ProviderHttpResponse(200, """{"choices":[{"message":{"content":" "}}]}""")
+        }
+
+        val error = assertThrows(ProviderResponseException::class.java) {
+            runBlocking { OpenAiCompatibleChatClient(transport).complete(provider, listOf(ChatTurn("user", "Hi")), null) }
+        }
+
+        assertEquals("Provider response did not contain assistant text", error.message)
     }
 
     @Test fun doesNotExposeProviderBodyInHttpErrors() {
