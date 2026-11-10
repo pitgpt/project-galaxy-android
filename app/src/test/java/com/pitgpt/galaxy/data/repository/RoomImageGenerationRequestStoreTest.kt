@@ -3,6 +3,9 @@ package com.pitgpt.galaxy.data.repository
 import androidx.room.Room
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -71,6 +74,26 @@ class RoomImageGenerationRequestStoreTest {
 
         assertTrue(failure.message.orEmpty().contains("different Galaxy context"))
         assertEquals(original, store.get(original.id))
+    }
+
+    @Test
+    fun concurrentRequestIdReuseCannotOverwriteDifferentGalaxyContext() = runBlocking {
+        val first = request("request-race", "character-a", 10L)
+        val second = request("request-race", "character-b", 20L)
+
+        val outcomes = listOf(
+            async(Dispatchers.IO) { runCatching { store.put(first) } },
+            async(Dispatchers.IO) { runCatching { store.put(second) } }
+        ).awaitAll()
+
+        assertEquals(1, outcomes.count { it.isSuccess })
+        assertEquals(1, outcomes.count { it.isFailure })
+        val conflict = outcomes.single { it.isFailure }.exceptionOrNull()
+        assertTrue(conflict is IllegalStateException)
+        assertTrue(conflict?.message.orEmpty().contains("different Galaxy context"))
+
+        val persisted = requireNotNull(store.get(first.id))
+        assertTrue(persisted == first || persisted == second)
     }
 
     @Test
