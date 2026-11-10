@@ -174,10 +174,17 @@ class ComfyUiImageGenerationProvider(
         }
     }
 
-    override suspend fun result(providerJobId: String): GeneratedImageAsset =
-        completedImage(providerJobId).asset
+    override suspend fun result(providerJobId: String): GeneratedImageAsset {
+        val payload = completedImage(providerJobId)
+        return try {
+            payload.asset
+        } finally {
+            // This API returns metadata only, so the downloaded plaintext has no remaining owner.
+            payload.bytes.fill(0)
+        }
+    }
 
-    /** Bounded bytes in memory only; caller must persist them through encrypted media storage. */
+    /** Bounded bytes in memory only; caller owns and must clear them after use. */
     suspend fun downloadResult(providerJobId: String): ComfyUiImageDownload =
         completedImage(providerJobId).let { ComfyUiImageDownload(it.mimeType, it.bytes, it.sha256) }
 
@@ -191,19 +198,26 @@ class ComfyUiImageGenerationProvider(
         }
         val ref = selectOutput(history.images)
         val download = client.download(config, ref)
-        check(download.mimeType == PNG_MIME) { "ComfyUI returned an unsupported image format" }
-        val (width, height) = pngDimensions(download.bytes)
-        val asset = GeneratedImageAsset(
-            assetId = "comfyui:" + providerJobId + ":" + ref.filename,
-            requestId = job.requestId,
-            mimeType = download.mimeType,
-            width = width,
-            height = height,
-            byteSize = download.byteSize,
-            sha256 = download.sha256,
-            createdAtEpochMillis = job.createdAtEpochMillis
-        )
-        return GeneratedImagePayload(asset, download.mimeType, download.bytes, download.sha256)
+        var ownershipTransferred = false
+        try {
+            check(download.mimeType == PNG_MIME) { "ComfyUI returned an unsupported image format" }
+            val (width, height) = pngDimensions(download.bytes)
+            val asset = GeneratedImageAsset(
+                assetId = "comfyui:" + providerJobId + ":" + ref.filename,
+                requestId = job.requestId,
+                mimeType = download.mimeType,
+                width = width,
+                height = height,
+                byteSize = download.byteSize,
+                sha256 = download.sha256,
+                createdAtEpochMillis = job.createdAtEpochMillis
+            )
+            val payload = GeneratedImagePayload(asset, download.mimeType, download.bytes, download.sha256)
+            ownershipTransferred = true
+            return payload
+        } finally {
+            if (!ownershipTransferred) download.bytes.fill(0)
+        }
     }
 
     private fun selectOutput(images: List<ComfyUiImageReference>) =

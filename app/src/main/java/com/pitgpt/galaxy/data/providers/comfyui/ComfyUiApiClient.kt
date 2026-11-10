@@ -412,17 +412,23 @@ class ComfyUiApiClient(
             readTimeoutMillis = config.readTimeoutMillis,
             maxResponseBytes = MAX_IMAGE_BYTES
         )
-        requireSuccess(response.statusCode)
-        val mimeType = response.contentType.orEmpty().substringBefore(';').trim().lowercase()
-        require(mimeType in SUPPORTED_IMAGE_MIME_TYPES) {
-            "ComfyUI returned an unsupported image content type"
+        try {
+            requireSuccess(response.statusCode)
+            val mimeType = response.contentType.orEmpty().substringBefore(';').trim().lowercase()
+            require(mimeType in SUPPORTED_IMAGE_MIME_TYPES) {
+                "ComfyUI returned an unsupported image content type"
+            }
+            require(isValidImageSignature(mimeType, response.body)) {
+                "ComfyUI response did not contain a valid image payload"
+            }
+            val digest = MessageDigest.getInstance("SHA-256").digest(response.body)
+                .joinToString("") { "%02x".format(it) }
+            return ComfyUiImageDownload(mimeType, response.body, digest)
+        } catch (failure: Exception) {
+            // Invalid or rejected provider responses must not leave downloaded plaintext in memory.
+            response.body.fill(0)
+            throw failure
         }
-        require(isValidImageSignature(mimeType, response.body)) {
-            "ComfyUI response did not contain a valid image payload"
-        }
-        val digest = MessageDigest.getInstance("SHA-256").digest(response.body)
-            .joinToString("") { "%02x".format(it) }
-        return ComfyUiImageDownload(mimeType, response.body, digest)
     }
 
     private suspend fun jsonRequest(
