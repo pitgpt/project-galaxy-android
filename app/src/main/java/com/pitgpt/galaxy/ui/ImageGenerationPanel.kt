@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -148,6 +149,14 @@ internal fun decodeGeneratedImage(bytes: ByteArray): ImageBitmap? {
  * First interactive ComfyUI surface. It submits through the saved encrypted settings,
  * polls the provider, and persists completed bytes only through the encrypted media repository.
  */
+@Composable
+internal fun CharacterScopedGenerationPanel(
+    characterId: String,
+    content: @Composable () -> Unit
+) {
+    key(characterId) { content() }
+}
+
 @Composable
 internal fun ImageGenerationPanel(
     app: GalaxyApplication,
