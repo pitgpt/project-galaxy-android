@@ -16,6 +16,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,6 +26,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -63,6 +65,18 @@ internal fun GeneratedImageHistory(
     var previewLoadingAssetId by remember { mutableStateOf<String?>(null) }
     var previewError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+
+    DisposableEffect(preview) {
+        onDispose {
+            preview?.let { bitmap ->
+                runCatching {
+                    val androidBitmap = bitmap.asAndroidBitmap()
+                    androidBitmap.eraseColor(android.graphics.Color.TRANSPARENT)
+                    androidBitmap.recycle()
+                }
+            }
+        }
+    }
 
     LaunchedEffect(repository, conversationId, refreshKey) {
         isLoading = true
