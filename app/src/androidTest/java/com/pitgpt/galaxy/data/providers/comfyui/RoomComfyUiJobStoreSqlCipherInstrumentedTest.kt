@@ -25,6 +25,7 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
     private lateinit var context: Context
     private lateinit var databaseName: String
     private lateinit var passphrase: ByteArray
+    private val encodedPassphrases = mutableListOf<ByteArray>()
     private var database: GalaxyDatabase? = null
 
     @Before
@@ -45,6 +46,8 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             File(file.path + "-shm").delete()
             File(file.path + "-journal").delete()
         }
+        encodedPassphrases.forEach { it.fill(0) }
+        encodedPassphrases.clear()
         if (::passphrase.isInitialized) passphrase.fill(0)
     }
 
@@ -84,6 +87,7 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
 
     private fun openDatabase(): GalaxyDatabase {
         val keyBytes = Base64.encode(passphrase, Base64.NO_WRAP)
+        encodedPassphrases += keyBytes
         val opened = Room.databaseBuilder(context, GalaxyDatabase::class.java, databaseName)
             .openHelperFactory(SupportOpenHelperFactory(keyBytes, null, true))
             .build()
