@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
-        <!-- Device-bound secrets cannot be decrypted on another device. -->
+        <!-- Device-bound credentials and the complete local database are intentionally device-only. -->
         <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
         <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
+        <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+        <exclude domain="database" path="." />
     </cloud-backup>
     <device-transfer>
+        <!-- Never transfer an encrypted database without its non-exportable device key. -->
         <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
         <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
+        <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+        <exclude domain="database" path="." />
     </device-transfer>
 </data-extraction-rules>

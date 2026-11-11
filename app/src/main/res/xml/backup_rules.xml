@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <!-- Device-bound secrets must never be copied to cloud backup. -->
+    <!-- Device-bound credentials and the complete local database are intentionally device-only. -->
     <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
     <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
+    <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+    <exclude domain="database" path="." />
 </full-backup-content>
