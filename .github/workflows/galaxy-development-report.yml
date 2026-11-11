@@ -40,10 +40,9 @@ jobs:
               runs = response.data.workflow_runs;
             }
 
-            const pullResponse = await github.rest.pulls.list({
-              owner, repo, state: 'open', sort: 'updated', direction: 'desc', per_page: 30
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', sort: 'updated', direction: 'desc', per_page: 100
             });
-            const pulls = pullResponse.data;
 
             const lines = [
               '# Galaxy development report',
