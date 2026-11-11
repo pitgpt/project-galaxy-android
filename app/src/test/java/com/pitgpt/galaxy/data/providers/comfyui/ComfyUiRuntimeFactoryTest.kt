@@ -1,11 +1,15 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.model.ImageGenerationState
 import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
+import com.pitgpt.galaxy.data.providers.ComfyUiSavedSettings
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class ComfyUiRuntimeFactoryTest {
@@ -66,10 +70,85 @@ class ComfyUiRuntimeFactoryTest {
         }
     }
 
+    @Test
+    fun createFromSettingsFallsBackToReachableVpnAndUsesItsBearerToken() = runBlocking {
+        val transport = FakeTransport(testPng()).apply {
+            responses.add(
+                ComfyUiApiResponse(
+                    200,
+                    """{"queue_running":[[0,"prompt-123",{},[],[]]],"queue_pending":[]}"""
+                )
+            )
+        }
+        val jobs = InMemoryComfyUiJobStore().apply {
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis))
+        }
+        val factory = ComfyUiRuntimeFactory(
+            jobs = jobs,
+            images = RecordingImageRepository(),
+            client = ComfyUiApiClient(transport)
+        )
+        val settings = ComfyUiSavedSettings(
+            lanBaseUrl = "http://192.168.1.20:8188",
+            lanBearerToken = "lan-secret",
+            vpnBaseUrl = "https://comfy.example.net",
+            vpnBearerToken = "vpn-secret"
+        )
+        val probed = mutableListOf<String>()
+        val selector = ComfyUiEndpointSelector { endpoint ->
+            probed += endpoint.normalizedBaseUrl
+            if (endpoint.normalizedBaseUrl == "http://192.168.1.20:8188") {
+                ComfyUiProbeResult(false, message = "LAN unavailable")
+            } else {
+                ComfyUiProbeResult(true, 200, "ComfyUI reachable")
+            }
+        }
+
+        val runtime = factory.createFromSettings(settings, template, "galaxy-client", selector)
+        val status = runtime.provider.status("prompt-123")
+
+        assertEquals(ImageGenerationState.RUNNING, status.state)
+        assertEquals(
+            listOf("http://192.168.1.20:8188", "https://comfy.example.net"),
+            probed
+        )
+        assertEquals(listOf("https://comfy.example.net/queue"), transport.urls)
+        assertEquals(listOf("vpn-secret"), transport.bearerTokens)
+    }
+
+    @Test
+    fun createFromSettingsFailsClosedWhenNoEndpointIsReachable() {
+        val factory = ComfyUiRuntimeFactory(
+            jobs = InMemoryComfyUiJobStore(),
+            images = RecordingImageRepository(),
+            client = ComfyUiApiClient(FakeTransport(testPng()))
+        )
+        val settings = ComfyUiSavedSettings(
+            lanBaseUrl = "http://192.168.1.20:8188",
+            lanBearerToken = "lan-secret",
+            vpnBaseUrl = "https://comfy.example.net",
+            vpnBearerToken = "vpn-secret"
+        )
+        val selector = ComfyUiEndpointSelector {
+            ComfyUiProbeResult(false, 503, "ComfyUI unavailable")
+        }
+
+        val error = assertThrows(ComfyUiEndpointUnavailableException::class.java) {
+            runBlocking {
+                factory.createFromSettings(settings, template, "galaxy-client", selector)
+            }
+        }
+
+        assertFalse(error.message.orEmpty().contains("lan-secret"))
+        assertFalse(error.message.orEmpty().contains("vpn-secret"))
+    }
+
     private class FakeTransport(
         private val png: ByteArray
     ) : ComfyUiApiTransport {
         val responses = ArrayDeque<ComfyUiApiResponse>()
+        val urls = mutableListOf<String>()
+        val bearerTokens = mutableListOf<String?>()
         var binaryDownloads = 0
 
         override suspend fun execute(
@@ -80,7 +159,11 @@ class ComfyUiRuntimeFactoryTest {
             connectTimeoutMillis: Int,
             readTimeoutMillis: Int,
             maxResponseBytes: Int
-        ): ComfyUiApiResponse = responses.removeFirst()
+        ): ComfyUiApiResponse {
+            urls += url
+            bearerTokens += bearerToken
+            return responses.removeFirst()
+        }
 
         override suspend fun getBinary(
             url: String,
