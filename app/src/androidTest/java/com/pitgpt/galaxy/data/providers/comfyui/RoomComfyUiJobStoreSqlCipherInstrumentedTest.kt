@@ -85,8 +85,54 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         assertEquals(record.copy(cancelled = true), reopenedStore.get(record.promptId))
     }
 
-    private fun openDatabase(): GalaxyDatabase {
-        val keyBytes = Base64.encode(passphrase, Base64.NO_WRAP)
+    @Test
+    fun wrongPassphraseCannotReplaceExistingSqlCipherJobDatabase() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-wrong-key-123",
+            requestId = "galaxy-request-wrong-key-456",
+            createdAtEpochMillis = 1_794_230_400_000L
+        )
+
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        RoomComfyUiJobStore(firstDatabase.comfyUiJobDao()).put(record)
+        firstDatabase.close()
+        database = null
+
+        val wrongPassphrase = ByteArray(32) { (it + 1).toByte() }
+        var unexpectedDatabase: GalaxyDatabase? = null
+        val wrongKeyOpenFailure = try {
+            unexpectedDatabase = openDatabase(wrongPassphrase)
+            null
+        } catch (failure: Exception) {
+            failure
+        } finally {
+            runCatching { unexpectedDatabase?.close() }
+            wrongPassphrase.fill(0)
+        }
+
+        assertTrue(
+            "An existing SQLCipher database must reject a different passphrase",
+            wrongKeyOpenFailure != null
+        )
+
+        val databaseFile = context.getDatabasePath(databaseName)
+        assertTrue("The original encrypted database must remain present", databaseFile.isFile)
+        assertTrue("The original encrypted database must remain non-empty", databaseFile.length() > 0)
+
+        val reopenedDatabase = openDatabase()
+        database = reopenedDatabase
+        val reopenedStore = RoomComfyUiJobStore(reopenedDatabase.comfyUiJobDao())
+
+        assertEquals(
+            "A rejected wrong-key attempt must not destroy the previously stored job",
+            record,
+            reopenedStore.get(record.promptId)
+        )
+    }
+
+    private fun openDatabase(rawPassphrase: ByteArray = passphrase): GalaxyDatabase {
+        val keyBytes = Base64.encode(rawPassphrase, Base64.NO_WRAP)
         encodedPassphrases += keyBytes
         val opened = Room.databaseBuilder(context, GalaxyDatabase::class.java, databaseName)
             .openHelperFactory(SupportOpenHelperFactory(keyBytes, null, true))
