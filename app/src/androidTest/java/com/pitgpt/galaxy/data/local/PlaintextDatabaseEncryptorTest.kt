@@ -245,6 +245,53 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun restoresMovedWalWhenShmRemainsBeforePlaintextPromotion() {
+        createPlaintextDatabase()
+        val walDatabase = FrameworkSQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READWRITE
+        )
+
+        val pending = try {
+            assertTrue(walDatabase.enableWriteAheadLogging())
+            walDatabase.rawQuery("PRAGMA wal_autocheckpoint=0", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+            }
+            walDatabase.execSQL("INSERT INTO character_profiles VALUES ('wal-partial', 'WAL record')")
+
+            val wal = File(databaseFile.path + "-wal")
+            val shm = File(databaseFile.path + "-shm")
+            assertTrue(wal.exists() && wal.length() > 0)
+            assertTrue(shm.exists() && shm.length() > 0)
+
+            // Recreate the crash point between moving the WAL and SHM sidecars.
+            val backupWal = File(directory, "galaxy-test.db.plaintext-backup-wal")
+            assertTrue(wal.renameTo(backupWal))
+            assertFalse(wal.exists())
+            assertTrue(shm.exists())
+            assertFalse(File(directory, "galaxy-test.db.plaintext-backup-shm").exists())
+
+            encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        } finally {
+            walDatabase.close()
+        }
+
+        assertNotNull(pending)
+        assertFalse(encryptor.isPlaintextDatabase(databaseFile))
+        openEncrypted(databaseFile, databaseKey).use { encrypted ->
+            assertEquals(3L, countRows(encrypted, "character_profiles"))
+            assertEquals(3L, countRows(encrypted, "conversation_messages"))
+            assertEquals(2L, countRows(encrypted, "memory_items"))
+        }
+
+        encryptor.complete(pending)
+        assertFalse(File(directory, "galaxy-test.db.plaintext-backup").exists())
+        assertFalse(File(directory, "galaxy-test.db.plaintext-backup-wal").exists())
+        assertFalse(File(directory, "galaxy-test.db.plaintext-backup-shm").exists())
+    }
+
+    @Test
     fun rollbackRestoresOriginalPlaintextDatabase() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
