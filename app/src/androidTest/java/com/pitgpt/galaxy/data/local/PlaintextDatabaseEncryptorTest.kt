@@ -5,6 +5,7 @@ import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import net.zetetic.database.sqlcipher.SQLiteDatabase
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -364,6 +365,98 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun rollbackRefusesToOverwriteExistingFailedEncryptedCandidate() {
+        createPlaintextDatabase()
+        val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        assertNotNull(pending)
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+        SQLiteDatabase.openDatabase(
+            failedEncrypted.absolutePath,
+            Base64.encodeToString(databaseKey, Base64.NO_WRAP),
+            null,
+            SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.CREATE_IF_NECESSARY,
+            null
+        ).use { candidate ->
+            candidate.execSQL("CREATE TABLE retained_marker (id TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL)")
+            candidate.execSQL("INSERT INTO retained_marker VALUES ('previous', 'keep this encrypted candidate')")
+        }
+
+        val failedCandidateBytes = failedEncrypted.readBytes()
+        val activeEncryptedBytes = databaseFile.readBytes()
+        val plaintextBackupBytes = backup.readBytes()
+
+        var rollbackFailure: IllegalStateException? = null
+        try {
+            encryptor.rollback(pending)
+        } catch (failure: IllegalStateException) {
+            rollbackFailure = failure
+        }
+
+        assertNotNull("Rollback must fail closed when a previous encrypted candidate exists", rollbackFailure)
+        assertArrayEquals(failedCandidateBytes, failedEncrypted.readBytes())
+        assertArrayEquals(activeEncryptedBytes, databaseFile.readBytes())
+        assertArrayEquals(plaintextBackupBytes, backup.readBytes())
+
+        openEncrypted(failedEncrypted, databaseKey).use { candidate ->
+            assertEquals(1L, countRows(candidate, "retained_marker"))
+            candidate.rawQuery("SELECT value FROM retained_marker WHERE id = 'previous'", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("keep this encrypted candidate", cursor.getString(0))
+            }
+        }
+        openEncrypted(databaseFile, databaseKey).use { active ->
+            assertEquals(2L, countRows(active, "character_profiles"))
+            assertEquals(3L, countRows(active, "conversation_messages"))
+            assertEquals(2L, countRows(active, "memory_items"))
+        }
+        FrameworkSQLiteDatabase.openDatabase(
+            backup.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READONLY
+        ).use { restored ->
+            assertEquals(2L, countFrameworkRows(restored, "character_profiles"))
+            assertEquals(3L, countFrameworkRows(restored, "conversation_messages"))
+            assertEquals(2L, countFrameworkRows(restored, "memory_items"))
+        }
+    }
+
+    @Test
+    fun rollbackRefusesToOverwriteOrphanFailedSidecars() {
+        createPlaintextDatabase()
+        val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        assertNotNull(pending)
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+        val failedWal = File(failedEncrypted.path + "-wal")
+        val failedShm = File(failedEncrypted.path + "-shm")
+        val walBytes = byteArrayOf(0x11, 0x22, 0x33)
+        val shmBytes = byteArrayOf(0x44, 0x55, 0x66)
+        failedWal.writeBytes(walBytes)
+        failedShm.writeBytes(shmBytes)
+
+        val activeEncryptedBytes = databaseFile.readBytes()
+        val plaintextBackupBytes = backup.readBytes()
+
+        var rollbackFailure: IllegalStateException? = null
+        try {
+            encryptor.rollback(pending)
+        } catch (failure: IllegalStateException) {
+            rollbackFailure = failure
+        }
+
+        assertNotNull("Rollback must fail closed when orphan failed-candidate sidecars exist", rollbackFailure)
+        assertArrayEquals(walBytes, failedWal.readBytes())
+        assertArrayEquals(shmBytes, failedShm.readBytes())
+        assertArrayEquals(activeEncryptedBytes, databaseFile.readBytes())
+        assertArrayEquals(plaintextBackupBytes, backup.readBytes())
+        assertTrue(failedWal.exists())
+        assertTrue(failedShm.exists())
+    }
+
+    @Test
     fun wrongKeyDoesNotDeleteOriginalPlaintextRollbackCopy() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
@@ -439,7 +532,9 @@ class PlaintextDatabaseEncryptorTest {
             File(directory, "galaxy-test.db.plaintext-backup-wal"),
             File(directory, "galaxy-test.db.plaintext-backup-shm"),
             File(directory, "galaxy-test.db.encrypted-tmp"),
-            File(directory, "galaxy-test.db.encrypted-failed")
+            File(directory, "galaxy-test.db.encrypted-failed"),
+            File(directory, "galaxy-test.db.encrypted-failed-wal"),
+            File(directory, "galaxy-test.db.encrypted-failed-shm")
         ).forEach { it.delete() }
     }
 }
