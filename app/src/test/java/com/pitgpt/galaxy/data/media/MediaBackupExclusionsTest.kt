@@ -1,37 +1,47 @@
 package com.pitgpt.galaxy.data.media
 
+import android.content.pm.ApplicationInfo
 import com.pitgpt.galaxy.R
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 import org.xmlpull.v1.XmlPullParser
 
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class MediaBackupExclusionsTest {
     @Test
-    fun encryptedMediaDirectoryIsExcludedFromFullBackup() {
-        val exclusions = readExclusions(R.xml.backup_rules)
+    fun allDeviceBoundStateIsExcludedFromFullBackup() {
+        val exclusions = readExclusions(R.xml.backup_rules)["root"].orEmpty()
 
         assertTrue(
-            "Encrypted media must be excluded from Android full backup",
-            exclusions["root"]?.contains("file" to EncryptedMediaStore.MEDIA_DIRECTORY + "/") == true
+            "Device-bound credentials, database and encrypted media must be excluded from full backup",
+            exclusions.containsAll(deviceOnlyExclusions)
         )
     }
 
     @Test
-    fun encryptedMediaDirectoryIsExcludedFromCloudBackupAndDeviceTransfer() {
+    fun allDeviceBoundStateIsExcludedFromCloudBackupAndDeviceTransfer() {
         val exclusions = readExclusions(R.xml.data_extraction_rules)
-        val mediaExclusion = "file" to EncryptedMediaStore.MEDIA_DIRECTORY + "/"
+
+        listOf("cloud-backup", "device-transfer").forEach { scope ->
+            assertTrue(
+                "Device-bound credentials, database and encrypted media must be excluded from $scope",
+                exclusions[scope].orEmpty().containsAll(deviceOnlyExclusions)
+            )
+        }
+    }
+
+    @Test
+    fun applicationManifestKeepsBackupEnabledForItsExplicitExclusionRules() {
+        val applicationInfo = RuntimeEnvironment.getApplication().applicationInfo
 
         assertTrue(
-            "Encrypted media must be excluded from cloud backup",
-            exclusions["cloud-backup"]?.contains(mediaExclusion) == true
-        )
-        assertTrue(
-            "Encrypted media must be excluded from device-to-device transfer",
-            exclusions["device-transfer"]?.contains(mediaExclusion) == true
+            "The device-only backup policy expects backup to remain enabled with explicit exclusions",
+            applicationInfo.flags and ApplicationInfo.FLAG_ALLOW_BACKUP != 0
         )
     }
 
@@ -67,5 +77,15 @@ class MediaBackupExclusionsTest {
         }
 
         return exclusions.mapValues { it.value.toSet() }
+    }
+
+    private companion object {
+        val deviceOnlyExclusions = setOf(
+            "sharedpref" to "galaxy_secure_auth.xml",
+            "sharedpref" to "galaxy_provider_vault.xml",
+            "sharedpref" to "galaxy_database_key.xml",
+            "database" to ".",
+            "file" to "${EncryptedMediaStore.MEDIA_DIRECTORY}/"
+        )
     }
 }
