@@ -99,7 +99,7 @@ class ComfyUiJobStoreMigrationSqlCipherInstrumentedTest {
 
         db.execSQL(
             "INSERT INTO comfyui_jobs (promptId, requestId, createdAtEpochMillis, cancelled) VALUES (?, ?, ?, ?)",
-            arrayOf("prompt-1", "request-1", 1234L, 0)
+            arrayOf<Any?>("prompt-1", "request-1", 1234L, 0)
         )
         db.query(
             "SELECT requestId, cancelled FROM comfyui_jobs WHERE promptId = ?",
