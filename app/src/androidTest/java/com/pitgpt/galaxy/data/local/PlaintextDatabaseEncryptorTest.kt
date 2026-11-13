@@ -292,6 +292,56 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun recoversWhenRollbackStopsAfterMovingEncryptedDatabaseAside() {
+        createPlaintextDatabase()
+        val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        assertNotNull(pending)
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+        assertTrue("The plaintext rollback copy must exist before rollback starts", backup.exists())
+        assertTrue(databaseFile.renameTo(failedEncrypted))
+
+        // Rollback moves the encrypted database and any sidecars aside before restoring plaintext.
+        listOf("-wal", "-shm").forEach { suffix ->
+            val activeSidecar = File(databaseFile.path + suffix)
+            if (activeSidecar.exists()) {
+                assertTrue(activeSidecar.renameTo(File(failedEncrypted.path + suffix)))
+            }
+        }
+        assertFalse(databaseFile.exists())
+        assertFalse(encryptor.isPlaintextDatabase(failedEncrypted))
+
+        openEncrypted(failedEncrypted, databaseKey).use { encrypted ->
+            assertEquals(2L, countRows(encrypted, "character_profiles"))
+            assertEquals(3L, countRows(encrypted, "conversation_messages"))
+            assertEquals(2L, countRows(encrypted, "memory_items"))
+        }
+
+        // Recreate a process restart before rollback restores the plaintext backup.
+        val recovered = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+
+        assertNotNull(recovered)
+        assertTrue(databaseFile.exists())
+        assertFalse(encryptor.isPlaintextDatabase(databaseFile))
+        assertTrue("The previous encrypted candidate must remain available during recovery", failedEncrypted.exists())
+        openEncrypted(databaseFile, databaseKey).use { encrypted ->
+            assertEquals(2L, countRows(encrypted, "character_profiles"))
+            assertEquals(3L, countRows(encrypted, "conversation_messages"))
+            assertEquals(2L, countRows(encrypted, "memory_items"))
+        }
+        openEncrypted(failedEncrypted, databaseKey).use { encrypted ->
+            assertEquals(2L, countRows(encrypted, "character_profiles"))
+            assertEquals(3L, countRows(encrypted, "conversation_messages"))
+            assertEquals(2L, countRows(encrypted, "memory_items"))
+        }
+
+        encryptor.complete(recovered)
+        assertFalse("Successful recovery may remove the plaintext rollback copy", backup.exists())
+        assertTrue("The encrypted failed candidate is preserved; cleanup policy remains separate", failedEncrypted.exists())
+    }
+
+    @Test
     fun rollbackRestoresOriginalPlaintextDatabase() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
