@@ -153,22 +153,25 @@ class RoomGeneratedImageRepository(
 
     override suspend fun delete(assetId: String) {
         requireValidAssetId(assetId)
-        withContext(NonCancellable) {
-            val existing = dao.get(assetId)
-                ?: throw IllegalArgumentException("Generated image metadata was not found")
-            val removed = dao.delete(assetId)
-            check(removed == 1) { "Generated image metadata was not found" }
-            try {
-                withContext(ioDispatcher) {
-                    mediaStore.delete(assetId)
+        // Serialize deletion with save's duplicate-request check and metadata commit.
+        saveMutex.withLock {
+            withContext(NonCancellable) {
+                val existing = dao.get(assetId)
+                    ?: throw IllegalArgumentException("Generated image metadata was not found")
+                val removed = dao.delete(assetId)
+                check(removed == 1) { "Generated image metadata was not found" }
+                try {
+                    withContext(ioDispatcher) {
+                        mediaStore.delete(assetId)
+                    }
+                } catch (failure: Exception) {
+                    // If ciphertext removal fails, restore its metadata so the image remains
+                    // discoverable and can be opened or deleted again after the filesystem recovers.
+                    runCatching { dao.insert(existing) }
+                        .exceptionOrNull()
+                        ?.let(failure::addSuppressed)
+                    throw failure
                 }
-            } catch (failure: Exception) {
-                // If ciphertext removal fails, restore its metadata so the image remains
-                // discoverable and can be opened or deleted again after the filesystem recovers.
-                runCatching { dao.insert(existing) }
-                    .exceptionOrNull()
-                    ?.let(failure::addSuppressed)
-                throw failure
             }
         }
     }

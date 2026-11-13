@@ -15,8 +15,12 @@ import java.util.concurrent.Executors
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
 import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -200,6 +204,53 @@ class RoomGeneratedImageRepositoryTest {
         }
         assertTrue(mediaDirectory.listFiles().orEmpty().isEmpty())
         assertTrue(repository.listForConversation("conversation-a").isEmpty())
+    }
+
+    @Test
+    fun deleteWaitsForConcurrentSaveToFinishBeforeRemovingExistingAsset() = runBlocking {
+        val request = request("conversation-save-delete-race")
+        val bytes = ByteArray(40) { (it + 11).toByte() }
+        val saved = repository.save(request, asset(request.id, bytes), bytes)
+        val delegateDao = database.generatedImageDao()
+        val requestLookupEntered = CompletableDeferred<Unit>()
+        val allowRequestLookupToFinish = CompletableDeferred<Unit>()
+        val deleteLookupEntered = CompletableDeferred<Unit>()
+
+        val coordinatedDao = object : GeneratedImageDao by delegateDao {
+            override suspend fun getForRequest(requestId: String): GeneratedImageEntity? {
+                val existing = delegateDao.getForRequest(requestId)
+                requestLookupEntered.complete(Unit)
+                allowRequestLookupToFinish.await()
+                return existing
+            }
+
+            override suspend fun get(assetId: String): GeneratedImageEntity? {
+                deleteLookupEntered.complete(Unit)
+                return delegateDao.get(assetId)
+            }
+        }
+        val coordinatedRepository = RoomGeneratedImageRepository(coordinatedDao, mediaStore)
+        val saveJob = async {
+            coordinatedRepository.save(request, asset(request.id, bytes), bytes)
+        }
+        requestLookupEntered.await()
+
+        val deleteJob = launch {
+            coordinatedRepository.delete(saved.assetId)
+        }
+        yield()
+        assertFalse(
+            "Delete must wait while save is checking the existing request",
+            deleteLookupEntered.isCompleted
+        )
+
+        allowRequestLookupToFinish.complete(Unit)
+        assertEquals(saved, saveJob.await())
+        deleteJob.join()
+
+        assertTrue(deleteLookupEntered.isCompleted)
+        assertNull(delegateDao.get(saved.assetId))
+        assertFalse(mediaStore.contains(saved.assetId))
     }
 
     @Test
