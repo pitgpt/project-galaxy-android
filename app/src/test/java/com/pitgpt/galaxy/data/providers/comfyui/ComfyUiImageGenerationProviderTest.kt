@@ -1,6 +1,7 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.model.ImageGenerationState
 import java.io.IOException
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -104,6 +105,81 @@ class ComfyUiImageGenerationProviderTest {
             submissionStarted = true), store.get(expectedPromptId))
         assertEquals(expectedPromptId, activeProvider.submit(request))
         assertEquals(listOf("POST"), transport.methods)
+    }
+
+
+    @Test fun cancelledSubmissionReconcilesExistingPromptFromQueueWithoutResubmitting() = runBlocking {
+        val transport = FakeTransport().apply {
+            failure = CancellationException("simulated caller cancellation")
+        }
+        val store = InMemoryComfyUiJobStore()
+        val activeProvider = provider(transport, store)
+
+        val cancellation = assertThrows(ComfyUiSubmissionCancelledException::class.java) {
+            runBlocking { activeProvider.submit(request) }
+        }
+        val expectedPromptId = stablePromptId(request)
+        assertEquals(expectedPromptId, cancellation.promptId)
+
+        transport.failure = null
+        transport.responses.add(
+            ComfyUiApiResponse(
+                200,
+                """{"queue_running":[],"queue_pending":[[1,"$expectedPromptId",{},[],[]]]}"""
+            )
+        )
+
+        val recovered = activeProvider.status(expectedPromptId)
+
+        assertEquals(ImageGenerationState.QUEUED, recovered.state)
+        assertEquals(expectedPromptId, activeProvider.submit(request))
+        assertEquals(listOf("POST", "GET"), transport.methods)
+        assertEquals(
+            listOf(
+                "http://192.168.1.20:8188/prompt",
+                "http://192.168.1.20:8188/queue"
+            ),
+            transport.urls
+        )
+    }
+
+    @Test fun cancelledSubmissionReconcilesQueueMissThroughHistoryWithoutResubmitting() = runBlocking {
+        val transport = FakeTransport().apply {
+            failure = CancellationException("simulated caller cancellation")
+        }
+        val store = InMemoryComfyUiJobStore()
+        val activeProvider = provider(transport, store)
+
+        val cancellation = assertThrows(ComfyUiSubmissionCancelledException::class.java) {
+            runBlocking { activeProvider.submit(request) }
+        }
+        val expectedPromptId = stablePromptId(request)
+        assertEquals(expectedPromptId, cancellation.promptId)
+
+        transport.failure = null
+        transport.responses.add(
+            ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}""")
+        )
+        transport.responses.add(
+            ComfyUiApiResponse(
+                200,
+                """{"$expectedPromptId":{"status":{"status_str":"success","completed":true},"outputs":{}}}"""
+            )
+        )
+
+        val recovered = activeProvider.status(expectedPromptId)
+
+        assertEquals(ImageGenerationState.COMPLETED, recovered.state)
+        assertEquals(expectedPromptId, activeProvider.submit(request))
+        assertEquals(listOf("POST", "GET", "GET"), transport.methods)
+        assertEquals(
+            listOf(
+                "http://192.168.1.20:8188/prompt",
+                "http://192.168.1.20:8188/queue",
+                "http://192.168.1.20:8188/history/$expectedPromptId"
+            ),
+            transport.urls
+        )
     }
 
     @Test fun localIntentWriteFailurePreventsRemoteSubmission() {
