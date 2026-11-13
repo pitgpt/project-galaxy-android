@@ -110,7 +110,11 @@ internal class PlaintextDatabaseEncryptor {
     fun rollback(pending: PendingMigration?) {
         if (pending == null) return
         val failedEncrypted = File(pending.original.parentFile, "${pending.original.name}.encrypted-failed")
-        if (failedEncrypted.exists()) check(failedEncrypted.delete())
+        val failedWal = sidecar(failedEncrypted, "-wal")
+        val failedShm = sidecar(failedEncrypted, "-shm")
+        check(!failedEncrypted.exists() && !failedWal.exists() && !failedShm.exists()) {
+            "A previous failed encrypted database candidate or sidecar exists; refusing to overwrite it during rollback."
+        }
         if (pending.original.exists()) {
             check(pending.original.renameTo(failedEncrypted)) {
                 "Could not preserve the failed encrypted database during rollback."
