@@ -40,11 +40,7 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
     fun tearDown() {
         runCatching { database?.close() }
         if (::context.isInitialized && ::databaseName.isInitialized) {
-            val file = context.getDatabasePath(databaseName)
-            file.delete()
-            File(file.path + "-wal").delete()
-            File(file.path + "-shm").delete()
-            File(file.path + "-journal").delete()
+            deleteDatabaseFiles(databaseName)
         }
         encodedPassphrases.forEach { it.fill(0) }
         encodedPassphrases.clear()
@@ -83,6 +79,61 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         val reopenedStore = RoomComfyUiJobStore(reopenedDatabase.comfyUiJobDao())
 
         assertEquals(record.copy(cancelled = true), reopenedStore.get(record.promptId))
+    }
+
+    @Test
+    fun committedWalFramesRecoverWithoutTheSharedMemorySidecar() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-wal-recovery-123",
+            requestId = "galaxy-request-wal-recovery-456",
+            createdAtEpochMillis = 1_794_230_400_000L
+        )
+
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val sqlDatabase = firstDatabase.openHelper.writableDatabase
+        val journalMode = sqlDatabase.query("PRAGMA journal_mode").use { cursor ->
+            assertTrue("The SQLCipher helper must expose a journal mode", cursor.moveToFirst())
+            cursor.getString(0)
+        }
+        assertEquals("The recovery scenario requires WAL mode", "wal", journalMode.lowercase())
+
+        RoomComfyUiJobStore(firstDatabase.comfyUiJobDao()).put(record)
+
+        val sourceFile = context.getDatabasePath(databaseName)
+        val sourceWal = File(sourceFile.path + "-wal")
+        assertTrue("A committed WAL must exist before the database is closed", sourceWal.isFile)
+        assertTrue("The WAL must contain at least one committed frame", sourceWal.length() > 32L)
+        assertFalse(
+            "SQLCipher WAL frames must not expose persisted request identifiers",
+            containsBytes(sourceWal.readBytes(), record.requestId.toByteArray(Charsets.UTF_8))
+        )
+
+        // A process restart retains the database and WAL, but SQLite rebuilds the transient
+        // shared-memory index. Copy that durable file set without the -shm sidecar.
+        val snapshotName = "$databaseName-crash-snapshot"
+        val snapshotFile = context.getDatabasePath(snapshotName)
+        val snapshotWal = File(snapshotFile.path + "-wal")
+        sourceFile.copyTo(snapshotFile, overwrite = true)
+        sourceWal.copyTo(snapshotWal, overwrite = true)
+        assertFalse(
+            "The crash snapshot must not contain SQLite's transient shared-memory sidecar",
+            File(snapshotFile.path + "-shm").exists()
+        )
+
+        var snapshotDatabase: GalaxyDatabase? = null
+        try {
+            snapshotDatabase = openDatabase(snapshotName)
+            val recoveredStore = RoomComfyUiJobStore(snapshotDatabase.comfyUiJobDao())
+            assertEquals(
+                "Committed SQLCipher WAL frames must recover the durable ComfyUI job",
+                record,
+                recoveredStore.get(record.promptId)
+            )
+        } finally {
+            runCatching { snapshotDatabase?.close() }
+            deleteDatabaseFiles(snapshotName)
+        }
     }
 
     @Test
@@ -173,10 +224,13 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         )
     }
 
-    private fun openDatabase(rawPassphrase: ByteArray = passphrase): GalaxyDatabase {
+    private fun openDatabase(rawPassphrase: ByteArray = passphrase): GalaxyDatabase =
+        openDatabase(databaseName, rawPassphrase)
+
+    private fun openDatabase(name: String, rawPassphrase: ByteArray = passphrase): GalaxyDatabase {
         val keyBytes = Base64.encode(rawPassphrase, Base64.NO_WRAP)
         encodedPassphrases += keyBytes
-        val opened = Room.databaseBuilder(context, GalaxyDatabase::class.java, databaseName)
+        val opened = Room.databaseBuilder(context, GalaxyDatabase::class.java, name)
             .openHelperFactory(SupportOpenHelperFactory(keyBytes, null, true))
             .build()
         try {
@@ -186,6 +240,21 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             keyBytes.fill(0)
             runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
             throw failure
+        }
+    }
+
+    private fun deleteDatabaseFiles(name: String) {
+        val file = context.getDatabasePath(name)
+        file.delete()
+        File(file.path + "-wal").delete()
+        File(file.path + "-shm").delete()
+        File(file.path + "-journal").delete()
+    }
+
+    private fun containsBytes(container: ByteArray, candidate: ByteArray): Boolean {
+        if (candidate.isEmpty() || candidate.size > container.size) return false
+        return (0..container.size - candidate.size).any { start ->
+            candidate.indices.all { offset -> container[start + offset] == candidate[offset] }
         }
     }
 }
