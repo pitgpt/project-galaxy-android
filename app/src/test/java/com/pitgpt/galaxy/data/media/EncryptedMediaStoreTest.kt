@@ -1,5 +1,6 @@
 package com.pitgpt.galaxy.data.media
 
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileFilter
 import java.nio.file.Files
@@ -86,6 +87,32 @@ class EncryptedMediaStoreTest {
         assertThrows(IllegalArgumentException::class.java) {
             store.save("asset_06", "image/png", ByteArray(1025))
         }
+    }
+
+    @Test
+    fun boundedReadAcceptsAStreamAtTheExactLimit() {
+        val expected = ByteArray(64) { it.toByte() }
+        val input = ByteArrayInputStream(expected)
+
+        assertArrayEquals(expected, EncryptedMediaStore.readBounded(input, expected.size))
+        assertEquals(0, input.available())
+    }
+
+    @Test
+    fun boundedReadRejectsGrowthWithoutReadingTheEntireStream() {
+        val maximumBytes = 64
+        val input = ByteArrayInputStream(ByteArray(maximumBytes + 2))
+
+        val failure = assertThrows(IllegalArgumentException::class.java) {
+            EncryptedMediaStore.readBounded(input, maximumBytes)
+        }
+
+        assertTrue(failure.message?.contains("size limit") == true)
+        assertEquals(
+            "The reader may consume only the configured limit plus one detection byte",
+            1,
+            input.available()
+        )
     }
 
     @Test
