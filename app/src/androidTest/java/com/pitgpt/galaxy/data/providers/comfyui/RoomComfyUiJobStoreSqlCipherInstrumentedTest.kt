@@ -131,6 +131,48 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         )
     }
 
+    @Test
+    fun duplicatePromptIdIsRejectedWithoutOverwritingPersistedJob() = runBlocking {
+        val original = ComfyUiJobRecord(
+            promptId = "prompt-duplicate-123",
+            requestId = "galaxy-request-original-456",
+            createdAtEpochMillis = 1_794_230_400_000L
+        )
+
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val firstStore = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+        firstStore.put(original)
+
+        val duplicateFailure = runCatching {
+            firstStore.put(
+                original.copy(
+                    requestId = "galaxy-request-replacement-789",
+                    createdAtEpochMillis = original.createdAtEpochMillis + 1
+                )
+            )
+        }.exceptionOrNull()
+
+        assertTrue(
+            "A duplicate prompt ID must be rejected by the SQLCipher-backed primary key",
+            duplicateFailure != null
+        )
+        assertEquals(original, firstStore.get(original.promptId))
+
+        firstDatabase.close()
+        database = null
+
+        val reopenedDatabase = openDatabase()
+        database = reopenedDatabase
+        val reopenedStore = RoomComfyUiJobStore(reopenedDatabase.comfyUiJobDao())
+
+        assertEquals(
+            "A rejected duplicate must not replace the original durable request correlation",
+            original,
+            reopenedStore.get(original.promptId)
+        )
+    }
+
     private fun openDatabase(rawPassphrase: ByteArray = passphrase): GalaxyDatabase {
         val keyBytes = Base64.encode(rawPassphrase, Base64.NO_WRAP)
         encodedPassphrases += keyBytes
