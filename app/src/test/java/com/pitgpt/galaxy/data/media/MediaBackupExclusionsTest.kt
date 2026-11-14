@@ -2,6 +2,8 @@ package com.pitgpt.galaxy.data.media
 
 import android.content.pm.ApplicationInfo
 import com.pitgpt.galaxy.R
+import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -9,6 +11,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.xmlpull.v1.XmlPullParser
+import org.xmlpull.v1.XmlPullParserFactory
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -42,6 +45,22 @@ class MediaBackupExclusionsTest {
         assertTrue(
             "The device-only backup policy expects backup to remain enabled with explicit exclusions",
             applicationInfo.flags and ApplicationInfo.FLAG_ALLOW_BACKUP != 0
+        )
+    }
+
+    @Test
+    fun manifestReferencesBothBackupRuleResources() {
+        val attributes = readManifestApplicationAttributes()
+
+        assertEquals(
+            "Legacy full-backup exclusions must be attached to the application",
+            "@xml/backup_rules",
+            attributes["fullBackupContent"]
+        )
+        assertEquals(
+            "Android 12+ extraction exclusions must be attached to the application",
+            "@xml/data_extraction_rules",
+            attributes["dataExtractionRules"]
         )
     }
 
@@ -79,7 +98,34 @@ class MediaBackupExclusionsTest {
         return exclusions.mapValues { it.value.toSet() }
     }
 
+    private fun readManifestApplicationAttributes(): Map<String, String?> {
+        val manifestFile = listOf(
+            File("src/main/AndroidManifest.xml"),
+            File("app/src/main/AndroidManifest.xml")
+        ).firstOrNull(File::isFile) ?: throw AssertionError(
+            "Could not locate the app module's src/main/AndroidManifest.xml from ${System.getProperty("user.dir")}"
+        )
+        val parser = XmlPullParserFactory.newInstance().newPullParser().apply {
+            setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
+        }
+
+        return manifestFile.inputStream().use { input ->
+            parser.setInput(input, Charsets.UTF_8.name())
+            while (parser.eventType != XmlPullParser.END_DOCUMENT) {
+                if (parser.eventType == XmlPullParser.START_TAG && parser.name == "application") {
+                    return@use listOf("fullBackupContent", "dataExtractionRules").associateWith { name ->
+                        parser.getAttributeValue(ANDROID_NAMESPACE, name)
+                    }
+                }
+                parser.next()
+            }
+            throw AssertionError("The application element is missing from the Android manifest")
+        }
+    }
+
     private companion object {
+        const val ANDROID_NAMESPACE = "http://schemas.android.com/apk/res/android"
+
         val deviceOnlyExclusions = setOf(
             "sharedpref" to "galaxy_secure_auth.xml",
             "sharedpref" to "galaxy_provider_vault.xml",
