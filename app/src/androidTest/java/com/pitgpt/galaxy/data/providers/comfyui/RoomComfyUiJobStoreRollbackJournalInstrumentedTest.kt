@@ -76,7 +76,10 @@ class RoomComfyUiJobStoreRollbackJournalInstrumentedTest {
             assertTrue("The SQLCipher database must report a journal mode", cursor.moveToFirst())
             cursor.getString(0)
         }
-        assertEquals("The regression requires SQLite rollback-journal mode", "truncate", journalMode.lowercase())
+        assertTrue(
+            "The regression requires a non-WAL SQLite rollback-journal mode",
+            journalMode.lowercase() in setOf("delete", "truncate", "persist")
+        )
 
         val databaseFile = context.getDatabasePath(databaseName)
         val journalFile = File(databaseFile.path + "-journal")
