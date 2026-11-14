@@ -1,9 +1,2 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application>
-        <service
-            android:name="com.pitgpt.galaxy.data.providers.comfyui.SqlCipherHotJournalCrashService"
-            android:exported="false"
-            android:process=":sqlcipher_hot_journal_crash" />
-    </application>
-</manifest>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
