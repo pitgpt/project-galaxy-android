@@ -354,7 +354,11 @@ internal class PlaintextDatabaseEncryptor {
             }
             Cursor.FIELD_TYPE_FLOAT -> {
                 digest.update(2.toByte())
-                updateLong(digest, java.lang.Double.doubleToLongBits(cursor.getDouble(index)))
+                // SQLite sorts -0.0 and +0.0 as equal; normalize zero so tie order cannot
+                // make the digest depend on insertion order or hidden rowid.
+                val value = cursor.getDouble(index)
+                val canonicalValue = if (value == 0.0) 0.0 else value
+                updateLong(digest, java.lang.Double.doubleToLongBits(canonicalValue))
             }
             Cursor.FIELD_TYPE_STRING -> {
                 digest.update(3.toByte())
