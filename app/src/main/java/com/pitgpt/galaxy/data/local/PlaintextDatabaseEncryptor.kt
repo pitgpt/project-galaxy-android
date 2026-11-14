@@ -1,8 +1,11 @@
 package com.pitgpt.galaxy.data.local
 
+import android.database.Cursor
 import android.util.Base64
 import net.zetetic.database.sqlcipher.SQLiteDatabase
 import java.io.File
+import java.nio.ByteBuffer
+import java.security.MessageDigest
 
 /**
  * Converts the existing Room SQLite database to SQLCipher without ever overwriting the only
@@ -20,7 +23,8 @@ internal class PlaintextDatabaseEncryptor {
     internal data class DatabaseSnapshot(
         val rowCounts: Map<String, Long>,
         val userVersion: Int,
-        val applicationId: Int
+        val applicationId: Int,
+        val contentDigest: String
     )
 
     fun isPlaintextDatabase(database: File): Boolean = hasSqliteHeader(database)
@@ -202,7 +206,7 @@ internal class PlaintextDatabaseEncryptor {
             verifyIntegrity(database, "Encrypted Galaxy database")
             expectedSnapshot?.let { expected ->
                 check(readSnapshot(database) == expected) {
-                    "Encrypted Galaxy database metadata or row counts do not match the original database."
+                    "Encrypted Galaxy database metadata or contents do not match the original database."
                 }
             }
         } finally {
@@ -231,11 +235,15 @@ internal class PlaintextDatabaseEncryptor {
         }
     }
 
-    private fun readSnapshot(database: SQLiteDatabase) = DatabaseSnapshot(
-        rowCounts = readRowCounts(database),
-        userVersion = readPragmaInt(database, "user_version"),
-        applicationId = readPragmaInt(database, "application_id")
-    )
+    private fun readSnapshot(database: SQLiteDatabase): DatabaseSnapshot {
+        val rowCounts = readRowCounts(database)
+        return DatabaseSnapshot(
+            rowCounts = rowCounts,
+            userVersion = readPragmaInt(database, "user_version"),
+            applicationId = readPragmaInt(database, "application_id"),
+            contentDigest = readContentDigest(database, rowCounts.keys)
+        )
+    }
 
     private fun readPragmaInt(database: SQLiteDatabase, pragma: String): Int =
         database.rawQuery("PRAGMA $pragma;", null).use { cursor ->
@@ -246,7 +254,7 @@ internal class PlaintextDatabaseEncryptor {
     private fun readRowCounts(database: SQLiteDatabase): Map<String, Long> {
         val tables = mutableListOf<String>()
         database.rawQuery(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%';",
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence') ORDER BY name COLLATE BINARY;",
             null
         ).use { cursor ->
             while (cursor.moveToNext()) tables += cursor.getString(0)
@@ -256,6 +264,142 @@ internal class PlaintextDatabaseEncryptor {
             database.rawQuery("SELECT COUNT(*) FROM \"$safeName\";", null).use { cursor ->
                 check(cursor.moveToFirst())
                 cursor.getLong(0)
+            }
+        }
+    }
+
+    /**
+     * Hashes schema definitions and every stored row using a canonical, typed encoding.
+     * Rows are ordered by all columns with explicit BINARY collation so export/reopen does not
+     * depend on rowid allocation or a table's declared text collation.
+     */
+    private fun readContentDigest(database: SQLiteDatabase, tables: Set<String>): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        updateString(digest, "galaxy-sqlcipher-snapshot-v1")
+
+        database.rawQuery(
+            """
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence'
+            ORDER BY type COLLATE BINARY, name COLLATE BINARY;
+            """.trimIndent(),
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                digest.update(0x53.toByte())
+                for (index in 0 until cursor.columnCount) {
+                    updateNullableString(
+                        digest,
+                        if (cursor.isNull(index)) null else cursor.getString(index)
+                    )
+                }
+            }
+        }
+
+        tables.sorted().forEach { table ->
+            val columns = readColumnNames(database, table)
+            val quotedTable = quoteIdentifier(table)
+            val orderBy = columns.joinToString(", ") { column ->
+                val quotedColumn = quoteIdentifier(column)
+                "typeof(" + quotedColumn + ") COLLATE BINARY, " + quotedColumn + " COLLATE BINARY"
+            }
+
+            digest.update(0x54.toByte())
+            updateString(digest, table)
+            updateInt(digest, columns.size)
+            columns.forEach { updateString(digest, it) }
+
+            database.rawQuery(
+                "SELECT * FROM " + quotedTable + " ORDER BY " + orderBy + ";",
+                null
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    digest.update(0x52.toByte())
+                    for (index in 0 until cursor.columnCount) {
+                        updateCursorValue(digest, cursor, index)
+                    }
+                    digest.update(0x45.toByte())
+                }
+            }
+            digest.update(0x74.toByte())
+        }
+
+        return digest.digest().toHex()
+    }
+
+    private fun readColumnNames(database: SQLiteDatabase, table: String): List<String> {
+        val columns = mutableListOf<String>()
+        database.rawQuery(
+            "PRAGMA table_info(" + quoteIdentifier(table) + ");",
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) columns += cursor.getString(1)
+        }
+        check(columns.isNotEmpty()) {
+            "Could not read columns for a Galaxy database snapshot table."
+        }
+        return columns
+    }
+
+    private fun quoteIdentifier(identifier: String): String =
+        "\"" + identifier.replace("\"", "\"\"") + "\""
+
+    private fun updateCursorValue(digest: MessageDigest, cursor: Cursor, index: Int) {
+        when (cursor.getType(index)) {
+            Cursor.FIELD_TYPE_NULL -> digest.update(0.toByte())
+            Cursor.FIELD_TYPE_INTEGER -> {
+                digest.update(1.toByte())
+                updateLong(digest, cursor.getLong(index))
+            }
+            Cursor.FIELD_TYPE_FLOAT -> {
+                digest.update(2.toByte())
+                updateLong(digest, java.lang.Double.doubleToLongBits(cursor.getDouble(index)))
+            }
+            Cursor.FIELD_TYPE_STRING -> {
+                digest.update(3.toByte())
+                updateBytes(digest, cursor.getString(index).toByteArray(Charsets.UTF_8))
+            }
+            Cursor.FIELD_TYPE_BLOB -> {
+                digest.update(4.toByte())
+                updateBytes(digest, cursor.getBlob(index))
+            }
+            else -> error("Unsupported SQLite value type in a Galaxy database snapshot.")
+        }
+    }
+
+    private fun updateNullableString(digest: MessageDigest, value: String?) {
+        if (value == null) {
+            digest.update(0.toByte())
+        } else {
+            digest.update(1.toByte())
+            updateString(digest, value)
+        }
+    }
+
+    private fun updateString(digest: MessageDigest, value: String) =
+        updateBytes(digest, value.toByteArray(Charsets.UTF_8))
+
+    private fun updateBytes(digest: MessageDigest, value: ByteArray) {
+        updateInt(digest, value.size)
+        digest.update(value)
+    }
+
+    private fun updateInt(digest: MessageDigest, value: Int) {
+        digest.update(ByteBuffer.allocate(4).putInt(value).array())
+    }
+
+    private fun updateLong(digest: MessageDigest, value: Long) {
+        digest.update(ByteBuffer.allocate(8).putLong(value).array())
+    }
+
+    private fun ByteArray.toHex(): String {
+        val alphabet = "0123456789abcdef"
+        return buildString(size * 2) {
+            for (byte in this@toHex) {
+                val value = byte.toInt() and 0xff
+                append(alphabet[value ushr 4])
+                append(alphabet[value and 0x0f])
             }
         }
     }
