@@ -678,6 +678,88 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun rollbackRefusesWhenPlaintextBackupSequenceChangesWithoutChangingRowCounts() {
+        val digestDirectory = File(directory, "digest-sequence-rollback").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val plaintextDatabase = File(digestDirectory, "sequence.db")
+
+        try {
+            createSequenceDigestDatabase(plaintextDatabase, sequenceValue = 5L)
+            val pending = checkNotNull(encryptor.migrateIfNeeded(plaintextDatabase, databaseKey))
+            val backup = File(digestDirectory, "${plaintextDatabase.name}.plaintext-backup")
+            val activeEncryptedBytes = plaintextDatabase.readBytes()
+
+            FrameworkSQLiteDatabase.openDatabase(
+                backup.absolutePath,
+                null,
+                FrameworkSQLiteDatabase.OPEN_READWRITE
+            ).use { plaintextBackup ->
+                assertEquals(1L, countFrameworkRows(plaintextBackup, "sequence_probe"))
+                assertEquals(1L, countFrameworkRows(plaintextBackup, "sqlite_sequence"))
+                plaintextBackup.rawQuery(
+                    "SELECT seq FROM sqlite_sequence WHERE name = 'sequence_probe'",
+                    null
+                ).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(5L, cursor.getLong(0))
+                }
+
+                plaintextBackup.execSQL(
+                    "UPDATE sqlite_sequence SET seq = 9 WHERE name = 'sequence_probe'"
+                )
+                assertEquals(1L, countFrameworkRows(plaintextBackup, "sequence_probe"))
+                assertEquals(1L, countFrameworkRows(plaintextBackup, "sqlite_sequence"))
+            }
+
+            var rollbackFailure: IllegalStateException? = null
+            try {
+                encryptor.rollback(pending)
+            } catch (failure: IllegalStateException) {
+                rollbackFailure = failure
+            }
+
+            assertNotNull(
+                "Rollback must detect sqlite_sequence changes even when row counts remain unchanged",
+                rollbackFailure
+            )
+            assertTrue(rollbackFailure?.message?.contains("verified migration snapshot") == true)
+            assertArrayEquals(activeEncryptedBytes, plaintextDatabase.readBytes())
+            assertTrue("The modified plaintext backup must be preserved", backup.isFile)
+
+            FrameworkSQLiteDatabase.openDatabase(
+                backup.absolutePath,
+                null,
+                FrameworkSQLiteDatabase.OPEN_READONLY
+            ).use { modifiedBackup ->
+                assertEquals(1L, countFrameworkRows(modifiedBackup, "sequence_probe"))
+                assertEquals(1L, countFrameworkRows(modifiedBackup, "sqlite_sequence"))
+                modifiedBackup.rawQuery(
+                    "SELECT seq FROM sqlite_sequence WHERE name = 'sequence_probe'",
+                    null
+                ).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(9L, cursor.getLong(0))
+                }
+            }
+
+            openEncrypted(plaintextDatabase, databaseKey).use { active ->
+                assertEquals(1L, countRows(active, "sequence_probe"))
+                active.rawQuery(
+                    "SELECT seq FROM sqlite_sequence WHERE name = 'sequence_probe'",
+                    null
+                ).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(5L, cursor.getLong(0))
+                }
+            }
+        } finally {
+            digestDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun wrongKeyDoesNotDeleteOriginalPlaintextRollbackCopy() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
@@ -709,6 +791,24 @@ class PlaintextDatabaseEncryptorTest {
             db.execSQL("INSERT INTO sequence_values(payload) VALUES (?)", arrayOf<Any?>("first"))
             db.execSQL("INSERT INTO sequence_values(payload) VALUES (?)", arrayOf<Any?>("second"))
             db.execSQL("DELETE FROM sequence_values WHERE id = 2")
+            db.version = 2
+            db.execSQL("PRAGMA application_id = 1195461720")
+        }
+    }
+
+    private fun createSequenceDigestDatabase(file: File, sequenceValue: Long) {
+        FrameworkSQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL(
+                "CREATE TABLE sequence_probe (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL)"
+            )
+            db.execSQL(
+                "INSERT INTO sequence_probe(payload) VALUES (?)",
+                arrayOf<Any?>("stable row")
+            )
+            db.execSQL(
+                "UPDATE sqlite_sequence SET seq = ? WHERE name = 'sequence_probe'",
+                arrayOf<Any?>(sequenceValue)
+            )
             db.version = 2
             db.execSQL("PRAGMA application_id = 1195461720")
         }
