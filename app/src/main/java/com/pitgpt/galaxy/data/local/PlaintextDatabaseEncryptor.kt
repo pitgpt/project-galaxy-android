@@ -36,8 +36,7 @@ internal class PlaintextDatabaseEncryptor {
 
         // Recover sidecars if the process stopped after moving them but before renaming the DB.
         if (database.exists() && plaintext && !backup.exists()) {
-            restoreSidecar(sidecar(backup, "-wal"), sidecar(database, "-wal"))
-            restoreSidecar(sidecar(backup, "-shm"), sidecar(database, "-shm"))
+            restoreSidecars(backup, database)
         }
 
         if (backup.exists() && !database.exists()) {
@@ -73,20 +72,15 @@ internal class PlaintextDatabaseEncryptor {
         val expectedSnapshot = exportPlaintext(database, temporary, databaseKey)
         verifyEncrypted(temporary, databaseKey, expectedSnapshot)
 
-        val backupWal = sidecar(backup, "-wal")
-        val backupShm = sidecar(backup, "-shm")
         try {
-            moveSidecar(sidecar(database, "-wal"), backupWal)
-            moveSidecar(sidecar(database, "-shm"), backupShm)
+            moveSidecars(database, backup)
         } catch (failure: Exception) {
-            restoreSidecar(backupWal, sidecar(database, "-wal"))
-            restoreSidecar(backupShm, sidecar(database, "-shm"))
+            restoreSidecars(backup, database)
             throw failure
         }
 
         if (!database.renameTo(backup)) {
-            restoreSidecar(backupWal, sidecar(database, "-wal"))
-            restoreSidecar(backupShm, sidecar(database, "-shm"))
+            restoreSidecars(backup, database)
             error("Could not preserve the original Galaxy database before promotion.")
         }
 
@@ -94,8 +88,7 @@ internal class PlaintextDatabaseEncryptor {
             check(backup.renameTo(database)) {
                 "Encrypted database promotion failed and the original database needs manual recovery."
             }
-            restoreSidecar(backupWal, sidecar(database, "-wal"))
-            restoreSidecar(backupShm, sidecar(database, "-shm"))
+            restoreSidecars(backup, database)
             error("Could not promote the encrypted Galaxy database. Original data was restored.")
         }
 
@@ -104,11 +97,7 @@ internal class PlaintextDatabaseEncryptor {
 
     fun complete(pending: PendingMigration?) {
         if (pending == null) return
-        listOf(sidecar(pending.backup, "-wal"), sidecar(pending.backup, "-shm")).forEach { file ->
-            check(!file.exists() || file.delete()) {
-                "Could not remove a plaintext Galaxy database sidecar."
-            }
-        }
+        deleteSidecars(pending.backup, "Could not remove a plaintext Galaxy database sidecar.")
         check(pending.backup.delete()) {
             "The encrypted Galaxy database is active, but its plaintext rollback copy could not be removed."
         }
@@ -117,9 +106,10 @@ internal class PlaintextDatabaseEncryptor {
     fun rollback(pending: PendingMigration?) {
         if (pending == null) return
         val failedEncrypted = File(pending.original.parentFile, "${pending.original.name}.encrypted-failed")
-        val failedWal = sidecar(failedEncrypted, "-wal")
-        val failedShm = sidecar(failedEncrypted, "-shm")
-        check(!failedEncrypted.exists() && !failedWal.exists() && !failedShm.exists()) {
+        check(
+            !failedEncrypted.exists() &&
+                SIDECAR_SUFFIXES.none { sidecar(failedEncrypted, it).exists() }
+        ) {
             "A previous failed encrypted database candidate or sidecar exists; refusing to overwrite it during rollback."
         }
         val backupSnapshot = readPlaintextSnapshot(pending.backup)
@@ -130,17 +120,14 @@ internal class PlaintextDatabaseEncryptor {
             check(pending.original.renameTo(failedEncrypted)) {
                 "Could not preserve the failed encrypted database during rollback."
             }
-            moveSidecar(sidecar(pending.original, "-wal"), sidecar(failedEncrypted, "-wal"))
-            moveSidecar(sidecar(pending.original, "-shm"), sidecar(failedEncrypted, "-shm"))
+            moveSidecars(pending.original, failedEncrypted)
         }
         check(pending.backup.renameTo(pending.original)) {
             "Could not restore the original plaintext Galaxy database."
         }
-        restoreSidecar(sidecar(pending.backup, "-wal"), sidecar(pending.original, "-wal"))
-        restoreSidecar(sidecar(pending.backup, "-shm"), sidecar(pending.original, "-shm"))
+        restoreSidecars(pending.backup, pending.original)
         failedEncrypted.delete()
-        sidecar(failedEncrypted, "-wal").delete()
-        sidecar(failedEncrypted, "-shm").delete()
+        deleteSidecars(failedEncrypted, "Could not remove a failed encrypted Galaxy database sidecar.")
     }
 
     private fun exportPlaintext(sourceFile: File, encryptedFile: File, databaseKey: ByteArray): DatabaseSnapshot {
@@ -418,6 +405,25 @@ internal class PlaintextDatabaseEncryptor {
 
     private fun sidecar(database: File, suffix: String) = File(database.parentFile, database.name + suffix)
 
+    private fun moveSidecars(sourceDatabase: File, destinationDatabase: File) {
+        SIDECAR_SUFFIXES.forEach { suffix ->
+            moveSidecar(sidecar(sourceDatabase, suffix), sidecar(destinationDatabase, suffix))
+        }
+    }
+
+    private fun restoreSidecars(sourceDatabase: File, destinationDatabase: File) {
+        SIDECAR_SUFFIXES.forEach { suffix ->
+            restoreSidecar(sidecar(sourceDatabase, suffix), sidecar(destinationDatabase, suffix))
+        }
+    }
+
+    private fun deleteSidecars(database: File, errorMessage: String) {
+        SIDECAR_SUFFIXES.forEach { suffix ->
+            val file = sidecar(database, suffix)
+            check(!file.exists() || file.delete()) { errorMessage }
+        }
+    }
+
     private fun moveSidecar(source: File, destination: File) {
         if (source.exists()) {
             check(source.renameTo(destination)) { "Could not preserve a Galaxy database sidecar." }
@@ -429,6 +435,7 @@ internal class PlaintextDatabaseEncryptor {
     }
 
     private companion object {
+        val SIDECAR_SUFFIXES = listOf("-wal", "-shm", "-journal")
         val SQLITE_HEADER = "SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)
     }
 }
