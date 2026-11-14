@@ -8,7 +8,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
-import com.pitgpt.galaxy.ui.latestRecoverableImageGenerationRequest
+import com.pitgpt.galaxy.ui.loadLatestRecoverableImageGenerationRequest
 import java.io.File
 import java.io.FileInputStream
 import java.security.SecureRandom
@@ -120,10 +120,10 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
 
         // Exercise the same correlation path used by the restored generation panel,
         // against the reopened SQLCipher-backed stores rather than in-memory fakes.
-        val restored = latestRecoverableImageGenerationRequest(
+        val restored = loadLatestRecoverableImageGenerationRequest(
             characterId = generationRequest.characterId,
-            requests = listOf(requireNotNull(reopenedRequests.latestForCharacter(generationRequest.characterId))),
-            jobs = reopenedStore.all()
+            requestStore = reopenedRequests,
+            jobStore = reopenedStore
         )
         assertEquals(generationRequest, restored?.request)
         assertEquals(expectedActive, restored?.job)
