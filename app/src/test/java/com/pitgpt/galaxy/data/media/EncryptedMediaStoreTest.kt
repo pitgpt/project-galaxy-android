@@ -116,6 +116,19 @@ class EncryptedMediaStoreTest {
     }
 
     @Test
+    fun readRejectsOversizedFileBeforeRequestingKeystoreKey() {
+        File(directory, "asset_12.gcm").writeBytes(ByteArray(2048))
+
+        val failure = assertThrows(IllegalArgumentException::class.java) {
+            store.read("asset_12", "image/png")
+        }
+
+        assertTrue(failure.message?.contains("invalid size") == true)
+        assertEquals(0, keyProvider.existingCalls)
+        assertEquals(0, keyProvider.createCalls)
+    }
+
+    @Test
     fun deleteRemovesEncryptedAssetAndIsIdempotentlyObservable() {
         store.save("asset_07", "image/png", byteArrayOf(5, 6, 7))
 
@@ -166,6 +179,7 @@ class EncryptedMediaStoreTest {
     ) : MediaEncryptionKeyProvider {
         var available = true
         var createCalls = 0
+        var existingCalls = 0
 
         override fun getOrCreateKey(): SecretKey {
             createCalls++
@@ -174,6 +188,7 @@ class EncryptedMediaStoreTest {
         }
 
         override fun getExistingKey(): SecretKey {
+            existingCalls++
             check(available) { "Test key is unavailable." }
             return key
         }
