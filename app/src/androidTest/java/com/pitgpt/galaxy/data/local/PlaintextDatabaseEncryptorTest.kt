@@ -504,6 +504,62 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun rollbackRefusesWhenPlaintextBackupContentChangesWithoutChangingRowCounts() {
+        createPlaintextDatabase()
+        val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        assertNotNull(pending)
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        FrameworkSQLiteDatabase.openDatabase(
+            backup.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READWRITE
+        ).use { plaintextBackup ->
+            plaintextBackup.execSQL(
+                "UPDATE memory_items SET content = 'same-count content substitution' WHERE id = 'r2'"
+            )
+        }
+
+        val activeEncryptedBytes = databaseFile.readBytes()
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+        var rollbackFailure: IllegalStateException? = null
+        try {
+            encryptor.rollback(pending)
+        } catch (failure: IllegalStateException) {
+            rollbackFailure = failure
+        }
+
+        assertNotNull(
+            "Rollback must reject changed row content even when every table row count is unchanged",
+            rollbackFailure
+        )
+        assertTrue(rollbackFailure?.message?.contains("verified migration snapshot") == true)
+        assertArrayEquals(activeEncryptedBytes, databaseFile.readBytes())
+        assertTrue(backup.isFile)
+        assertFalse(failedEncrypted.exists())
+
+        FrameworkSQLiteDatabase.openDatabase(
+            backup.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READONLY
+        ).use { modifiedBackup ->
+            assertEquals(2L, countFrameworkRows(modifiedBackup, "memory_items"))
+            modifiedBackup.rawQuery(
+                "SELECT content FROM memory_items WHERE id = 'r2'",
+                null
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("same-count content substitution", cursor.getString(0))
+            }
+        }
+        openEncrypted(databaseFile, databaseKey).use { active ->
+            assertEquals(2L, countRows(active, "character_profiles"))
+            assertEquals(3L, countRows(active, "conversation_messages"))
+            assertEquals(2L, countRows(active, "memory_items"))
+        }
+    }
+
+    @Test
     fun rollbackRefusesWhenPlaintextBackupIsEmptyBeforeMovingEncryptedCandidate() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
