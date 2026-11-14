@@ -585,6 +585,98 @@ class PlaintextDatabaseEncryptorTest {
         assertFalse(failedEncrypted.exists())
     }
 
+
+    @Test
+    fun snapshotDigestIsStableAcrossRowIdOrderAndSQLiteStorageClasses() {
+        val digestDirectory = File(directory, "digest-canonicalization").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val firstDatabase = File(digestDirectory, "first.db")
+        val secondDatabase = File(digestDirectory, "second.db")
+        val values = listOf<Any?>(
+            null,
+            7L,
+            -0.0,
+            0.0,
+            "typed text",
+            byteArrayOf(0x00, 0x7f, 0xff.toByte())
+        )
+
+        try {
+            createCanonicalDigestDatabase(firstDatabase, values)
+            createCanonicalDigestDatabase(secondDatabase, values.asReversed())
+
+            val firstPending = checkNotNull(encryptor.migrateIfNeeded(firstDatabase, databaseKey))
+            val secondPending = checkNotNull(encryptor.migrateIfNeeded(secondDatabase, databaseKey))
+
+            assertEquals(values.size.toLong(), firstPending.expectedSnapshot.rowCounts["typed_values"])
+            assertEquals(1L, firstPending.expectedSnapshot.rowCounts["sqlite_sequence"])
+            assertEquals(firstPending.expectedSnapshot.rowCounts, secondPending.expectedSnapshot.rowCounts)
+            assertEquals(
+                "The digest must be independent of rowid allocation and insertion order",
+                firstPending.expectedSnapshot.contentDigest,
+                secondPending.expectedSnapshot.contentDigest
+            )
+
+            openEncrypted(firstDatabase, databaseKey).use { encrypted ->
+                encrypted.rawQuery("SELECT COUNT(DISTINCT typeof(value)) FROM typed_values", null).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(5L, cursor.getLong(0))
+                }
+                encrypted.rawQuery(
+                    "SELECT seq FROM sqlite_sequence WHERE name = 'sequence_values'",
+                    null
+                ).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(2L, cursor.getLong(0))
+                }
+            }
+
+            assertTrue(
+                "The fixture must reverse the rowid order of the two REAL zero values",
+                readRealValueBits(firstDatabase) != readRealValueBits(secondDatabase)
+            )
+
+            encryptor.complete(firstPending)
+            encryptor.complete(secondPending)
+        } finally {
+            digestDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun snapshotDigestChangesWhenSchemaChangesWithoutChangingRowCounts() {
+        val digestDirectory = File(directory, "digest-schema").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val firstDatabase = File(digestDirectory, "without-index.db")
+        val secondDatabase = File(digestDirectory, "with-index.db")
+
+        try {
+            createSchemaDigestDatabase(firstDatabase, withIndex = false)
+            createSchemaDigestDatabase(secondDatabase, withIndex = true)
+
+            val firstPending = checkNotNull(encryptor.migrateIfNeeded(firstDatabase, databaseKey))
+            val secondPending = checkNotNull(encryptor.migrateIfNeeded(secondDatabase, databaseKey))
+
+            assertEquals(
+                firstPending.expectedSnapshot.rowCounts,
+                secondPending.expectedSnapshot.rowCounts
+            )
+            assertTrue(
+                "The digest must include schema objects even when row counts are unchanged",
+                firstPending.expectedSnapshot.contentDigest != secondPending.expectedSnapshot.contentDigest
+            )
+
+            encryptor.complete(firstPending)
+            encryptor.complete(secondPending)
+        } finally {
+            digestDirectory.deleteRecursively()
+        }
+    }
+
     @Test
     fun wrongKeyDoesNotDeleteOriginalPlaintextRollbackCopy() {
         createPlaintextDatabase()
@@ -606,6 +698,47 @@ class PlaintextDatabaseEncryptorTest {
             wrongKey.fill(0)
         }
     }
+
+    private fun createCanonicalDigestDatabase(file: File, values: List<Any?>) {
+        FrameworkSQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL("CREATE TABLE typed_values (value)")
+            db.execSQL("CREATE TABLE sequence_values (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL)")
+            values.forEach { value ->
+                db.execSQL("INSERT INTO typed_values(value) VALUES (?)", arrayOf<Any?>(value))
+            }
+            db.execSQL("INSERT INTO sequence_values(payload) VALUES (?)", arrayOf<Any?>("first"))
+            db.execSQL("INSERT INTO sequence_values(payload) VALUES (?)", arrayOf<Any?>("second"))
+            db.execSQL("DELETE FROM sequence_values WHERE id = 2")
+            db.version = 2
+            db.execSQL("PRAGMA application_id = 1195461720")
+        }
+    }
+
+    private fun createSchemaDigestDatabase(file: File, withIndex: Boolean) {
+        FrameworkSQLiteDatabase.openOrCreateDatabase(file, null).use { db ->
+            db.execSQL("CREATE TABLE schema_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL)")
+            db.execSQL("INSERT INTO schema_probe VALUES (1, 'same row')")
+            if (withIndex) {
+                db.execSQL("CREATE INDEX schema_probe_value_idx ON schema_probe(value)")
+            }
+            db.version = 2
+            db.execSQL("PRAGMA application_id = 1195461720")
+        }
+    }
+
+    private fun readRealValueBits(file: File): List<Long> =
+        openEncrypted(file, databaseKey).use { encrypted ->
+            encrypted.rawQuery(
+                "SELECT value FROM typed_values WHERE typeof(value) = 'real' ORDER BY rowid",
+                null
+            ).use { cursor ->
+                mutableListOf<Long>().apply {
+                    while (cursor.moveToNext()) {
+                        add(java.lang.Double.doubleToRawLongBits(cursor.getDouble(0)))
+                    }
+                }
+            }
+        }
 
     private fun createPlaintextDatabase() {
         FrameworkSQLiteDatabase.openOrCreateDatabase(databaseFile, null).use { db ->
