@@ -13,10 +13,11 @@ import java.io.File
 internal class PlaintextDatabaseEncryptor {
     data class PendingMigration internal constructor(
         internal val original: File,
-        internal val backup: File
+        internal val backup: File,
+        internal val expectedSnapshot: DatabaseSnapshot
     )
 
-    private data class DatabaseSnapshot(
+    internal data class DatabaseSnapshot(
         val rowCounts: Map<String, Long>,
         val userVersion: Int,
         val applicationId: Int
@@ -37,10 +38,12 @@ internal class PlaintextDatabaseEncryptor {
 
         if (backup.exists() && !database.exists()) {
             if (temporary.exists()) {
-                verifyEncrypted(temporary, databaseKey, readPlaintextSnapshot(backup))
+                val expectedSnapshot = readPlaintextSnapshot(backup)
+                verifyEncrypted(temporary, databaseKey, expectedSnapshot)
                 check(temporary.renameTo(database)) { "Could not promote verified encrypted database." }
-                return PendingMigration(database, backup)
+                return PendingMigration(database, backup, expectedSnapshot)
             }
+            readPlaintextSnapshot(backup)
             check(backup.renameTo(database)) { "Could not restore the original Galaxy database." }
             return migrateIfNeeded(database, databaseKey)
         }
@@ -48,7 +51,7 @@ internal class PlaintextDatabaseEncryptor {
         if (database.exists() && !plaintext) {
             val snapshot = if (backup.exists()) readPlaintextSnapshot(backup) else null
             verifyEncrypted(database, databaseKey, snapshot)
-            if (backup.exists()) return PendingMigration(database, backup)
+            if (backup.exists()) return PendingMigration(database, backup, checkNotNull(snapshot))
             sidecar(backup, "-wal").delete()
             sidecar(backup, "-shm").delete()
             return null
@@ -92,7 +95,7 @@ internal class PlaintextDatabaseEncryptor {
             error("Could not promote the encrypted Galaxy database. Original data was restored.")
         }
 
-        return PendingMigration(database, backup)
+        return PendingMigration(database, backup, expectedSnapshot)
     }
 
     fun complete(pending: PendingMigration?) {
@@ -114,6 +117,10 @@ internal class PlaintextDatabaseEncryptor {
         val failedShm = sidecar(failedEncrypted, "-shm")
         check(!failedEncrypted.exists() && !failedWal.exists() && !failedShm.exists()) {
             "A previous failed encrypted database candidate or sidecar exists; refusing to overwrite it during rollback."
+        }
+        val backupSnapshot = readPlaintextSnapshot(pending.backup)
+        check(backupSnapshot == pending.expectedSnapshot) {
+            "The plaintext rollback copy no longer matches the verified migration snapshot; refusing rollback."
         }
         if (pending.original.exists()) {
             check(pending.original.renameTo(failedEncrypted)) {
@@ -161,12 +168,16 @@ internal class PlaintextDatabaseEncryptor {
     }
 
     private fun readPlaintextSnapshot(file: File): DatabaseSnapshot {
+        check(file.isFile && file.length() > 0L) {
+            "The plaintext Galaxy rollback copy is missing or empty."
+        }
         val database = SQLiteDatabase.openDatabase(
             file.absolutePath,
             null,
             SQLiteDatabase.OPEN_READWRITE
         )
         return try {
+            verifyIntegrity(database, "Plaintext Galaxy rollback copy")
             checkpoint(database)
             readSnapshot(database)
         } finally {
@@ -188,11 +199,7 @@ internal class PlaintextDatabaseEncryptor {
             null
         )
         try {
-            database.rawQuery("PRAGMA integrity_check;", null).use { cursor ->
-                check(cursor.moveToFirst() && cursor.getString(0).equals("ok", ignoreCase = true)) {
-                    "Encrypted Galaxy database failed its integrity check."
-                }
-            }
+            verifyIntegrity(database, "Encrypted Galaxy database")
             expectedSnapshot?.let { expected ->
                 check(readSnapshot(database) == expected) {
                     "Encrypted Galaxy database metadata or row counts do not match the original database."
@@ -200,6 +207,19 @@ internal class PlaintextDatabaseEncryptor {
             }
         } finally {
             database.close()
+        }
+    }
+
+    private fun verifyIntegrity(database: SQLiteDatabase, description: String) {
+        database.rawQuery("PRAGMA integrity_check;", null).use { cursor ->
+            check(cursor.moveToFirst()) {
+                "$description integrity check returned no result."
+            }
+            check(
+                cursor.getString(0).equals("ok", ignoreCase = true) && !cursor.moveToNext()
+            ) {
+                "$description failed its integrity check."
+            }
         }
     }
 
