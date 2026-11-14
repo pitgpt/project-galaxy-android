@@ -182,6 +182,54 @@ class ComfyUiImageGenerationProviderTest {
         )
     }
 
+    @Test fun cancelledSubmissionRemainsUnresolvedWhenQueueAndHistoryMissWithoutResubmitting() = runBlocking {
+        val transport = FakeTransport().apply {
+            failure = CancellationException("simulated caller cancellation")
+        }
+        val store = InMemoryComfyUiJobStore()
+        val activeProvider = provider(transport, store)
+
+        val cancellation = assertThrows(ComfyUiSubmissionCancelledException::class.java) {
+            runBlocking { activeProvider.submit(request) }
+        }
+        val expectedPromptId = stablePromptId(request)
+        assertEquals(expectedPromptId, cancellation.promptId)
+        val expectedRecord = ComfyUiJobRecord(
+            expectedPromptId,
+            request.id,
+            request.createdAtEpochMillis,
+            submissionStarted = true
+        )
+        assertEquals(expectedRecord, store.get(expectedPromptId))
+
+        transport.failure = null
+        transport.responses.add(
+            ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}""")
+        )
+        transport.responses.add(ComfyUiApiResponse(200, "{}"))
+
+        val missingHistory = assertThrows(ComfyUiApiException::class.java) {
+            runBlocking { activeProvider.status(expectedPromptId) }
+        }
+
+        assertEquals(null, missingHistory.httpStatusCode)
+        assertEquals("POST", transport.methods.first())
+        assertEquals(expectedRecord, store.get(expectedPromptId))
+
+        // An absent server-side record is unresolved, not proof that a second POST is safe.
+        assertEquals(expectedPromptId, activeProvider.submit(request))
+        assertEquals(listOf("POST", "GET", "GET"), transport.methods)
+        assertEquals(
+            listOf(
+                "http://192.168.1.20:8188/prompt",
+                "http://192.168.1.20:8188/queue",
+                "http://192.168.1.20:8188/history/$expectedPromptId"
+            ),
+            transport.urls
+        )
+        assertEquals(expectedRecord, store.get(expectedPromptId))
+    }
+
     @Test fun localIntentWriteFailurePreventsRemoteSubmission() {
         val transport = FakeTransport()
         assertThrows(IllegalStateException::class.java) {
