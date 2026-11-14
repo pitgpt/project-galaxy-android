@@ -457,6 +457,79 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun rollbackRefusesWhenPlaintextBackupNoLongerMatchesVerifiedSnapshot() {
+        createPlaintextDatabase()
+        val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        assertNotNull(pending)
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        FrameworkSQLiteDatabase.openDatabase(
+            backup.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READWRITE
+        ).use { plaintextBackup ->
+            plaintextBackup.execSQL("DELETE FROM memory_items WHERE id = 'r2'")
+        }
+
+        val activeEncryptedBytes = databaseFile.readBytes()
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+        var rollbackFailure: IllegalStateException? = null
+        try {
+            encryptor.rollback(pending)
+        } catch (failure: IllegalStateException) {
+            rollbackFailure = failure
+        }
+
+        assertNotNull(
+            "Rollback must refuse a plaintext backup that no longer matches the verified snapshot",
+            rollbackFailure
+        )
+        assertTrue(rollbackFailure?.message?.contains("verified migration snapshot") == true)
+        assertArrayEquals(activeEncryptedBytes, databaseFile.readBytes())
+        assertTrue(backup.isFile)
+        assertFalse(failedEncrypted.exists())
+
+        openEncrypted(databaseFile, databaseKey).use { active ->
+            assertEquals(2L, countRows(active, "character_profiles"))
+            assertEquals(3L, countRows(active, "conversation_messages"))
+            assertEquals(2L, countRows(active, "memory_items"))
+        }
+        FrameworkSQLiteDatabase.openDatabase(
+            backup.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READONLY
+        ).use { modifiedBackup ->
+            assertEquals(1L, countFrameworkRows(modifiedBackup, "memory_items"))
+        }
+    }
+
+    @Test
+    fun rollbackRefusesWhenPlaintextBackupIsEmptyBeforeMovingEncryptedCandidate() {
+        createPlaintextDatabase()
+        val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+        assertNotNull(pending)
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        backup.writeBytes(byteArrayOf())
+        val activeEncryptedBytes = databaseFile.readBytes()
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+
+        var rollbackFailure: IllegalStateException? = null
+        try {
+            encryptor.rollback(pending)
+        } catch (failure: IllegalStateException) {
+            rollbackFailure = failure
+        }
+
+        assertNotNull("Rollback must refuse an empty plaintext backup", rollbackFailure)
+        assertTrue(rollbackFailure?.message?.contains("missing or empty") == true)
+        assertArrayEquals(activeEncryptedBytes, databaseFile.readBytes())
+        assertTrue(backup.isFile)
+        assertEquals(0L, backup.length())
+        assertFalse(failedEncrypted.exists())
+    }
+
+    @Test
     fun wrongKeyDoesNotDeleteOriginalPlaintextRollbackCopy() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
