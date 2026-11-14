@@ -69,4 +69,34 @@ class RoomComfyUiJobStoreTest {
         assertTrue(failure != null)
         assertFalse(store.get("prompt-123")!!.requestId == "request-other")
     }
+
+    @Test
+    fun putRejectsBlankPromptIdWithoutPersistingRecord() = runBlocking {
+        val failure = runCatching {
+            store.put(ComfyUiJobRecord("   ", "request-456", 1234L))
+        }.exceptionOrNull()
+
+        assertTrue("A blank prompt ID must be rejected", failure is IllegalArgumentException)
+        assertNull(store.get("   "))
+    }
+
+    @Test
+    fun putRejectsBlankRequestIdWithoutPersistingRecord() = runBlocking {
+        val failure = runCatching {
+            store.put(ComfyUiJobRecord("prompt-123", "  ", 1234L))
+        }.exceptionOrNull()
+
+        assertTrue("A blank request ID must be rejected", failure is IllegalArgumentException)
+        assertNull(store.get("prompt-123"))
+    }
+
+    @Test
+    fun markCancelledRejectsUnknownPromptId() = runBlocking {
+        val failure = runCatching {
+            store.markCancelled("unknown-prompt")
+        }.exceptionOrNull()
+
+        assertTrue("An unknown job must not be reported as cancelled", failure is IllegalStateException)
+        assertNull(store.get("unknown-prompt"))
+    }
 }
