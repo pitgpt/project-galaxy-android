@@ -10,6 +10,11 @@ import java.io.File
 import java.io.FileInputStream
 import java.security.SecureRandom
 import java.util.UUID
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import org.junit.After
@@ -83,6 +88,43 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
 
         assertEquals(expected, reopenedStore.get(record.promptId))
         assertEquals(listOf(expected), reopenedStore.all())
+    }
+
+    @Test
+    fun onlyOneConcurrentSubmissionClaimWinsAndPersistsInSqlCipher() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-concurrent-claim",
+            requestId = "galaxy-request-concurrent-claim",
+            createdAtEpochMillis = 1_794_230_401_000L
+        )
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val firstStore = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+        firstStore.put(record)
+
+        val startGate = CompletableDeferred<Unit>()
+        val claims = coroutineScope {
+            val workers = (1..2).map {
+                async(Dispatchers.IO) {
+                    startGate.await()
+                    firstStore.markSubmissionStarted(record.promptId)
+                }
+            }
+            startGate.complete(Unit)
+            workers.awaitAll()
+        }
+
+        assertEquals("Exactly one SQLCipher-backed writer may claim PREPARED", 1, claims.count { it })
+        assertTrue(firstStore.get(record.promptId)!!.submissionStarted)
+
+        firstDatabase.close()
+        database = null
+
+        val reopenedDatabase = openDatabase()
+        database = reopenedDatabase
+        val reopenedStore = RoomComfyUiJobStore(reopenedDatabase.comfyUiJobDao())
+        assertTrue(reopenedStore.get(record.promptId)!!.submissionStarted)
+        assertFalse("A persisted SUBMISSION_STARTED job must not be claimed again", reopenedStore.markSubmissionStarted(record.promptId))
     }
 
     private fun openDatabase(): GalaxyDatabase {
