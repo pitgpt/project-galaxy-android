@@ -8,6 +8,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
+import com.pitgpt.galaxy.ui.latestRecoverableImageGenerationRequest
 import java.io.File
 import java.io.FileInputStream
 import java.security.SecureRandom
@@ -57,6 +58,11 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             requestId = "galaxy-request-durable-456",
             createdAtEpochMillis = 1_794_230_400_000L
         )
+        val activeRecord = ComfyUiJobRecord(
+            promptId = "prompt-active-456",
+            requestId = "generation-request-durable",
+            createdAtEpochMillis = 1_794_230_400_001L
+        )
 
         val firstDatabase = openDatabase()
         database = firstDatabase
@@ -64,6 +70,8 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         firstStore.put(record)
         assertTrue(firstStore.markSubmissionStarted(record.promptId))
         firstStore.markCancelled(record.promptId)
+        firstStore.put(activeRecord)
+        assertTrue(firstStore.markSubmissionStarted(activeRecord.promptId))
         val generationRequest = ImageGenerationRequest(
             id = "generation-request-durable",
             conversationId = "conversation-durable",
@@ -101,11 +109,25 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         val reopenedStore = RoomComfyUiJobStore(reopenedDatabase.comfyUiJobDao())
         val expected = record.copy(cancelled = true, submissionStarted = true)
 
+        val expectedActive = activeRecord.copy(submissionStarted = true)
         assertEquals(expected, reopenedStore.get(record.promptId))
-        assertEquals(listOf(expected), reopenedStore.all())
+        assertEquals(expectedActive, reopenedStore.get(activeRecord.promptId))
+        assertEquals(listOf(expected, expectedActive), reopenedStore.all())
+
         val reopenedRequests = RoomImageGenerationRequestStore(reopenedDatabase.imageGenerationRequestDao())
         assertEquals(generationRequest, reopenedRequests.get(generationRequest.id))
         assertEquals(listOf(generationRequest), reopenedRequests.all())
+
+        // Exercise the same correlation path used by the restored generation panel,
+        // against the reopened SQLCipher-backed stores rather than in-memory fakes.
+        val restored = latestRecoverableImageGenerationRequest(
+            characterId = generationRequest.characterId,
+            requests = listOf(requireNotNull(reopenedRequests.latestForCharacter(generationRequest.characterId))),
+            jobs = reopenedStore.all()
+        )
+        assertEquals(generationRequest, restored?.request)
+        assertEquals(expectedActive, restored?.job)
+        assertFalse(restored?.canResumeSafely ?: true)
     }
 
     private fun openDatabase(): GalaxyDatabase {
