@@ -184,6 +184,74 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
 
 
     @Test
+    fun committedWalSnapshotRecoversSubmissionClaimWithoutShmAndRejectsReclaim() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-wal-submission-claim",
+            requestId = "request-wal-submission-claim",
+            createdAtEpochMillis = 1_794_230_600_000L
+        )
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val sqlDatabase = firstDatabase.openHelper.writableDatabase
+        val journalMode = sqlDatabase.query("PRAGMA journal_mode").use { cursor ->
+            assertTrue("The SQLCipher helper must expose a journal mode", cursor.moveToFirst())
+            cursor.getString(0)
+        }
+        assertEquals("The recovery scenario requires WAL mode", "wal", journalMode.lowercase())
+
+        val store = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+        store.put(record)
+        assertTrue(
+            "The first caller must durably claim the submission before the crash snapshot",
+            store.markSubmissionStarted(record.promptId)
+        )
+
+        val sourceFile = context.getDatabasePath(databaseName)
+        val sourceWal = File(sourceFile.path + "-wal")
+        assertTrue("A committed WAL must exist before the snapshot is copied", sourceWal.isFile)
+        assertTrue("The WAL must contain committed frames", sourceWal.length() > 32L)
+
+        // Model abrupt process loss using only the durable database + committed WAL files.
+        // SQLite must rebuild the transient shared-memory index when the snapshot is reopened.
+        val snapshotName = "$databaseName-submission-claim-snapshot"
+        val snapshotFile = context.getDatabasePath(snapshotName)
+        val snapshotWal = File(snapshotFile.path + "-wal")
+        var snapshotDatabase: GalaxyDatabase? = null
+        try {
+            sourceFile.copyTo(snapshotFile, overwrite = true)
+            sourceWal.copyTo(snapshotWal, overwrite = true)
+            assertFalse(
+                "The crash snapshot must not include SQLite's transient shared-memory sidecar",
+                File(snapshotFile.path + "-shm").exists()
+            )
+
+            snapshotDatabase = openDatabase(snapshotName)
+            val recoveredStore = RoomComfyUiJobStore(snapshotDatabase.comfyUiJobDao())
+            val claimedRecord = record.copy(submissionStarted = true)
+            assertEquals(
+                "The committed WAL must restore the durable submission claim",
+                claimedRecord,
+                recoveredStore.get(record.promptId)
+            )
+            assertFalse(
+                "A recovered SUBMISSION_STARTED job must never be claimable a second time",
+                recoveredStore.markSubmissionStarted(record.promptId)
+            )
+            assertEquals(
+                "A rejected second claim must leave the recovered row unchanged",
+                claimedRecord,
+                recoveredStore.get(record.promptId)
+            )
+        } finally {
+            runCatching { snapshotDatabase?.close() }
+            snapshotFile.delete()
+            snapshotWal.delete()
+            File(snapshotFile.path + "-shm").delete()
+            File(snapshotFile.path + "-journal").delete()
+        }
+    }
+
+    @Test
     fun concurrentSqlCipherStoresClaimSubmissionAtMostOnceAcrossDatabaseInstances() = runBlocking {
         val record = ComfyUiJobRecord(
             promptId = "prompt-concurrent-claim",
@@ -268,9 +336,9 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         }
     }
 
-    private fun openDatabase(): GalaxyDatabase {
+    private fun openDatabase(name: String = databaseName): GalaxyDatabase {
         val keyBytes = Base64.encode(passphrase, Base64.NO_WRAP)
-        val opened = Room.databaseBuilder(context, GalaxyDatabase::class.java, databaseName)
+        val opened = Room.databaseBuilder(context, GalaxyDatabase::class.java, name)
             .openHelperFactory(SupportOpenHelperFactory(keyBytes, null, true))
             .build()
         try {
