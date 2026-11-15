@@ -55,8 +55,7 @@ internal class PlaintextDatabaseEncryptor {
             val snapshot = if (backup.exists()) readPlaintextSnapshot(backup) else null
             verifyEncrypted(database, databaseKey, snapshot)
             if (backup.exists()) return PendingMigration(database, backup, checkNotNull(snapshot))
-            sidecar(backup, "-wal").delete()
-            sidecar(backup, "-shm").delete()
+            deleteSidecars(backup, "Could not remove an orphan Galaxy database sidecar.")
             return null
         }
 

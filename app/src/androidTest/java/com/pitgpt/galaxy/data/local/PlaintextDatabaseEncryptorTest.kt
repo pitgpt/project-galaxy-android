@@ -72,6 +72,35 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun removesOrphanRollbackJournalWhenEncryptedDatabaseHasNoPlaintextBackup() {
+        createPlaintextDatabase()
+        val pending = checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+        encryptor.complete(pending)
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        assertFalse("The plaintext backup must be absent before orphan sidecars are created", backup.exists())
+        val orphanWal = File(backup.path + "-wal")
+        val orphanShm = File(backup.path + "-shm")
+        val orphanJournal = File(backup.path + "-journal")
+        orphanWal.writeBytes(byteArrayOf(0x11, 0x22, 0x33))
+        orphanShm.writeBytes(byteArrayOf(0x44, 0x55, 0x66))
+        orphanJournal.writeBytes(byteArrayOf(0x77, 0x66, 0x55, 0x44))
+
+        val recovered = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+
+        assertEquals("An already encrypted database without a plaintext backup needs no pending migration", null, recovered)
+        assertFalse("The orphan WAL must be removed", orphanWal.exists())
+        assertFalse("The orphan SHM must be removed", orphanShm.exists())
+        assertFalse("The orphan plaintext rollback journal must be removed", orphanJournal.exists())
+        assertFalse(encryptor.isPlaintextDatabase(databaseFile))
+        openEncrypted(databaseFile, databaseKey).use { encrypted ->
+            assertEquals(2L, countRows(encrypted, "character_profiles"))
+            assertEquals(3L, countRows(encrypted, "conversation_messages"))
+            assertEquals(2L, countRows(encrypted, "memory_items"))
+        }
+    }
+
+    @Test
     fun migrationMovesPersistentRollbackJournalWithPlaintextBackupAndCompleteRemovesIt() {
         createPlaintextDatabase()
         val journal = File(databaseFile.path + "-journal")
