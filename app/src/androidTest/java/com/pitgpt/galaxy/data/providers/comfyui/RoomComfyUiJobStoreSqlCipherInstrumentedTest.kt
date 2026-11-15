@@ -229,15 +229,15 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         val walBytes = sourceWal.readBytes()
         try {
             listOf(
-                record.promptId,
-                record.requestId,
-                generationRequest.conversationId,
-                generationRequest.characterId,
-                generationRequest.prompt,
-                generationRequest.negativePrompt.orEmpty()
-            ).forEach { sensitiveValue ->
+                "prompt ID" to record.promptId,
+                "request ID" to record.requestId,
+                "conversation ID" to generationRequest.conversationId,
+                "character ID" to generationRequest.characterId,
+                "positive prompt" to generationRequest.prompt,
+                "negative prompt" to generationRequest.negativePrompt.orEmpty()
+            ).forEach { (label, sensitiveValue) ->
                 assertFalse(
-                    "SQLCipher WAL pages must not expose persisted value: $sensitiveValue",
+                    "SQLCipher WAL pages must not expose the persisted $label",
                     containsBytes(walBytes, sensitiveValue.toByteArray(Charsets.UTF_8))
                 )
             }
