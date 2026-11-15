@@ -190,6 +190,19 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             requestId = "request-wal-submission-claim",
             createdAtEpochMillis = 1_794_230_600_000L
         )
+        val generationRequest = ImageGenerationRequest(
+            id = record.requestId,
+            conversationId = "conversation-wal-submission-claim",
+            characterId = "character-wal-submission-claim",
+            prompt = "private positive prompt that must not appear in the SQLCipher WAL",
+            negativePrompt = "private negative prompt that must not appear in the SQLCipher WAL",
+            preferredMimeType = "image/png",
+            workflowId = "workflow-wal-confidentiality",
+            width = 768,
+            height = 1024,
+            seed = 42L,
+            createdAtEpochMillis = record.createdAtEpochMillis
+        )
         val firstDatabase = openDatabase()
         database = firstDatabase
         val sqlDatabase = firstDatabase.openHelper.writableDatabase
@@ -200,6 +213,8 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         assertEquals("The recovery scenario requires WAL mode", "wal", journalMode.lowercase())
 
         val store = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+        val requestStore = RoomImageGenerationRequestStore(firstDatabase.imageGenerationRequestDao())
+        requestStore.put(generationRequest)
         store.put(record)
         assertTrue(
             "The first caller must durably claim the submission before the crash snapshot",
@@ -210,6 +225,25 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         val sourceWal = File(sourceFile.path + "-wal")
         assertTrue("A committed WAL must exist before the snapshot is copied", sourceWal.isFile)
         assertTrue("The WAL must contain committed frames", sourceWal.length() > 32L)
+
+        val walBytes = sourceWal.readBytes()
+        try {
+            listOf(
+                record.promptId,
+                record.requestId,
+                generationRequest.conversationId,
+                generationRequest.characterId,
+                generationRequest.prompt,
+                generationRequest.negativePrompt.orEmpty()
+            ).forEach { sensitiveValue ->
+                assertFalse(
+                    "SQLCipher WAL pages must not expose persisted value: $sensitiveValue",
+                    containsBytes(walBytes, sensitiveValue.toByteArray(Charsets.UTF_8))
+                )
+            }
+        } finally {
+            walBytes.fill(0)
+        }
 
         // Model abrupt process loss using only the durable database + committed WAL files.
         // SQLite must rebuild the transient shared-memory index when the snapshot is reopened.
@@ -227,11 +261,17 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
 
             snapshotDatabase = openDatabase(snapshotName)
             val recoveredStore = RoomComfyUiJobStore(snapshotDatabase.comfyUiJobDao())
+            val recoveredRequestStore = RoomImageGenerationRequestStore(snapshotDatabase.imageGenerationRequestDao())
             val claimedRecord = record.copy(submissionStarted = true)
             assertEquals(
                 "The committed WAL must restore the durable submission claim",
                 claimedRecord,
                 recoveredStore.get(record.promptId)
+            )
+            assertEquals(
+                "The committed WAL must restore the encrypted generation request payload",
+                generationRequest,
+                recoveredRequestStore.get(record.requestId)
             )
             assertFalse(
                 "A recovered SUBMISSION_STARTED job must never be claimable a second time",
@@ -283,6 +323,13 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             assertEquals(claimedRecord, secondStore.get(record.promptId))
         } finally {
             secondDatabase.close()
+        }
+    }
+
+    private fun containsBytes(container: ByteArray, candidate: ByteArray): Boolean {
+        if (candidate.isEmpty() || candidate.size > container.size) return false
+        return (0..container.size - candidate.size).any { start ->
+            candidate.indices.all { offset -> container[start + offset] == candidate[offset] }
         }
     }
 
