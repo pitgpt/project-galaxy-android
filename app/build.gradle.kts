@@ -22,6 +22,7 @@ android {
         versionCode = 4
         versionName = "0.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments["clearPackageData"] = "false"
         buildConfigField("String", "GIT_SHA", buildConfigString(gitSha))
         buildConfigField("String", "GALAXY_API_BASE_URL", buildConfigString(galaxyApiBaseUrl))
         buildConfigField("String", "SUPABASE_URL", buildConfigString(supabaseUrl))
@@ -37,6 +38,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     testOptions {
+        execution = "ANDROIDX_TEST_ORCHESTRATOR"
         unitTests.isIncludeAndroidResources = true
     }
 }
@@ -69,5 +71,6 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.02.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestUtil("androidx.test:orchestrator:1.5.1")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
