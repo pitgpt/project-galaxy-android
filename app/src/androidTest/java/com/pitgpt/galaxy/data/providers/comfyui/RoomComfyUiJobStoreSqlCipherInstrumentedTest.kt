@@ -53,7 +53,7 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
     }
 
     @Test
-    fun preparedAndStartedSubmissionStateSurvivesSqlCipherDatabaseReopen() = runBlocking {
+    fun submissionStateSurvivesSqlCipherReopenAndMissingRemoteHistoryDoesNotResubmit() = runBlocking {
         val record = ComfyUiJobRecord(
             promptId = "prompt-durable-123",
             requestId = "galaxy-request-durable-456",
@@ -146,17 +146,36 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         assertEquals(expectedActive, restored?.job)
         assertFalse(restored?.canResumeSafely ?: true)
 
-        // A new provider instance after the database reopen must reuse the durable prompt ID.
-        // It must not issue another POST /prompt, even though the original acknowledgement was lost.
+        // The new provider first reconciles the persisted prompt against ComfyUI after reopen.
+        // A queue miss followed by an empty history response is ambiguous, not permission to resubmit.
         val resumedTransport = RecordingTransport(
-            response = ComfyUiApiResponse(200, """{"prompt_id":"$activePromptId","number":2}""")
+            responses = listOf(
+                ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""),
+                ComfyUiApiResponse(200, "{}")
+            )
         )
         val resumedProvider = createProvider(resumedTransport, reopenedStore)
-        assertEquals(activePromptId, resumedProvider.submit(requireNotNull(restored).request))
-        assertTrue(
-            "A recovered SUBMISSION_STARTED job must not issue a second ComfyUI request",
-            resumedTransport.methods.isEmpty()
+        val missingRemoteJob = try {
+            resumedProvider.status(activePromptId)
+            throw AssertionError("A prompt missing from both queue and history must remain unresolved")
+        } catch (failure: ComfyUiApiException) {
+            failure
+        }
+        assertEquals(null, missingRemoteJob.httpStatusCode)
+        assertEquals(listOf("GET", "GET"), resumedTransport.methods)
+        assertEquals(
+            listOf(
+                "http://192.168.1.20:8188/queue",
+                "http://192.168.1.20:8188/history/$activePromptId"
+            ),
+            resumedTransport.urls
         )
+        assertEquals(expectedActive, reopenedStore.get(activePromptId))
+
+        // Retrying the same durable request still returns its prompt ID without a second POST.
+        assertEquals(activePromptId, resumedProvider.submit(requireNotNull(restored).request))
+        assertEquals(listOf("GET", "GET"), resumedTransport.methods)
+        assertEquals(expectedActive, reopenedStore.get(activePromptId))
     }
 
     private fun createProvider(
@@ -175,10 +194,12 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
     )
 
     private class RecordingTransport(
-        private val response: ComfyUiApiResponse = ComfyUiApiResponse(200, "{}"),
+        private val responses: List<ComfyUiApiResponse> = emptyList(),
         private val failure: Exception? = null
     ) : ComfyUiApiTransport {
         val methods = mutableListOf<String>()
+        val urls = mutableListOf<String>()
+        private var responseIndex = 0
 
         override suspend fun execute(
             method: String,
@@ -190,8 +211,10 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             maxResponseBytes: Int
         ): ComfyUiApiResponse {
             methods += method
+            urls += url
             failure?.let { throw it }
-            return response
+            return responses.getOrNull(responseIndex++)
+                ?: ComfyUiApiResponse(200, "{}")
         }
 
         override suspend fun getBinary(
