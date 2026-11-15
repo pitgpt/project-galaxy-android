@@ -1,6 +1,8 @@
 package com.pitgpt.galaxy.ui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.model.ImageGenerationState
+import com.pitgpt.galaxy.core.model.ImageGenerationStatus
 import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.InMemoryComfyUiJobStore
@@ -97,6 +99,22 @@ class ImageGenerationPanelTest {
         assertEquals("prompt-started", restored?.job?.promptId)
     }
 
+
+    @Test
+    fun unconfirmedRefreshHidesStaleNonTerminalStatusButRetainsTerminalStatus() {
+        val queued = ImageGenerationStatus(ImageGenerationState.QUEUED, progressPercent = 5)
+        val running = ImageGenerationStatus(ImageGenerationState.RUNNING, progressPercent = 45)
+        val completed = ImageGenerationStatus(ImageGenerationState.COMPLETED, progressPercent = 100)
+        val failed = ImageGenerationStatus(ImageGenerationState.FAILED)
+        val cancelled = ImageGenerationStatus(ImageGenerationState.CANCELLED)
+
+        assertNull(imageGenerationStatusAfterRefreshFailure(null))
+        assertNull(imageGenerationStatusAfterRefreshFailure(queued))
+        assertNull(imageGenerationStatusAfterRefreshFailure(running))
+        assertEquals(completed, imageGenerationStatusAfterRefreshFailure(completed))
+        assertEquals(failed, imageGenerationStatusAfterRefreshFailure(failed))
+        assertEquals(cancelled, imageGenerationStatusAfterRefreshFailure(cancelled))
+    }
 
     @Test
     fun clearsDecryptedBytesWhenPreviewDispatchIsCancelled() = runBlocking {

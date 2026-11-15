@@ -103,6 +103,15 @@ internal fun isTerminalImageGenerationState(state: ImageGenerationState?): Boole
         state == ImageGenerationState.FAILED ||
         state == ImageGenerationState.CANCELLED
 
+/**
+ * A failed status refresh must not present a stale QUEUED/RUNNING value as current.
+ * Terminal states remain visible because they were already confirmed by the provider.
+ */
+internal fun imageGenerationStatusAfterRefreshFailure(
+    currentStatus: ImageGenerationStatus?
+): ImageGenerationStatus? =
+    currentStatus?.takeIf { isTerminalImageGenerationState(it.state) }
+
 internal suspend fun <T> refreshStatusPreservingCancellation(
     currentStatus: T?,
     refresh: suspend () -> T
@@ -272,12 +281,14 @@ internal fun ImageGenerationPanel(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            panelError = if (status == null) {
-                "Состояние задания пока не подтверждено. Повтори проверку статуса; повторная отправка заблокирована."
-            } else {
-                "Не удалось получить результат. Проверь подключение и повтори попытку."
-            }
+            // A previous QUEUED/RUNNING value is no longer authoritative after a failed refresh.
+            status = imageGenerationStatusAfterRefreshFailure(status)
             terminal = isTerminalImageGenerationState(status?.state)
+            panelError = if (terminal) {
+                "Не удалось получить результат. Проверь подключение и повтори попытку."
+            } else {
+                "Состояние задания пока не подтверждено. Повтори проверку статуса; повторная отправка заблокирована."
+            }
             statusNeedsRetry = !terminal
         }
     }
