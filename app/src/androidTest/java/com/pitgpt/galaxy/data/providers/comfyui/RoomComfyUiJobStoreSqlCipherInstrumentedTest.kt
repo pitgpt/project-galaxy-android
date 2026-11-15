@@ -14,6 +14,10 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.security.SecureRandom
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import org.junit.After
@@ -176,6 +180,42 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         assertEquals(activePromptId, resumedProvider.submit(requireNotNull(restored).request))
         assertEquals(listOf("GET", "GET"), resumedTransport.methods)
         assertEquals(expectedActive, reopenedStore.get(activePromptId))
+    }
+
+
+    @Test
+    fun concurrentSqlCipherStoresClaimSubmissionAtMostOnceAcrossDatabaseInstances() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-concurrent-claim",
+            requestId = "request-concurrent-claim",
+            createdAtEpochMillis = 1_794_230_500_000L
+        )
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val secondDatabase = openDatabase()
+        try {
+            val firstStore = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+            val secondStore = RoomComfyUiJobStore(secondDatabase.comfyUiJobDao())
+            firstStore.put(record)
+
+            // Two independent Room instances share the same SQLCipher file. Concurrent
+            // conditional UPDATEs must allow exactly one caller to claim the submission.
+            val claims = coroutineScope {
+                (0 until 32).map { index ->
+                    async(Dispatchers.IO) {
+                        val store = if (index % 2 == 0) firstStore else secondStore
+                        store.markSubmissionStarted(record.promptId)
+                    }
+                }.awaitAll()
+            }
+
+            assertEquals("Only one writer may claim SUBMISSION_STARTED", 1, claims.count { it })
+            val claimedRecord = record.copy(submissionStarted = true)
+            assertEquals(claimedRecord, firstStore.get(record.promptId))
+            assertEquals(claimedRecord, secondStore.get(record.promptId))
+        } finally {
+            secondDatabase.close()
+        }
     }
 
     private fun createProvider(
