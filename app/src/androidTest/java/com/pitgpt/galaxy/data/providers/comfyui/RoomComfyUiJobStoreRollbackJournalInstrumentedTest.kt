@@ -133,6 +133,10 @@ class RoomComfyUiJobStoreRollbackJournalInstrumentedTest {
                 "The SQLCipher rollback journal must not expose the replacement request ID",
                 containsBytes(journalBytes, replacementRequestId.toByteArray(Charsets.UTF_8))
             )
+            assertFalse(
+                "The SQLCipher rollback journal must not expose the prompt ID",
+                containsBytes(journalBytes, record.promptId.toByteArray(Charsets.UTF_8))
+            )
         } finally {
             finishTransaction.countDown()
             transactionThread.join(10_000)
@@ -155,6 +159,10 @@ class RoomComfyUiJobStoreRollbackJournalInstrumentedTest {
         assertFalse(
             "The SQLCipher database file must not expose the replacement request ID",
             containsBytes(persistedDatabaseBytes, replacementRequestId.toByteArray(Charsets.UTF_8))
+        )
+        assertFalse(
+            "The SQLCipher database file must not expose the prompt ID",
+            containsBytes(persistedDatabaseBytes, record.promptId.toByteArray(Charsets.UTF_8))
         )
 
         val reopenedDatabase = openDatabase(RoomDatabase.JournalMode.TRUNCATE)
