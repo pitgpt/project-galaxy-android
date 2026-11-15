@@ -14,6 +14,7 @@ import com.pitgpt.galaxy.ui.loadLatestRecoverableImageGenerationRequest
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import org.junit.Assert.assertEquals
@@ -132,8 +133,68 @@ class SqlCipherProcessDeathRecoveryInstrumentedTest {
                 "A recovered submission claim must not be acquired again",
                 jobStore.markSubmissionStarted(expectedRecord.promptId)
             )
+
+            // Recreate the production provider in the new process. Its deterministic prompt ID
+            // must resolve to the recovered SUBMISSION_STARTED row before any HTTP request.
+            val resumedTransport = RecordingTransport()
+            val resumedProvider = createProvider(resumedTransport, jobStore)
+            assertEquals(
+                "The recovered provider must return the original ComfyUI prompt ID",
+                expectedRecord.promptId,
+                resumedProvider.submit(request)
+            )
+            assertFalse(
+                "A recovered SUBMISSION_STARTED request must not issue POST /prompt",
+                resumedTransport.methods.contains("POST")
+            )
+            assertTrue(
+                "A recovered SUBMISSION_STARTED request must not make any HTTP request",
+                resumedTransport.methods.isEmpty()
+            )
         } finally {
             cleanupFixture()
+        }
+    }
+
+    private fun createProvider(
+        transport: RecordingTransport,
+        store: ComfyUiJobStore
+    ) = ComfyUiImageGenerationProvider(
+        config = ComfyUiConnectionConfig("http://127.0.0.1:8188"),
+        template = ComfyUiWorkflowTemplate(
+            id = "process-death-workflow",
+            workflowJson = """{"1":{"inputs":{"text":"placeholder"}}}""",
+            positivePrompt = ComfyUiNodeInput("1", "text")
+        ),
+        clientId = "galaxy-process-death-test",
+        client = ComfyUiApiClient(transport),
+        jobs = store
+    )
+
+    private class RecordingTransport : ComfyUiApiTransport {
+        val methods = mutableListOf<String>()
+
+        override suspend fun execute(
+            method: String,
+            url: String,
+            body: ByteArray?,
+            bearerToken: String?,
+            connectTimeoutMillis: Int,
+            readTimeoutMillis: Int,
+            maxResponseBytes: Int
+        ): ComfyUiApiResponse {
+            methods += method
+            return ComfyUiApiResponse(200, "{}")
+        }
+
+        override suspend fun getBinary(
+            url: String,
+            bearerToken: String?,
+            connectTimeoutMillis: Int,
+            readTimeoutMillis: Int,
+            maxResponseBytes: Int
+        ): ComfyUiBinaryResponse {
+            throw AssertionError("No binary request is expected during submission recovery")
         }
     }
 
@@ -152,7 +213,7 @@ class SqlCipherProcessDeathRecoveryInstrumentedTest {
     )
 
     private fun jobRecord(request: ImageGenerationRequest) = ComfyUiJobRecord(
-        promptId = PROMPT_ID,
+        promptId = UUID.nameUUIDFromBytes(request.id.toByteArray(Charsets.UTF_8)).toString(),
         requestId = request.id,
         createdAtEpochMillis = request.createdAtEpochMillis
     )
@@ -194,7 +255,6 @@ class SqlCipherProcessDeathRecoveryInstrumentedTest {
     private companion object {
         const val DATABASE_NAME = "galaxy-process-death-recovery.db"
         const val MARKER_NAME = "galaxy-process-death-recovery.pid"
-        const val PROMPT_ID = "process-death-comfyui-prompt"
         const val REQUEST_ID = "process-death-generation-request"
         const val CREATED_AT = 1_794_230_800_000L
     }
