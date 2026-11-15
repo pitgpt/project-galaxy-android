@@ -108,6 +108,10 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             "SQLCipher WAL frames must not expose persisted request identifiers",
             containsBytes(sourceWal.readBytes(), record.requestId.toByteArray(Charsets.UTF_8))
         )
+        assertFalse(
+            "SQLCipher WAL frames must not expose persisted prompt identifiers",
+            containsBytes(sourceWal.readBytes(), record.promptId.toByteArray(Charsets.UTF_8))
+        )
 
         // A process restart retains the database and WAL, but SQLite rebuilds the transient
         // shared-memory index. Copy that durable file set without the -shm sidecar.
