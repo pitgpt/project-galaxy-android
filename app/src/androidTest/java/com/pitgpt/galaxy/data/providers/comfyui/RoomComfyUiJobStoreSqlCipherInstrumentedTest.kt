@@ -11,6 +11,7 @@ import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
 import com.pitgpt.galaxy.ui.loadLatestRecoverableImageGenerationRequest
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
 import java.security.SecureRandom
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
@@ -52,26 +53,12 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
     }
 
     @Test
-    fun preparedAndStartedSubmissionStateSurvivesSqlCipherDatabaseReopen() = runBlocking {
+    fun submissionStateSurvivesSqlCipherReopenAndMissingRemoteHistoryDoesNotResubmit() = runBlocking {
         val record = ComfyUiJobRecord(
             promptId = "prompt-durable-123",
             requestId = "galaxy-request-durable-456",
             createdAtEpochMillis = 1_794_230_400_000L
         )
-        val activeRecord = ComfyUiJobRecord(
-            promptId = "prompt-active-456",
-            requestId = "generation-request-durable",
-            createdAtEpochMillis = 1_794_230_400_001L
-        )
-
-        val firstDatabase = openDatabase()
-        database = firstDatabase
-        val firstStore = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
-        firstStore.put(record)
-        assertTrue(firstStore.markSubmissionStarted(record.promptId))
-        firstStore.markCancelled(record.promptId)
-        firstStore.put(activeRecord)
-        assertTrue(firstStore.markSubmissionStarted(activeRecord.promptId))
         val generationRequest = ImageGenerationRequest(
             id = "generation-request-durable",
             conversationId = "conversation-durable",
@@ -85,7 +72,38 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
             seed = 42L,
             createdAtEpochMillis = 1_794_230_400_001L
         )
+        val activePromptId = UUID.nameUUIDFromBytes(
+            generationRequest.id.toByteArray(Charsets.UTF_8)
+        ).toString()
+        val activeRecord = ComfyUiJobRecord(
+            promptId = activePromptId,
+            requestId = generationRequest.id,
+            createdAtEpochMillis = generationRequest.createdAtEpochMillis
+        )
+
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val firstStore = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+        firstStore.put(record)
+        assertTrue(firstStore.markSubmissionStarted(record.promptId))
+        firstStore.markCancelled(record.promptId)
         RoomImageGenerationRequestStore(firstDatabase.imageGenerationRequestDao()).put(generationRequest)
+
+        // Simulate an ambiguous acknowledgement after the durable claim. The provider must
+        // leave SUBMISSION_STARTED in SQLCipher rather than making the request safe to retry.
+        val firstTransport = RecordingTransport(
+            failure = IOException("simulated lost submission acknowledgement")
+        )
+        val uncertain = try {
+            createProvider(firstTransport, firstStore).submit(generationRequest)
+            throw AssertionError("The ambiguous transport failure must remain unresolved")
+        } catch (failure: ComfyUiSubmissionUncertainException) {
+            failure
+        }
+        assertEquals(activePromptId, uncertain.promptId)
+        assertEquals(listOf("POST"), firstTransport.methods)
+        assertEquals(activeRecord.copy(submissionStarted = true), firstStore.get(activePromptId))
+
         firstDatabase.close()
         database = null
 
@@ -108,10 +126,9 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         database = reopenedDatabase
         val reopenedStore = RoomComfyUiJobStore(reopenedDatabase.comfyUiJobDao())
         val expected = record.copy(cancelled = true, submissionStarted = true)
-
         val expectedActive = activeRecord.copy(submissionStarted = true)
         assertEquals(expected, reopenedStore.get(record.promptId))
-        assertEquals(expectedActive, reopenedStore.get(activeRecord.promptId))
+        assertEquals(expectedActive, reopenedStore.get(activePromptId))
         assertEquals(listOf(expected, expectedActive), reopenedStore.all())
 
         val reopenedRequests = RoomImageGenerationRequestStore(reopenedDatabase.imageGenerationRequestDao())
@@ -128,6 +145,87 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         assertEquals(generationRequest, restored?.request)
         assertEquals(expectedActive, restored?.job)
         assertFalse(restored?.canResumeSafely ?: true)
+
+        // The new provider first reconciles the persisted prompt against ComfyUI after reopen.
+        // A queue miss followed by an empty history response is ambiguous, not permission to resubmit.
+        val resumedTransport = RecordingTransport(
+            responses = listOf(
+                ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""),
+                ComfyUiApiResponse(200, "{}")
+            )
+        )
+        val resumedProvider = createProvider(resumedTransport, reopenedStore)
+        val missingRemoteJob = try {
+            resumedProvider.status(activePromptId)
+            throw AssertionError("A prompt missing from both queue and history must remain unresolved")
+        } catch (failure: ComfyUiApiException) {
+            failure
+        }
+        assertEquals(null, missingRemoteJob.httpStatusCode)
+        assertEquals(listOf("GET", "GET"), resumedTransport.methods)
+        assertEquals(
+            listOf(
+                "http://192.168.1.20:8188/queue",
+                "http://192.168.1.20:8188/history/$activePromptId"
+            ),
+            resumedTransport.urls
+        )
+        assertEquals(expectedActive, reopenedStore.get(activePromptId))
+
+        // Retrying the same durable request still returns its prompt ID without a second POST.
+        assertEquals(activePromptId, resumedProvider.submit(requireNotNull(restored).request))
+        assertEquals(listOf("GET", "GET"), resumedTransport.methods)
+        assertEquals(expectedActive, reopenedStore.get(activePromptId))
+    }
+
+    private fun createProvider(
+        transport: RecordingTransport,
+        store: ComfyUiJobStore
+    ) = ComfyUiImageGenerationProvider(
+        config = ComfyUiConnectionConfig("http://192.168.1.20:8188"),
+        template = ComfyUiWorkflowTemplate(
+            id = "workflow-v1",
+            workflowJson = """{"1":{"inputs":{"text":"placeholder"}}}""",
+            positivePrompt = ComfyUiNodeInput("1", "text")
+        ),
+        clientId = "galaxy-recovery-test",
+        client = ComfyUiApiClient(transport),
+        jobs = store
+    )
+
+    private class RecordingTransport(
+        private val responses: List<ComfyUiApiResponse> = emptyList(),
+        private val failure: Exception? = null
+    ) : ComfyUiApiTransport {
+        val methods = mutableListOf<String>()
+        val urls = mutableListOf<String>()
+        private var responseIndex = 0
+
+        override suspend fun execute(
+            method: String,
+            url: String,
+            body: ByteArray?,
+            bearerToken: String?,
+            connectTimeoutMillis: Int,
+            readTimeoutMillis: Int,
+            maxResponseBytes: Int
+        ): ComfyUiApiResponse {
+            methods += method
+            urls += url
+            failure?.let { throw it }
+            return responses.getOrNull(responseIndex++)
+                ?: ComfyUiApiResponse(200, "{}")
+        }
+
+        override suspend fun getBinary(
+            url: String,
+            bearerToken: String?,
+            connectTimeoutMillis: Int,
+            readTimeoutMillis: Int,
+            maxResponseBytes: Int
+        ): ComfyUiBinaryResponse {
+            throw AssertionError("Image download is not expected during submission recovery")
+        }
     }
 
     private fun openDatabase(): GalaxyDatabase {
