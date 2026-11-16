@@ -42,7 +42,7 @@ class HotRollbackJournalProcessDeathInstrumentedTest {
             FrameworkSQLiteDatabase.OPEN_READWRITE
         )
         try {
-            database.rawQuery("PRAGMA journal_mode", null).use { cursor ->
+            database.rawQuery("PRAGMA journal_mode=DELETE", null).use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals("delete", cursor.getString(0).lowercase())
             }
