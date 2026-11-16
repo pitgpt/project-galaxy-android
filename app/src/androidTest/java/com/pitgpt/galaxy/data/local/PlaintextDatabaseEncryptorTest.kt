@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import net.zetetic.database.sqlcipher.SQLiteDatabase
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -267,6 +268,214 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun migrationMovesPersistentRollbackJournalWithPlaintextBackupAndCompleteRemovesIt() {
+        createPlaintextDatabase()
+        val journalBytes = createPersistentRollbackJournal(databaseFile)
+        val journal = File(databaseFile.path + "-journal")
+
+        val pending = checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val backupJournal = File(backup.path + "-journal")
+
+        assertFalse("The journal must move away from the encrypted database path", journal.exists())
+        assertArrayEquals("The persistent journal must remain byte-for-byte attached to the plaintext backup", journalBytes, backupJournal.readBytes())
+        openEncrypted(databaseFile, databaseKey).use { encrypted ->
+            assertEquals(3L, countRows(encrypted, "memory_items"))
+        }
+
+        encryptor.complete(pending)
+
+        assertFalse("Completing migration must remove the plaintext journal sidecar", backupJournal.exists())
+    }
+
+    @Test
+    fun restoresMovedPersistentJournalBeforeContinuingMigration() {
+        createPlaintextDatabase()
+        val journalBytes = createPersistentRollbackJournal(databaseFile)
+        val journal = File(databaseFile.path + "-journal")
+        val backupJournal = File(directory, "galaxy-test.db.plaintext-backup-journal")
+        assertTrue(journal.renameTo(backupJournal))
+
+        val temporaryDirectory = File(directory, "galaxy-test.db.encrypted-tmp")
+        assertTrue(temporaryDirectory.mkdirs())
+        File(temporaryDirectory, "keep").writeText("block deletion until sidecar recovery is observed")
+        try {
+            var migrationFailure: IllegalStateException? = null
+            try {
+                encryptor.migrateIfNeeded(databaseFile, databaseKey)
+            } catch (failure: IllegalStateException) {
+                migrationFailure = failure
+            }
+
+            assertNotNull("The non-empty temporary directory must stop migration after recovery", migrationFailure)
+            assertTrue(databaseFile.exists())
+            assertTrue(encryptor.isPlaintextDatabase(databaseFile))
+            assertArrayEquals("The journal must be restored to the canonical plaintext database path", journalBytes, journal.readBytes())
+            assertFalse("The backup-named journal must no longer be orphaned", backupJournal.exists())
+        } finally {
+            temporaryDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rollbackRestoresPersistentPlaintextJournalAndRemovesEncryptedJournalSidecar() {
+        createPlaintextDatabase()
+        val journalBytes = createPersistentRollbackJournal(databaseFile)
+        val pending = checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val backupJournal = File(backup.path + "-journal")
+        assertArrayEquals(journalBytes, backupJournal.readBytes())
+
+        val encryptedJournal = File(databaseFile.path + "-journal")
+        val encryptedJournalBytes = byteArrayOf(0x31, 0x42, 0x53, 0x64)
+        encryptedJournal.writeBytes(encryptedJournalBytes)
+
+        encryptor.rollback(pending)
+
+        assertTrue(encryptor.isPlaintextDatabase(databaseFile))
+        assertFalse(backup.exists())
+        assertArrayEquals("The plaintext journal must be restored beside its database", journalBytes, encryptedJournal.readBytes())
+        assertFalse(File(directory, "galaxy-test.db.encrypted-failed").exists())
+        assertFalse(File(directory, "galaxy-test.db.encrypted-failed-journal").exists())
+
+        FrameworkSQLiteDatabase.openDatabase(
+            databaseFile.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READONLY
+        ).use { restored ->
+            assertEquals(3L, countFrameworkRows(restored, "memory_items"))
+            restored.rawQuery("SELECT content FROM memory_items WHERE id = 'journal-record'", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Persistent rollback journal row", cursor.getString(0))
+            }
+        }
+    }
+
+    @Test
+    fun removesOrphanRollbackJournalWhenEncryptedDatabaseHasNoPlaintextBackup() {
+        createPlaintextDatabase()
+        val pending = checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+        encryptor.complete(pending)
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        assertFalse("The plaintext backup must be absent before orphan sidecars are created", backup.exists())
+        val orphanWal = File(backup.path + "-wal")
+        val orphanShm = File(backup.path + "-shm")
+        val orphanJournal = File(backup.path + "-journal")
+        orphanWal.writeBytes(byteArrayOf(0x11, 0x22, 0x33))
+        orphanShm.writeBytes(byteArrayOf(0x44, 0x55, 0x66))
+        orphanJournal.writeBytes(byteArrayOf(0x77, 0x66, 0x55, 0x44))
+
+        val recovered = encryptor.migrateIfNeeded(databaseFile, databaseKey)
+
+        assertEquals("An already encrypted database without a plaintext backup needs no pending migration", null, recovered)
+        assertFalse("The orphan WAL must be removed", orphanWal.exists())
+        assertFalse("The orphan SHM must be removed", orphanShm.exists())
+        assertFalse("The orphan plaintext rollback journal must be removed", orphanJournal.exists())
+        assertFalse(encryptor.isPlaintextDatabase(databaseFile))
+        openEncrypted(databaseFile, databaseKey).use { encrypted ->
+            assertEquals(2L, countRows(encrypted, "character_profiles"))
+            assertEquals(3L, countRows(encrypted, "conversation_messages"))
+            assertEquals(2L, countRows(encrypted, "memory_items"))
+        }
+    }
+
+    @Test
+    fun rollbackRefusesToOverwriteExistingFailedEncryptedCandidate() {
+        createPlaintextDatabase()
+        val pending = checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+        SQLiteDatabase.openDatabase(
+            failedEncrypted.absolutePath,
+            Base64.encodeToString(databaseKey, Base64.NO_WRAP),
+            null,
+            SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.CREATE_IF_NECESSARY,
+            null
+        ).use { candidate ->
+            candidate.execSQL("CREATE TABLE retained_marker (id TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL)")
+            candidate.execSQL("INSERT INTO retained_marker VALUES ('previous', 'keep this encrypted candidate')")
+        }
+
+        val failedCandidateBytes = failedEncrypted.readBytes()
+        val activeEncryptedBytes = databaseFile.readBytes()
+        val plaintextBackupBytes = backup.readBytes()
+
+        var rollbackFailure: IllegalStateException? = null
+        try {
+            encryptor.rollback(pending)
+        } catch (failure: IllegalStateException) {
+            rollbackFailure = failure
+        }
+
+        assertNotNull("Rollback must fail closed when a previous encrypted candidate exists", rollbackFailure)
+        assertArrayEquals(failedCandidateBytes, failedEncrypted.readBytes())
+        assertArrayEquals(activeEncryptedBytes, databaseFile.readBytes())
+        assertArrayEquals(plaintextBackupBytes, backup.readBytes())
+
+        openEncrypted(failedEncrypted, databaseKey).use { candidate ->
+            assertEquals(1L, countRows(candidate, "retained_marker"))
+            candidate.rawQuery("SELECT value FROM retained_marker WHERE id = 'previous'", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("keep this encrypted candidate", cursor.getString(0))
+            }
+        }
+        openEncrypted(databaseFile, databaseKey).use { active ->
+            assertEquals(2L, countRows(active, "character_profiles"))
+            assertEquals(3L, countRows(active, "conversation_messages"))
+            assertEquals(2L, countRows(active, "memory_items"))
+        }
+        FrameworkSQLiteDatabase.openDatabase(
+            backup.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READONLY
+        ).use { restored ->
+            assertEquals(2L, countFrameworkRows(restored, "character_profiles"))
+            assertEquals(3L, countFrameworkRows(restored, "conversation_messages"))
+            assertEquals(2L, countFrameworkRows(restored, "memory_items"))
+        }
+    }
+
+    @Test
+    fun rollbackRefusesToOverwriteOrphanFailedSidecars() {
+        createPlaintextDatabase()
+        val pending = checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+        val failedWal = File(failedEncrypted.path + "-wal")
+        val failedShm = File(failedEncrypted.path + "-shm")
+        val failedJournal = File(failedEncrypted.path + "-journal")
+        val walBytes = byteArrayOf(0x11, 0x22, 0x33)
+        val shmBytes = byteArrayOf(0x44, 0x55, 0x66)
+        val journalBytes = byteArrayOf(0x77, 0x66, 0x55, 0x44)
+        failedWal.writeBytes(walBytes)
+        failedShm.writeBytes(shmBytes)
+        failedJournal.writeBytes(journalBytes)
+
+        val activeEncryptedBytes = databaseFile.readBytes()
+        val plaintextBackupBytes = backup.readBytes()
+
+        var rollbackFailure: IllegalStateException? = null
+        try {
+            encryptor.rollback(pending)
+        } catch (failure: IllegalStateException) {
+            rollbackFailure = failure
+        }
+
+        assertNotNull("Rollback must fail closed when orphan failed-candidate sidecars exist", rollbackFailure)
+        assertArrayEquals(walBytes, failedWal.readBytes())
+        assertArrayEquals(shmBytes, failedShm.readBytes())
+        assertArrayEquals(journalBytes, failedJournal.readBytes())
+        assertArrayEquals(activeEncryptedBytes, databaseFile.readBytes())
+        assertArrayEquals(plaintextBackupBytes, backup.readBytes())
+        assertTrue(failedWal.exists())
+        assertTrue(failedShm.exists())
+        assertTrue(failedJournal.exists())
+    }
+
+    @Test
     fun wrongKeyDoesNotDeleteOriginalPlaintextRollbackCopy() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
@@ -286,6 +495,32 @@ class PlaintextDatabaseEncryptorTest {
         } finally {
             wrongKey.fill(0)
         }
+    }
+
+    private fun createPersistentRollbackJournal(file: File): ByteArray {
+        FrameworkSQLiteDatabase.openDatabase(
+            file.absolutePath,
+            null,
+            FrameworkSQLiteDatabase.OPEN_READWRITE
+        ).use { db ->
+            db.rawQuery("PRAGMA journal_mode=PERSIST", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("persist", cursor.getString(0).lowercase())
+            }
+            db.beginTransaction()
+            try {
+                db.execSQL(
+                    "INSERT INTO memory_items VALUES ('journal-record', 'Persistent rollback journal row')"
+                )
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+        }
+
+        val journal = File(file.path + "-journal")
+        assertTrue("PERSIST mode must leave a rollback journal file", journal.isFile && journal.length() > 0L)
+        return journal.readBytes()
     }
 
     private fun createPlaintextDatabase() {
@@ -341,8 +576,12 @@ class PlaintextDatabaseEncryptorTest {
             File(directory, "galaxy-test.db.plaintext-backup"),
             File(directory, "galaxy-test.db.plaintext-backup-wal"),
             File(directory, "galaxy-test.db.plaintext-backup-shm"),
+            File(directory, "galaxy-test.db.plaintext-backup-journal"),
             File(directory, "galaxy-test.db.encrypted-tmp"),
-            File(directory, "galaxy-test.db.encrypted-failed")
+            File(directory, "galaxy-test.db.encrypted-failed"),
+            File(directory, "galaxy-test.db.encrypted-failed-wal"),
+            File(directory, "galaxy-test.db.encrypted-failed-shm"),
+            File(directory, "galaxy-test.db.encrypted-failed-journal")
         ).forEach { it.delete() }
     }
 }
