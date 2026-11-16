@@ -47,10 +47,20 @@ class HotRollbackJournalProcessDeathInstrumentedTest {
                 assertEquals("delete", cursor.getString(0).lowercase())
             }
             database.execSQL("PRAGMA synchronous=FULL")
+            database.execSQL("PRAGMA cache_size=1")
+            database.execSQL("PRAGMA cache_spill=ON")
             database.beginTransaction()
-            database.execSQL(
-                "INSERT INTO crash_records (id, value) VALUES ('uncommitted', 'must be rolled back')"
-            )
+
+            // Force dirty pages out of the one-page cache while the transaction remains
+            // uncommitted. SQLite must write the original page images and a valid journal
+            // header before spilling database pages to disk.
+            val payload = "x".repeat(8 * 1024)
+            repeat(64) { index ->
+                database.execSQL(
+                    "INSERT INTO crash_records (id, value) VALUES (?, ?)",
+                    arrayOf("uncommitted-$index", payload)
+                )
+            }
 
             val journal = rollbackJournal
             assertTrue("An uncommitted DELETE-mode transaction must create a rollback journal", journal.isFile)
@@ -108,7 +118,7 @@ class HotRollbackJournalProcessDeathInstrumentedTest {
             openEncrypted(databaseFile, key).use { encrypted ->
                 assertEquals(1L, countRows(encrypted))
                 assertEquals("committed value", valueForId(encrypted, "committed"))
-                assertEquals(null, valueForId(encrypted, "uncommitted"))
+                assertEquals(null, valueForId(encrypted, "uncommitted-0"))
                 encrypted.rawQuery("PRAGMA integrity_check", null).use { cursor ->
                     assertTrue(cursor.moveToFirst())
                     assertEquals("ok", cursor.getString(0).lowercase())
@@ -122,7 +132,7 @@ class HotRollbackJournalProcessDeathInstrumentedTest {
             ).use { restored ->
                 assertEquals(1L, countRows(restored))
                 assertEquals("committed value", valueForId(restored, "committed"))
-                assertEquals(null, valueForId(restored, "uncommitted"))
+                assertEquals(null, valueForId(restored, "uncommitted-0"))
             }
 
             encryptor.complete(pending)
