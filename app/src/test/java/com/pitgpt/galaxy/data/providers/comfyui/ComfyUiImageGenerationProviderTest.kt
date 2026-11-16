@@ -87,6 +87,56 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(listOf("POST"), transport.methods)
     }
 
+    @Test fun acceptedPromptWithNodeDiagnosticsIsTreatedAsSubmitted() = runBlocking {
+        val promptId = stablePromptId(request)
+        val transport = FakeTransport().apply {
+            responses.add(
+                ComfyUiApiResponse(
+                    200,
+                    """{"prompt_id":"$promptId","number":3,"node_errors":{"3":{"errors":[{"type":"required_input_missing"}]}}}"""
+                )
+            )
+        }
+        val store = InMemoryComfyUiJobStore()
+
+        assertEquals(promptId, provider(transport, store).submit(request))
+        assertEquals(
+            ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis, submissionStarted = true),
+            store.get(promptId)
+        )
+        assertEquals(listOf("POST"), transport.methods)
+    }
+
+    @Test fun definiteValidationRejectionRemovesIntentAndAllowsRetry() = runBlocking {
+        val promptId = stablePromptId(request)
+        val transport = FakeTransport().apply {
+            responses.add(
+                ComfyUiApiResponse(
+                    400,
+                    """{"error":{"type":"prompt_validation","message":"Invalid prompt"},"node_errors":{"3":{"errors":[{"type":"required_input_missing"}]}}}"""
+                )
+            )
+            responses.add(
+                ComfyUiApiResponse(200, """{"prompt_id":"$promptId","number":4,"node_errors":{}}""")
+            )
+        }
+        val store = InMemoryComfyUiJobStore()
+        val activeProvider = provider(transport, store)
+
+        val rejection = assertThrows(ComfyUiApiException::class.java) {
+            runBlocking { activeProvider.submit(request) }
+        }
+
+        assertEquals(400, rejection.httpStatusCode)
+        assertNull(store.get(promptId))
+        assertEquals(promptId, activeProvider.submit(request))
+        assertEquals(
+            ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis, submissionStarted = true),
+            store.get(promptId)
+        )
+        assertEquals(listOf("POST", "POST"), transport.methods)
+    }
+
     @Test fun cancellationDuringSubmissionKeepsIntentAndRetryDoesNotResubmit() = runBlocking {
         val transport = FakeTransport().apply {
             failure = CancellationException("simulated caller cancellation")
