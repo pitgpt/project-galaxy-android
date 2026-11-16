@@ -1,5 +1,6 @@
 package com.pitgpt.galaxy.data.media
 
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileFilter
 import java.nio.file.Files
@@ -89,6 +90,52 @@ class EncryptedMediaStoreTest {
     }
 
     @Test
+    fun boundedReadAcceptsAStreamAtTheExactLimit() {
+        val expected = ByteArray(64) { it.toByte() }
+        val input = ByteArrayInputStream(expected)
+
+        assertArrayEquals(expected, EncryptedMediaStore.readBounded(input, expected.size))
+        assertEquals(0, input.available())
+    }
+
+    @Test
+    fun boundedReadRejectsGrowthWithoutReadingTheEntireStream() {
+        val maximumBytes = 64
+        val input = ByteArrayInputStream(ByteArray(maximumBytes + 2))
+
+        val failure = assertThrows(IllegalArgumentException::class.java) {
+            EncryptedMediaStore.readBounded(input, maximumBytes)
+        }
+
+        assertTrue(failure.message?.contains("size limit") == true)
+        assertEquals(
+            "The reader may consume only the configured limit plus one detection byte",
+            1,
+            input.available()
+        )
+    }
+
+    @Test
+    fun readRejectsOversizedFileBeforeRequestingKeystoreKey() {
+        File(directory, "asset_12.gcm").writeBytes(ByteArray(2048))
+
+        val failure = assertThrows(IllegalArgumentException::class.java) {
+            store.read("asset_12", "image/png")
+        }
+
+        assertTrue(failure.message?.contains("invalid size") == true)
+        assertEquals(0, keyProvider.existingCalls)
+        assertEquals(0, keyProvider.createCalls)
+    }
+
+    @Test
+    fun rejectsMediaLimitsThatWouldOverflowEncryptedFileSizeArithmetic() {
+        assertThrows(IllegalArgumentException::class.java) {
+            EncryptedMediaStore(directory, keyProvider, maxAssetBytes = Int.MAX_VALUE)
+        }
+    }
+
+    @Test
     fun deleteRemovesEncryptedAssetAndIsIdempotentlyObservable() {
         store.save("asset_07", "image/png", byteArrayOf(5, 6, 7))
 
@@ -139,6 +186,7 @@ class EncryptedMediaStoreTest {
     ) : MediaEncryptionKeyProvider {
         var available = true
         var createCalls = 0
+        var existingCalls = 0
 
         override fun getOrCreateKey(): SecretKey {
             createCalls++
@@ -147,6 +195,7 @@ class EncryptedMediaStoreTest {
         }
 
         override fun getExistingKey(): SecretKey {
+            existingCalls++
             check(available) { "Test key is unavailable." }
             return key
         }
