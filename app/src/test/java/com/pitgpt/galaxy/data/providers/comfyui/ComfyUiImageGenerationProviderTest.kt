@@ -126,6 +126,35 @@ class ComfyUiImageGenerationProviderTest {
         assertTrue(transport.urls.isEmpty())
     }
 
+    @Test fun cancelledPreparedJobIsRejectedBeforeNetworkSubmission() {
+        val promptId = stablePromptId(request)
+        val transport = FakeTransport()
+        val existing = ComfyUiJobRecord(
+            promptId = promptId,
+            requestId = request.id,
+            createdAtEpochMillis = request.createdAtEpochMillis,
+            cancelled = true
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, ExistingJobStore(existing)).submit(request) }
+        }
+
+        assertTrue("A cancelled PREPARED job must not reach ComfyUI", transport.urls.isEmpty())
+    }
+
+    @Test fun failedSubmissionClaimIsNotReportedAsSuccessfullySubmitted() {
+        val promptId = stablePromptId(request)
+        val transport = FakeTransport()
+        val existing = ComfyUiJobRecord(promptId, request.id, request.createdAtEpochMillis)
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, ExistingJobStore(existing)).submit(request) }
+        }
+
+        assertTrue("A caller without the durable claim must not reach ComfyUI", transport.urls.isEmpty())
+    }
+
     @Test fun continuesWhenIntentWriteCommittedBeforeStoreAcknowledgementFailed() = runBlocking {
         val promptId = stablePromptId(request)
         val transport = FakeTransport().apply {
@@ -159,7 +188,7 @@ class ComfyUiImageGenerationProviderTest {
             responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""))
         }
         val store = InMemoryComfyUiJobStore().apply {
-            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis))
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis, submissionStarted = true))
         }
         provider(transport, store).cancel("prompt-123")
         assertTrue(store.get("prompt-123")!!.cancelled)
@@ -175,7 +204,7 @@ class ComfyUiImageGenerationProviderTest {
             responses.add(ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""))
         }
         val store = PausingMarkCancelledJobStore(
-            ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis)
+            ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis, submissionStarted = true)
         )
         val cancellation = launch { provider(transport, store).cancel("prompt-123") }
 
@@ -196,7 +225,7 @@ class ComfyUiImageGenerationProviderTest {
             responses.add(ComfyUiApiResponse(200, """{"prompt-123":{"status":{"status_str":"success","completed":true},"outputs":{}}}"""))
         }
         val store = InMemoryComfyUiJobStore().apply {
-            runBlocking { put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis)) }
+            runBlocking { put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis, submissionStarted = true)) }
         }
 
         assertThrows(IllegalStateException::class.java) {
@@ -211,7 +240,7 @@ class ComfyUiImageGenerationProviderTest {
             responses.add(ComfyUiApiResponse(200, """{"queue_running":[[0,"prompt-123",{},[],[]]],"queue_pending":[]}"""))
         }
         val store = InMemoryComfyUiJobStore().apply {
-            runBlocking { put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis)) }
+            runBlocking { put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis, submissionStarted = true)) }
         }
         assertThrows(IllegalStateException::class.java) {
             runBlocking { provider(transport, store).cancel("prompt-123") }
@@ -241,7 +270,7 @@ class ComfyUiImageGenerationProviderTest {
             binary = ComfyUiBinaryResponse(200, "image/png", png)
         }
         val store = InMemoryComfyUiJobStore().apply {
-            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis))
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis, submissionStarted = true))
         }
         val asset = provider(transport, store).result("prompt-123")
         assertEquals(request.id, asset.requestId)
@@ -265,7 +294,7 @@ class ComfyUiImageGenerationProviderTest {
             binary = ComfyUiBinaryResponse(200, "image/png", png)
         }
         val store = InMemoryComfyUiJobStore().apply {
-            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis))
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis, submissionStarted = true))
         }
 
         val result = provider(transport, store).completedImage("prompt-123")
@@ -292,12 +321,15 @@ class ComfyUiImageGenerationProviderTest {
             record.takeIf { it.promptId == promptId }
 
         override suspend fun markSubmissionStarted(promptId: String): Boolean {
-            if (record.promptId != promptId || record.submissionStarted) return false
+            if (record.promptId != promptId || record.submissionStarted || record.cancelled) return false
             record = record.copy(submissionStarted = true)
             return true
         }
 
         override suspend fun markCancelled(promptId: String) {
+            check(record.promptId == promptId && record.submissionStarted) {
+                "Only a submitted ComfyUI job can be cancelled"
+            }
             markStarted.complete(Unit)
             allowMark.await()
             record = record.copy(cancelled = true)
@@ -331,6 +363,7 @@ class ComfyUiImageGenerationProviderTest {
 
         override suspend fun markSubmissionStarted(promptId: String): Boolean {
             val record = records[promptId] ?: return false
+            if (record.submissionStarted || record.cancelled) return false
             records[promptId] = record.copy(submissionStarted = true)
             return true
         }

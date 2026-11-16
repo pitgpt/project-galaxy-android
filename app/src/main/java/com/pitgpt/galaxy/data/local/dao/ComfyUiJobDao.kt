@@ -17,10 +17,10 @@ interface ComfyUiJobDao {
     @Query("SELECT * FROM comfyui_jobs ORDER BY createdAtEpochMillis ASC, promptId ASC")
     suspend fun getAll(): List<ComfyUiJobEntity>
 
-    @Query("UPDATE comfyui_jobs SET submissionStarted = 1 WHERE promptId = :promptId AND submissionStarted = 0")
+    @Query("UPDATE comfyui_jobs SET submissionStarted = 1 WHERE promptId = :promptId AND submissionStarted = 0 AND cancelled = 0")
     suspend fun markSubmissionStarted(promptId: String): Int
 
-    @Query("UPDATE comfyui_jobs SET cancelled = 1 WHERE promptId = :promptId")
+    @Query("UPDATE comfyui_jobs SET cancelled = 1 WHERE promptId = :promptId AND submissionStarted = 1")
     suspend fun markCancelled(promptId: String): Int
 
     @Query("DELETE FROM comfyui_jobs WHERE promptId = :promptId")
