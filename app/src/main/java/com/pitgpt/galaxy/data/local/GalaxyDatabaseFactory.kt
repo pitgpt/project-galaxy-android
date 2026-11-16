@@ -7,7 +7,6 @@ import android.util.Base64
 import androidx.room.Room
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
 object GalaxyDatabaseFactory {
     internal val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -121,14 +120,19 @@ object GalaxyDatabaseFactory {
             "Could not create the Galaxy database directory."
         }
 
+        val encryptedTemporaryFile = File(
+            databaseFile.parentFile,
+            databaseFile.name + ".encrypted-tmp"
+        )
         val databaseExists = databaseFile.exists()
         val databaseIsPlaintext = encryptor.isPlaintextDatabase(databaseFile)
-        val encryptedTemporaryExists = File(
-            databaseFile.parentFile,
-            "${databaseFile.name}.encrypted-tmp"
-        ).exists()
-        val databaseKey = EncryptedDatabaseKeyStore(context)
-            .getOrCreateDatabaseKey(databaseExists, databaseIsPlaintext, encryptedTemporaryExists)
+        val encryptedTemporaryExists = encryptedTemporaryFile.exists()
+        val keyStore = EncryptedDatabaseKeyStore(context)
+        val databaseKey = keyStore.getOrCreateDatabaseKey(
+            databaseExists,
+            databaseIsPlaintext,
+            encryptedTemporaryExists
+        )
         val pendingMigration = try {
             encryptor.migrateIfNeeded(databaseFile, databaseKey)
         } catch (failure: Exception) {
@@ -138,15 +142,26 @@ object GalaxyDatabaseFactory {
                 failure
             )
         }
-
-        val passphraseBytes = Base64.encode(databaseKey, Base64.NO_WRAP)
         databaseKey.fill(0)
+
+        val passphraseProvider = {
+            val key = keyStore.getOrCreateDatabaseKey(
+                databaseExists = databaseFile.exists(),
+                databaseIsPlaintext = encryptor.isPlaintextDatabase(databaseFile),
+                encryptedTemporaryExists = encryptedTemporaryFile.exists()
+            )
+            try {
+                Base64.encode(key, Base64.NO_WRAP)
+            } finally {
+                key.fill(0)
+            }
+        }
         val database = Room.databaseBuilder(
             context,
             GalaxyDatabase::class.java,
             DATABASE_NAME
         )
-            .openHelperFactory(SupportOpenHelperFactory(passphraseBytes, null, true))
+            .openHelperFactory(ZeroizingSqlCipherOpenHelperFactory(passphraseProvider))
             .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .build()
 
@@ -159,7 +174,6 @@ object GalaxyDatabaseFactory {
             runCatching { encryptor.rollback(pendingMigration) }
                 .exceptionOrNull()
                 ?.let(failure::addSuppressed)
-            passphraseBytes.fill(0)
             throw IllegalStateException(
                 "Galaxy could not open its encrypted local database. The original data was retained where possible; inspect suppressed recovery errors before retrying.",
                 failure
