@@ -2,9 +2,12 @@ package com.pitgpt.galaxy.data.media
 
 import android.content.Context
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
@@ -31,6 +34,9 @@ class EncryptedMediaStore(
 ) {
     init {
         require(maxAssetBytes > 0) { "The media size limit must be positive." }
+        require(maxAssetBytes <= Int.MAX_VALUE - HEADER_BYTES - GCM_TAG_BYTES - 1) {
+            "The media size limit is too large."
+        }
     }
 
     @Synchronized
@@ -88,7 +94,9 @@ class EncryptedMediaStore(
             "Encrypted media file has an invalid size."
         }
 
-        val encoded = source.readBytes()
+        // The length check above is only an early rejection. The file may change between
+        // length() and open(), so the stream itself must enforce the same hard upper bound.
+        val encoded = FileInputStream(source).use { readBounded(it, maximumFileBytes) }
         val input = DataInputStream(ByteArrayInputStream(encoded))
         val magic = ByteArray(MAGIC.size)
         input.readFully(magic)
@@ -169,9 +177,45 @@ class EncryptedMediaStore(
         private const val HEADER_BYTES = 4 + 1 + IV_BYTES
         private const val FILE_EXTENSION = ".gcm"
         private const val TEMP_PREFIX = "galaxy-media-"
+        private const val READ_BUFFER_BYTES = 8 * 1024
         private val MAGIC = byteArrayOf(0x47, 0x4C, 0x58, 0x4D) // GLXM
         private val ASSET_ID_PATTERN = Regex("[A-Za-z0-9_-]{1,128}")
         private val SUPPORTED_MIME_TYPES = setOf("image/png", "image/jpeg", "image/webp")
+
+        /**
+         * Reads at most maxBytes + 1 bytes. The extra byte detects growth beyond the
+         * configured limit without allowing an unbounded read or allocation.
+         */
+        internal fun readBounded(input: InputStream, maxBytes: Int): ByteArray {
+            require(maxBytes in 0 until Int.MAX_VALUE) { "The media read limit is invalid." }
+            val output = ByteArrayOutputStream(minOf(maxBytes, READ_BUFFER_BYTES))
+            val buffer = ByteArray(READ_BUFFER_BYTES)
+            var totalBytes = 0
+
+            while (true) {
+                val remaining = maxBytes - totalBytes
+                val count = input.read(buffer, 0, minOf(buffer.size, remaining + 1))
+                if (count < 0) break
+                if (count == 0) {
+                    val nextByte = input.read()
+                    if (nextByte < 0) break
+                    require(totalBytes < maxBytes) {
+                        "Encrypted media file exceeds the configured size limit."
+                    }
+                    output.write(nextByte)
+                    totalBytes++
+                    continue
+                }
+
+                require(count <= remaining) {
+                    "Encrypted media file exceeds the configured size limit."
+                }
+                output.write(buffer, 0, count)
+                totalBytes += count
+            }
+
+            return output.toByteArray()
+        }
 
         /** Uses filesDir/galaxy_media, which is explicitly excluded from Android backup. */
         fun fromContext(context: Context): EncryptedMediaStore =
