@@ -202,20 +202,23 @@ class HotRollbackJournalProcessDeathInstrumentedTest {
     private fun cleanupFixture() {
         runCatching { HotJournalDatabaseHolder.database?.close() }
         HotJournalDatabaseHolder.database = null
+        val backup = File(databaseFile.parentFile, "$DATABASE_NAME.plaintext-backup")
+        val encryptedTemporary = File(databaseFile.parentFile, "$DATABASE_NAME.encrypted-tmp")
+        val failedEncrypted = File(databaseFile.parentFile, "$DATABASE_NAME.encrypted-failed")
         listOf(
             databaseFile,
             rollbackJournal,
             File(databaseFile.path + "-wal"),
             File(databaseFile.path + "-shm"),
-            File(databaseFile.path + "-plaintext-backup"),
-            File(databaseFile.path + "-plaintext-backup-journal"),
-            File(databaseFile.path + "-plaintext-backup-wal"),
-            File(databaseFile.path + "-plaintext-backup-shm"),
-            File(databaseFile.path + "-encrypted-tmp"),
-            File(databaseFile.path + "-encrypted-failed"),
-            File(databaseFile.path + "-encrypted-failed-journal"),
-            File(databaseFile.path + "-encrypted-failed-wal"),
-            File(databaseFile.path + "-encrypted-failed-shm")
+            backup,
+            File(backup.path + "-journal"),
+            File(backup.path + "-wal"),
+            File(backup.path + "-shm"),
+            encryptedTemporary,
+            failedEncrypted,
+            File(failedEncrypted.path + "-journal"),
+            File(failedEncrypted.path + "-wal"),
+            File(failedEncrypted.path + "-shm")
         ).forEach { it.delete() }
         processMarker.delete()
     }
