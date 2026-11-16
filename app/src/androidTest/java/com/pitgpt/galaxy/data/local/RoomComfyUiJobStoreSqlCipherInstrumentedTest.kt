@@ -60,6 +60,7 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
 
         kotlinx.coroutines.runBlocking {
             store.put(record)
+            assertTrue(store.markSubmissionStarted(record.promptId))
             store.markCancelled(record.promptId)
         }
         database.close()
@@ -78,7 +79,7 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         database = openDatabase()
         val reopenedStore = RoomComfyUiJobStore(database.comfyUiJobDao())
         kotlinx.coroutines.runBlocking {
-            assertEquals(record.copy(cancelled = true), reopenedStore.get(record.promptId))
+            assertEquals(record.copy(cancelled = true, submissionStarted = true), reopenedStore.get(record.promptId))
         }
     }
 
