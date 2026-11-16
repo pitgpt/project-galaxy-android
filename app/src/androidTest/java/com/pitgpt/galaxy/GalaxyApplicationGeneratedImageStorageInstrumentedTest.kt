@@ -80,7 +80,7 @@ class GalaxyApplicationGeneratedImageStorageInstrumentedTest {
 
             val databaseFile = context.getDatabasePath("galaxy.db")
             assertTrue("The production image metadata database must exist", databaseFile.isFile)
-            val plaintextSqliteHeader = "SQLite format 3\\u0000".toByteArray(Charsets.US_ASCII)
+            val plaintextSqliteHeader = "SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)
             val actualHeader = ByteArray(plaintextSqliteHeader.size)
             FileInputStream(databaseFile).use { input ->
                 var offset = 0
