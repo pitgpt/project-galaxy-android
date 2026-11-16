@@ -27,8 +27,10 @@ data class ComfyUiJobRecord(
 interface ComfyUiJobStore {
     suspend fun put(record: ComfyUiJobRecord)
     suspend fun get(promptId: String): ComfyUiJobRecord?
+    /** Marks a job cancelled only after its durable submission claim exists. */
     suspend fun markCancelled(promptId: String)
     suspend fun all(): List<ComfyUiJobRecord> = emptyList()
+    /** Atomically claims PREPARED unless the job is already submitted or cancelled. */
     suspend fun markSubmissionStarted(promptId: String): Boolean
     suspend fun delete(promptId: String) = Unit
 }
@@ -44,7 +46,7 @@ class InMemoryComfyUiJobStore : ComfyUiJobStore {
     override suspend fun markSubmissionStarted(promptId: String): Boolean {
         var claimed = false
         records.computeIfPresent(promptId) { _, record ->
-            if (!record.submissionStarted) {
+            if (!record.submissionStarted && !record.cancelled) {
                 claimed = true
                 record.copy(submissionStarted = true)
             } else {
@@ -55,7 +57,15 @@ class InMemoryComfyUiJobStore : ComfyUiJobStore {
     }
     override suspend fun delete(promptId: String) { records.remove(promptId) }
     override suspend fun markCancelled(promptId: String) {
-        records.computeIfPresent(promptId) { _, value -> value.copy(cancelled = true) }
+        var updated = false
+        records.computeIfPresent(promptId) { _, value ->
+            check(value.submissionStarted) {
+                "A ComfyUI job cannot be cancelled before submission starts"
+            }
+            updated = true
+            value.copy(cancelled = true)
+        }
+        check(updated) { "ComfyUI job could not be marked as cancelled" }
     }
 }
 
@@ -98,6 +108,7 @@ class ComfyUiImageGenerationProvider(
                 "The stable ComfyUI prompt ID is already associated with another Galaxy request"
             }
             if (existing.submissionStarted) return promptId
+            check(!existing.cancelled) { "A cancelled ComfyUI job cannot be submitted" }
         } else {
             try {
                 jobs.put(record)
@@ -116,7 +127,20 @@ class ComfyUiImageGenerationProvider(
 
         // This conditional SQL update is the single-writer claim. Only one concurrent caller
         // may transition PREPARED -> SUBMISSION_STARTED and issue POST /prompt.
-        if (!jobs.markSubmissionStarted(promptId)) return promptId
+        if (!jobs.markSubmissionStarted(promptId)) {
+            // A lost claim is safe only when a read-back proves another caller already
+            // committed SUBMISSION_STARTED. Missing, cancelled, or still-PREPARED rows
+            // must never be reported as successfully submitted.
+            val current = checkNotNull(jobs.get(promptId)) {
+                "The durable ComfyUI submission claim could not be confirmed"
+            }
+            check(current.requestId == request.id) {
+                "The stable ComfyUI prompt ID is already associated with another Galaxy request"
+            }
+            if (current.submissionStarted) return promptId
+            check(!current.cancelled) { "A cancelled ComfyUI job cannot be submitted" }
+            error("The durable ComfyUI submission claim could not be acquired")
+        }
 
         try {
             val submitted = client.submit(config, template, request, clientId, promptId)

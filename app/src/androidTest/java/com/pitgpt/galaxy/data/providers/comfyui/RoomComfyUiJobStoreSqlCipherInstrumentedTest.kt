@@ -23,6 +23,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -324,6 +325,52 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         } finally {
             secondDatabase.close()
         }
+    }
+
+    @Test
+    fun preparedJobCannotBeMarkedCancelledInSqlCipher() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-prepared-cancel-guard",
+            requestId = "request-prepared-cancel-guard",
+            createdAtEpochMillis = 1_794_230_700_000L
+        )
+        val opened = openDatabase()
+        database = opened
+        val store = RoomComfyUiJobStore(opened.comfyUiJobDao())
+        store.put(record)
+
+        val failure = try {
+            store.markCancelled(record.promptId)
+            null
+        } catch (exception: IllegalStateException) {
+            exception
+        }
+
+        assertNotNull("A PREPARED job must not transition directly to CANCELLED", failure)
+        assertEquals(record, store.get(record.promptId))
+    }
+
+    @Test
+    fun cancelledPreparedRowCannotAcquireSqlCipherSubmissionClaim() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-cancelled-prepared-guard",
+            requestId = "request-cancelled-prepared-guard",
+            createdAtEpochMillis = 1_794_230_700_001L
+        )
+        val opened = openDatabase()
+        database = opened
+        val store = RoomComfyUiJobStore(opened.comfyUiJobDao())
+        store.put(record)
+
+        // Seed an inconsistent/legacy row to prove the SQL UPDATE fails closed even
+        // if a cancelled PREPARED record already exists in the encrypted database.
+        opened.openHelper.writableDatabase.execSQL(
+            "UPDATE comfyui_jobs SET cancelled = 1 WHERE promptId = ?",
+            arrayOf(record.promptId)
+        )
+
+        assertFalse(store.markSubmissionStarted(record.promptId))
+        assertEquals(record.copy(cancelled = true), store.get(record.promptId))
     }
 
     private fun containsBytes(container: ByteArray, candidate: ByteArray): Boolean {
