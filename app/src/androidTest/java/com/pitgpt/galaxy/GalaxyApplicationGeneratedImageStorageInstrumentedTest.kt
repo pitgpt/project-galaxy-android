@@ -40,8 +40,8 @@ class GalaxyApplicationGeneratedImageStorageInstrumentedTest {
 
         val request = ImageGenerationRequest(
             id = UUID.randomUUID().toString(),
-            conversationId = "instrumented-\${UUID.randomUUID()}",
-            characterId = "character-\${UUID.randomUUID()}",
+            conversationId = "instrumented-${UUID.randomUUID()}",
+            characterId = "character-${UUID.randomUUID()}",
             prompt = "Synthetic production encrypted-media wiring regression",
             width = 64,
             height = 64,
@@ -49,7 +49,7 @@ class GalaxyApplicationGeneratedImageStorageInstrumentedTest {
         )
         val imageBytes = ByteArray(128) { ((it * 73 + 19) % 256).toByte() }
         val asset = GeneratedImageAsset(
-            assetId = "provider-\${UUID.randomUUID()}",
+            assetId = "provider-${UUID.randomUUID()}",
             requestId = request.id,
             mimeType = "image/png",
             width = 64,
@@ -61,7 +61,7 @@ class GalaxyApplicationGeneratedImageStorageInstrumentedTest {
 
         val stored = repository.save(request, asset, imageBytes)
         val mediaDirectory = File(context.filesDir, EncryptedMediaStore.MEDIA_DIRECTORY)
-        val encryptedFile = File(mediaDirectory, "\${stored.assetId}.gcm")
+        val encryptedFile = File(mediaDirectory, "${stored.assetId}.gcm")
         try {
             assertTrue("The production media directory must remain under app-private filesDir",
                 mediaDirectory.canonicalFile.parentFile == context.filesDir.canonicalFile)
