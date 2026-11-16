@@ -294,10 +294,10 @@ class ComfyUiApiClient(
         val queueNumber = if (body.has("number") && !body.isNull("number")) {
             body.optLong("number").takeIf { it >= 0 }
         } else null
-        val nodeErrors = body.optJSONObject("node_errors")
-        if (nodeErrors != null && nodeErrors.length() > 0) {
-            throw ComfyUiApiException("ComfyUI rejected one or more workflow nodes", response.statusCode)
-        }
+        // ComfyUI includes node_errors in successful responses as diagnostics too.
+        // A 2xx response with a valid prompt_id means the prompt was accepted and queued;
+        // validation rejection is represented by a non-2xx response.
+
         return ComfyUiSubmittedPrompt(promptId, queueNumber)
     }
 
