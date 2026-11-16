@@ -52,8 +52,9 @@ class RoomComfyUiJobStoreTest {
     }
 
     @Test
-    fun cancellationFlagIsPersisted() = runBlocking {
+    fun cancellationFlagIsPersistedOnlyAfterSubmissionStarts() = runBlocking {
         store.put(ComfyUiJobRecord("prompt-123", "request-456", 1234L))
+        assertTrue(store.markSubmissionStarted("prompt-123"))
 
         store.markCancelled("prompt-123")
 
