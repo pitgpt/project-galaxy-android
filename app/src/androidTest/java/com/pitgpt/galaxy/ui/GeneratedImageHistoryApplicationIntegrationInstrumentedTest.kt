@@ -6,12 +6,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.assertExists
 import androidx.compose.ui.test.fetchSemanticsNodes
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.GalaxyApplication
@@ -66,12 +66,12 @@ class GeneratedImageHistoryApplicationIntegrationInstrumentedTest {
 
         var stored: StoredGeneratedImage? = null
         var ciphertextBeforeOpen: ByteArray? = null
-        val encryptedFile: File? = null
 
         try {
-            stored = repository.save(request, asset, plaintext)
+            val saved = repository.save(request, asset, plaintext)
+            stored = saved
             val mediaDirectory = File(context.filesDir, EncryptedMediaStore.MEDIA_DIRECTORY)
-            val ciphertextFile = File(mediaDirectory, "${stored.assetId}.gcm")
+            val ciphertextFile = File(mediaDirectory, "${saved.assetId}.gcm")
             assertTrue("The synthetic result must be stored as encrypted app-private media", ciphertextFile.isFile)
             ciphertextBeforeOpen = ciphertextFile.readBytes()
             assertFalse(
@@ -115,8 +115,8 @@ class GeneratedImageHistoryApplicationIntegrationInstrumentedTest {
                     .fetchSemanticsNodes().isNotEmpty()
             }
 
-            val persisted = repository.get(requireNotNull(stored).assetId)
-            assertEquals("Returning from history must not remove its SQLCipher metadata", stored, persisted)
+            val persisted = repository.get(saved.assetId)
+            assertEquals("Returning from history must not remove its SQLCipher metadata", saved, persisted)
             assertArrayEquals(
                 "Opening and closing the preview must not rewrite encrypted media",
                 ciphertextBeforeOpen,
