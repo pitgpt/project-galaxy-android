@@ -11,6 +11,12 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+private const val DATABASE_KEY_BYTES = 32
+private const val WRAPPING_KEY_BITS = 256
+private const val IV_BYTES = 12
+private const val GCM_TAG_BYTES = 16
+private const val TAG_BITS = 128
+
 /**
  * Stores a random SQLCipher database key wrapped by a device-bound Android Keystore key.
  *
@@ -52,15 +58,18 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
 
     private fun decrypt(encoded: String): ByteArray {
         val payload = Base64.decode(encoded, Base64.NO_WRAP)
-        require(payload.size > IV_BYTES) { "Wrapped database key is truncated." }
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(
-            Cipher.DECRYPT_MODE,
-            existingWrappingKey(),
-            GCMParameterSpec(TAG_BITS, payload.copyOfRange(0, IV_BYTES))
-        )
-        return cipher.doFinal(payload.copyOfRange(IV_BYTES, payload.size)).also {
-            check(it.size == DATABASE_KEY_BYTES) { "Wrapped database key has an invalid length." }
+        return decryptWrappedDatabaseKeyPayload(payload) { decodedPayload ->
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                existingWrappingKey(),
+                GCMParameterSpec(TAG_BITS, decodedPayload, 0, IV_BYTES)
+            )
+            cipher.doFinal(
+                decodedPayload,
+                IV_BYTES,
+                decodedPayload.size - IV_BYTES
+            )
         }
     }
 
@@ -98,13 +107,38 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
         const val KEY_ALIAS = "galaxy_database_key_wrap_aes"
         const val ANDROID_KEY_STORE = "AndroidKeyStore"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
-        const val DATABASE_KEY_BYTES = 32
-        const val WRAPPING_KEY_BITS = 256
-        const val IV_BYTES = 12
-        const val TAG_BITS = 128
     }
 }
 
+/**
+ * Decrypts an Android Keystore-wrapped database-key payload.
+ *
+ * Ownership of [payload] is transferred to this function: its decoded IV/ciphertext buffer is
+ * zeroed on every exit path. A successfully returned key is transferred to the caller. If
+ * decryption succeeds but key-length validation fails, the rejected plaintext key is zeroed too.
+ * The decrypt callback must not retain [payload] after it returns.
+ */
+internal fun decryptWrappedDatabaseKeyPayload(
+    payload: ByteArray,
+    decrypt: (ByteArray) -> ByteArray
+): ByteArray {
+    var decryptedKey: ByteArray? = null
+    try {
+        require(payload.size > IV_BYTES + GCM_TAG_BYTES) {
+            "Wrapped database key is truncated."
+        }
+        val key = decrypt(payload)
+        decryptedKey = key
+        check(key.size == DATABASE_KEY_BYTES) {
+            "Wrapped database key has an invalid length."
+        }
+        decryptedKey = null
+        return key
+    } finally {
+        decryptedKey?.fill(0)
+        payload.fill(0)
+    }
+}
 
 /**
  * A missing wrapping key is recoverable only while the canonical source is plaintext,
