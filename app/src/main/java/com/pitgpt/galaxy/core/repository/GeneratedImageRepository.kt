@@ -4,6 +4,26 @@ import com.pitgpt.galaxy.core.model.GeneratedImageAsset
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 
+/**
+ * Stable failure categories for a stored generated-image read.
+ *
+ * These categories let the UI distinguish device-key loss from missing or unauthenticated
+ * ciphertext without deleting metadata or silently creating a replacement key.
+ */
+enum class GeneratedImageReadFailure {
+    METADATA_MISSING,
+    CIPHERTEXT_MISSING,
+    KEY_UNAVAILABLE,
+    CORRUPT_CIPHERTEXT,
+    INTEGRITY_MISMATCH,
+    STORAGE_UNAVAILABLE
+}
+
+class GeneratedImageReadException(
+    val failure: GeneratedImageReadFailure,
+    cause: Throwable? = null
+) : Exception("Generated image read failed: $failure", cause)
+
 /** Stores image bytes encrypted and keeps only metadata in the encrypted local database. */
 interface GeneratedImageRepository {
     suspend fun save(

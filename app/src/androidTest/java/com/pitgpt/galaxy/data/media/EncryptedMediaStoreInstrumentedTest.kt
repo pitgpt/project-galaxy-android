@@ -107,7 +107,7 @@ class EncryptedMediaStoreInstrumentedTest {
         keyStore.deleteEntry(keyAlias)
         assertFalse("The test-owned key must be absent after simulated key loss", keyStore.containsAlias(keyAlias))
 
-        assertThrows(IllegalStateException::class.java) {
+        assertThrows(MediaEncryptionKeyUnavailableException::class.java) {
             store.read(metadata.assetId, metadata.mimeType)
         }
 
