@@ -73,10 +73,11 @@ class GeneratedImageHistoryApplicationIntegrationInstrumentedTest {
             val mediaDirectory = File(context.filesDir, EncryptedMediaStore.MEDIA_DIRECTORY)
             val ciphertextFile = File(mediaDirectory, "${saved.assetId}.gcm")
             assertTrue("The synthetic result must be stored as encrypted app-private media", ciphertextFile.isFile)
-            ciphertextBeforeOpen = ciphertextFile.readBytes()
+            val ciphertextSnapshot = ciphertextFile.readBytes()
+            ciphertextBeforeOpen = ciphertextSnapshot
             assertFalse(
                 "The encrypted media file must not contain the original PNG payload",
-                containsSubsequence(ciphertextBeforeOpen, plaintext)
+                containsSubsequence(ciphertextSnapshot, plaintext)
             )
 
             composeRule.setContent {
@@ -119,7 +120,7 @@ class GeneratedImageHistoryApplicationIntegrationInstrumentedTest {
             assertEquals("Returning from history must not remove its SQLCipher metadata", saved, persisted)
             assertArrayEquals(
                 "Opening and closing the preview must not rewrite encrypted media",
-                ciphertextBeforeOpen,
+                ciphertextSnapshot,
                 ciphertextFile.readBytes()
             )
             assertTrue("The encrypted asset must remain present after navigation", ciphertextFile.isFile)
