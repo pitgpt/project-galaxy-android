@@ -5,19 +5,16 @@ import com.pitgpt.galaxy.core.model.GeneratedImageAsset
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.repository.GeneratedImageReadException
 import com.pitgpt.galaxy.core.repository.GeneratedImageReadFailure
-
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
 import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
 import com.pitgpt.galaxy.data.local.entity.GeneratedImageEntity
 import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.media.MediaEncryptionKeyProvider
 import com.pitgpt.galaxy.data.media.MediaEncryptionKeyUnavailableException
-
-import java.nio.file.Files
 import java.io.File
-import java.util.UUID
-
+import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import javax.crypto.SecretKey
@@ -87,6 +84,26 @@ class RoomGeneratedImageRepositoryTest {
 
         assertEquals(
             GeneratedImageReadFailure.METADATA_MISSING,
+            (failure as? GeneratedImageReadException)?.failure
+        )
+    }
+
+    @Test
+    fun reportsDatabaseReadFailureAsStorageUnavailable() = runBlocking {
+        val failingRepository = RoomGeneratedImageRepository(
+            failingDao(
+                insertAction = {},
+                getAction = { throw IllegalStateException("database unavailable") }
+            ),
+            mediaStore
+        )
+
+        val failure = runCatching {
+            failingRepository.read(UUID.randomUUID().toString())
+        }.exceptionOrNull()
+
+        assertEquals(
+            GeneratedImageReadFailure.STORAGE_UNAVAILABLE,
             (failure as? GeneratedImageReadException)?.failure
         )
     }
