@@ -11,6 +11,11 @@ import java.io.File
 import java.io.FileInputStream
 import java.security.KeyStore
 import java.util.UUID
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -147,6 +152,145 @@ class SqlCipherComfyUiJobStoreKeystoreReopenInstrumentedTest {
             )
         } finally {
             runCatching { database?.close() }
+            issuedPassphrases.forEach { it.fill(0) }
+            runCatching {
+                KeyStore.getInstance(ANDROID_KEY_STORE).apply {
+                    load(null)
+                    if (containsAlias(wrappingAlias)) deleteEntry(wrappingAlias)
+                }
+            }
+            runCatching { context.deleteSharedPreferences(preferencesName) }
+            context.deleteDatabase(databaseName)
+            listOf("-wal", "-shm", "-journal").forEach { sidecar ->
+                File(databaseFile.path + sidecar).delete()
+            }
+        }
+    }
+
+
+    @Test
+    fun concurrentKeystoreBackedRoomStoresClaimSubmissionAtMostOnceAcrossInstances() = runBlocking {
+        System.loadLibrary("sqlcipher")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val suffix = UUID.randomUUID().toString()
+        val wrappingAlias = "galaxy_test_concurrent_job_store_wrap_$suffix"
+        val preferencesName = "galaxy_test_concurrent_job_store_key_$suffix"
+        val databaseName = "galaxy-concurrent-job-store-$suffix.db"
+        val databaseFile = context.getDatabasePath(databaseName)
+        val keyStore = EncryptedDatabaseKeyStore(
+            context = context,
+            preferencesName = preferencesName,
+            wrappingKeyAlias = wrappingAlias
+        )
+        val issuedPassphrases = mutableListOf<ByteArray>()
+        var firstDatabase: GalaxyDatabase? = null
+        var secondDatabase: GalaxyDatabase? = null
+        var reopenedDatabase: GalaxyDatabase? = null
+
+        fun openDatabase(): GalaxyDatabase {
+            val opened = Room.databaseBuilder(
+                context,
+                GalaxyDatabase::class.java,
+                databaseName
+            )
+                .openHelperFactory(
+                    ZeroizingSqlCipherOpenHelperFactory(
+                        passphraseProvider = {
+                            val key = keyStore.getOrCreateDatabaseKey(
+                                databaseExists = databaseFile.exists(),
+                                databaseIsPlaintext = false,
+                                encryptedTemporaryExists = false
+                            )
+                            try {
+                                Base64.encode(key, Base64.NO_WRAP).also(issuedPassphrases::add)
+                            } finally {
+                                key.fill(0)
+                            }
+                        }
+                    )
+                )
+                .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
+                .build()
+
+            try {
+                opened.openHelper.writableDatabase
+                return opened
+            } catch (failure: Throwable) {
+                runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                throw failure
+            }
+        }
+
+        try {
+            val record = ComfyUiJobRecord(
+                promptId = "prompt-$suffix",
+                requestId = "request-$suffix",
+                createdAtEpochMillis = 1_794_230_500_000L
+            )
+
+            val first = openDatabase()
+            firstDatabase = first
+            val second = openDatabase()
+            secondDatabase = second
+            val firstStore = RoomComfyUiJobStore(first.comfyUiJobDao())
+            val secondStore = RoomComfyUiJobStore(second.comfyUiJobDao())
+            firstStore.put(record)
+
+            assertEquals("Each independent Room helper must obtain its own disposable passphrase", 2, issuedPassphrases.size)
+            assertTrue(issuedPassphrases.all { buffer -> buffer.any { it != 0.toByte() } })
+
+            val startGate = CompletableDeferred<Unit>()
+            val claims = coroutineScope {
+                val workers = (0 until 32).map { index ->
+                    async(Dispatchers.IO) {
+                        startGate.await()
+                        val store = if (index % 2 == 0) firstStore else secondStore
+                        store.markSubmissionStarted(record.promptId)
+                    }
+                }
+                startGate.complete(Unit)
+                workers.awaitAll()
+            }
+
+            assertEquals(
+                "Exactly one caller across both Keystore-backed SQLCipher Room instances may claim PREPARED",
+                1,
+                claims.count { it }
+            )
+            val expected = record.copy(submissionStarted = true)
+            assertEquals(expected, firstStore.get(record.promptId))
+            assertEquals(expected, secondStore.get(record.promptId))
+
+            first.close()
+            firstDatabase = null
+            second.close()
+            secondDatabase = null
+            assertTrue(
+                "Closing each Room helper must zero its own passphrase buffer",
+                issuedPassphrases.all { buffer -> buffer.all { it == 0.toByte() } }
+            )
+
+            val reopened = openDatabase()
+            reopenedDatabase = reopened
+            assertEquals("A fresh Keystore unwrap must supply the reopened helper", 3, issuedPassphrases.size)
+            val reopenedStore = RoomComfyUiJobStore(reopened.comfyUiJobDao())
+            assertEquals(expected, reopenedStore.get(record.promptId))
+            assertFalse(
+                "The durable claim must remain unavailable after a fresh Keystore-backed reopen",
+                reopenedStore.markSubmissionStarted(record.promptId)
+            )
+            assertEquals(expected, reopenedStore.get(record.promptId))
+
+            reopened.close()
+            reopenedDatabase = null
+            assertTrue(
+                "Closing the reopened helper must zero its fresh passphrase buffer",
+                issuedPassphrases.last().all { it == 0.toByte() }
+            )
+        } finally {
+            runCatching { reopenedDatabase?.close() }
+            runCatching { secondDatabase?.close() }
+            runCatching { firstDatabase?.close() }
             issuedPassphrases.forEach { it.fill(0) }
             runCatching {
                 KeyStore.getInstance(ANDROID_KEY_STORE).apply {
