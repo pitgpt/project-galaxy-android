@@ -3,9 +3,6 @@ package com.pitgpt.galaxy.ui
 import android.graphics.Bitmap
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.assertDoesNotExist
-import androidx.compose.ui.test.assertExists
-import androidx.compose.ui.test.fetchSemanticsNodes
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
