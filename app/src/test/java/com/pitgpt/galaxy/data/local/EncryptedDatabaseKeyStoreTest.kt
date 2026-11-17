@@ -20,42 +20,59 @@ class EncryptedDatabaseKeyStoreTest {
     )
 
     @Test
-    fun decodedPayloadIsZeroedAfterSuccessfulUnwrap() {
+    fun decodedPayloadAndSlicesAreZeroedAfterSuccessfulUnwrap() {
         val expectedDatabaseKey = ByteArray(32) { (it + 17).toByte() }
         val decodedPayload = encodedAndDecodedPayload(expectedDatabaseKey)
+        var ivBuffer: ByteArray? = null
+        var ciphertextBuffer: ByteArray? = null
 
         try {
-            val actualDatabaseKey = decryptWrappedDatabaseKeyPayload(
-                decodedPayload,
-                ::decryptPayload
-            )
+            val actualDatabaseKey = decryptWrappedDatabaseKeyPayload(decodedPayload) { iv, ciphertext ->
+                ivBuffer = iv
+                ciphertextBuffer = ciphertext
+                decryptPayload(iv, ciphertext)
+            }
             try {
                 assertArrayEquals(expectedDatabaseKey, actualDatabaseKey)
                 assertAllZero(decodedPayload)
+                assertAllZero(checkNotNull(ivBuffer))
+                assertAllZero(checkNotNull(ciphertextBuffer))
             } finally {
                 actualDatabaseKey.fill(0)
             }
         } finally {
             expectedDatabaseKey.fill(0)
             decodedPayload.fill(0)
+            ivBuffer?.fill(0)
+            ciphertextBuffer?.fill(0)
         }
     }
 
     @Test
-    fun decodedPayloadIsZeroedWhenGcmAuthenticationFails() {
+    fun decodedPayloadAndSlicesAreZeroedWhenGcmAuthenticationFails() {
         val databaseKey = ByteArray(32) { (it + 3).toByte() }
         val decodedPayload = encodedAndDecodedPayload(databaseKey)
         decodedPayload[decodedPayload.lastIndex] =
             (decodedPayload.last().toInt() xor 0x01).toByte()
+        var ivBuffer: ByteArray? = null
+        var ciphertextBuffer: ByteArray? = null
 
         try {
             assertThrows(Exception::class.java) {
-                decryptWrappedDatabaseKeyPayload(decodedPayload, ::decryptPayload)
+                decryptWrappedDatabaseKeyPayload(decodedPayload) { iv, ciphertext ->
+                    ivBuffer = iv
+                    ciphertextBuffer = ciphertext
+                    decryptPayload(iv, ciphertext)
+                }
             }
             assertAllZero(decodedPayload)
+            assertAllZero(checkNotNull(ivBuffer))
+            assertAllZero(checkNotNull(ciphertextBuffer))
         } finally {
             databaseKey.fill(0)
             decodedPayload.fill(0)
+            ivBuffer?.fill(0)
+            ciphertextBuffer?.fill(0)
         }
     }
 
@@ -64,38 +81,54 @@ class EncryptedDatabaseKeyStoreTest {
         val databaseKey = ByteArray(32) { (it + 9).toByte() }
         val decodedPayload = encodedAndDecodedPayload(databaseKey)
         val expectedFailure = IllegalStateException("simulated missing Android Keystore key")
+        var ivBuffer: ByteArray? = null
+        var ciphertextBuffer: ByteArray? = null
 
         try {
             val actualFailure = assertThrows(IllegalStateException::class.java) {
-                decryptWrappedDatabaseKeyPayload(decodedPayload) {
+                decryptWrappedDatabaseKeyPayload(decodedPayload) { iv, ciphertext ->
+                    ivBuffer = iv
+                    ciphertextBuffer = ciphertext
                     throw expectedFailure
                 }
             }
             assertTrue(actualFailure === expectedFailure)
             assertAllZero(decodedPayload)
+            assertAllZero(checkNotNull(ivBuffer))
+            assertAllZero(checkNotNull(ciphertextBuffer))
         } finally {
             databaseKey.fill(0)
             decodedPayload.fill(0)
+            ivBuffer?.fill(0)
+            ciphertextBuffer?.fill(0)
         }
     }
 
     @Test
-    fun rejectedPlaintextKeyAndDecodedPayloadAreZeroedWhenKeyLengthIsInvalid() {
+    fun rejectedPlaintextKeyAndAllWrappedBuffersAreZeroedWhenKeyLengthIsInvalid() {
         val invalidDatabaseKey = ByteArray(16) { (it + 5).toByte() }
         val decodedPayload = encodedAndDecodedPayload(invalidDatabaseKey)
+        var ivBuffer: ByteArray? = null
+        var ciphertextBuffer: ByteArray? = null
         var rejectedPlaintext: ByteArray? = null
 
         try {
             assertThrows(IllegalStateException::class.java) {
-                decryptWrappedDatabaseKeyPayload(decodedPayload) { payload ->
-                    decryptPayload(payload).also { rejectedPlaintext = it }
+                decryptWrappedDatabaseKeyPayload(decodedPayload) { iv, ciphertext ->
+                    ivBuffer = iv
+                    ciphertextBuffer = ciphertext
+                    decryptPayload(iv, ciphertext).also { rejectedPlaintext = it }
                 }
             }
             assertAllZero(decodedPayload)
+            assertAllZero(checkNotNull(ivBuffer))
+            assertAllZero(checkNotNull(ciphertextBuffer))
             assertAllZero(checkNotNull(rejectedPlaintext))
         } finally {
             invalidDatabaseKey.fill(0)
             decodedPayload.fill(0)
+            ivBuffer?.fill(0)
+            ciphertextBuffer?.fill(0)
             rejectedPlaintext?.fill(0)
         }
     }
@@ -105,7 +138,7 @@ class EncryptedDatabaseKeyStoreTest {
         val malformedPayload = byteArrayOf(1, 2, 3, 4)
 
         assertThrows(IllegalArgumentException::class.java) {
-            decryptWrappedDatabaseKeyPayload(malformedPayload) {
+            decryptWrappedDatabaseKeyPayload(malformedPayload) { _, _ ->
                 error("Decrypt callback must not run for a malformed payload.")
             }
         }
@@ -131,14 +164,14 @@ class EncryptedDatabaseKeyStoreTest {
         }
     }
 
-    private fun decryptPayload(payload: ByteArray): ByteArray {
+    private fun decryptPayload(iv: ByteArray, ciphertext: ByteArray): ByteArray {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(
             Cipher.DECRYPT_MODE,
             wrappingKey,
-            GCMParameterSpec(128, payload, 0, 12)
+            GCMParameterSpec(128, iv)
         )
-        return cipher.doFinal(payload, 12, payload.size - 12)
+        return cipher.doFinal(ciphertext)
     }
 
     private fun assertAllZero(bytes: ByteArray) {

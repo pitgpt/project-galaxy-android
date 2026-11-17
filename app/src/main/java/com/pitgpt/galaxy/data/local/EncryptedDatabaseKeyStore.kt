@@ -58,18 +58,14 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
 
     private fun decrypt(encoded: String): ByteArray {
         val payload = Base64.decode(encoded, Base64.NO_WRAP)
-        return decryptWrappedDatabaseKeyPayload(payload) { decodedPayload ->
+        return decryptWrappedDatabaseKeyPayload(payload) { iv, ciphertext ->
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(
                 Cipher.DECRYPT_MODE,
                 existingWrappingKey(),
-                GCMParameterSpec(TAG_BITS, decodedPayload, 0, IV_BYTES)
+                GCMParameterSpec(TAG_BITS, iv)
             )
-            cipher.doFinal(
-                decodedPayload,
-                IV_BYTES,
-                decodedPayload.size - IV_BYTES
-            )
+            cipher.doFinal(ciphertext)
         }
     }
 
@@ -113,21 +109,25 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
 /**
  * Decrypts an Android Keystore-wrapped database-key payload.
  *
- * Ownership of [payload] is transferred to this function: its decoded IV/ciphertext buffer is
- * zeroed on every exit path. A successfully returned key is transferred to the caller. If
- * decryption succeeds but key-length validation fails, the rejected plaintext key is zeroed too.
- * The decrypt callback must not retain [payload] after it returns.
+ * Ownership of [payload] is transferred to this function. The decoded payload and the temporary
+ * IV/ciphertext slices are zeroed on every exit path. A successfully returned key is transferred
+ * to the caller. If decryption succeeds but key-length validation fails, the rejected plaintext
+ * key is zeroed too. The decrypt callback must not retain either slice after it returns.
  */
 internal fun decryptWrappedDatabaseKeyPayload(
     payload: ByteArray,
-    decrypt: (ByteArray) -> ByteArray
+    decrypt: (iv: ByteArray, ciphertext: ByteArray) -> ByteArray
 ): ByteArray {
+    var iv: ByteArray? = null
+    var ciphertext: ByteArray? = null
     var decryptedKey: ByteArray? = null
     try {
         require(payload.size > IV_BYTES + GCM_TAG_BYTES) {
             "Wrapped database key is truncated."
         }
-        val key = decrypt(payload)
+        val ivBytes = payload.copyOfRange(0, IV_BYTES).also { iv = it }
+        val ciphertextBytes = payload.copyOfRange(IV_BYTES, payload.size).also { ciphertext = it }
+        val key = decrypt(ivBytes, ciphertextBytes)
         decryptedKey = key
         check(key.size == DATABASE_KEY_BYTES) {
             "Wrapped database key has an invalid length."
@@ -136,6 +136,8 @@ internal fun decryptWrappedDatabaseKeyPayload(
         return key
     } finally {
         decryptedKey?.fill(0)
+        ciphertext?.fill(0)
+        iv?.fill(0)
         payload.fill(0)
     }
 }
