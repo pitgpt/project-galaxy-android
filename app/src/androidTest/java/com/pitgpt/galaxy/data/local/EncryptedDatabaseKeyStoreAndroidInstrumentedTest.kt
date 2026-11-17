@@ -95,8 +95,8 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
             val firstDatabase = helper!!.writableDatabase
             assertEquals(1, issuedPassphrases.size)
             assertTrue(
-                "The first SQLCipher passphrase buffer must be zeroed after open",
-                issuedPassphrases[0].all { it == 0.toByte() }
+                "The first SQLCipher passphrase must remain valid while the helper is open",
+                issuedPassphrases[0].any { it != 0.toByte() }
             )
             firstDatabase.execSQL(
                 "INSERT INTO keystore_round_trip(value) VALUES ('android-keystore-round-trip')"
@@ -104,18 +104,28 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
 
             helper!!.close()
             assertFalse("Closing the helper must close the first SQLCipher connection", firstDatabase.isOpen)
+            assertTrue(
+                "Closing the helper must zero the first passphrase after the connection pool closes",
+                issuedPassphrases[0].all { it == 0.toByte() }
+            )
 
             val reopenedDatabase = helper!!.writableDatabase
             assertEquals("A closed helper must obtain a fresh passphrase", 2, issuedPassphrases.size)
             assertTrue(
-                "The reopened SQLCipher passphrase buffer must also be zeroed",
-                issuedPassphrases[1].all { it == 0.toByte() }
+                "The reopened SQLCipher passphrase must remain valid while the helper is open",
+                issuedPassphrases[1].any { it != 0.toByte() }
             )
             reopenedDatabase.query("SELECT value FROM keystore_round_trip").use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals("android-keystore-round-trip", cursor.getString(0))
                 assertFalse(cursor.moveToNext())
             }
+
+            helper!!.close()
+            assertTrue(
+                "Closing the reopened helper must zero its passphrase",
+                issuedPassphrases[1].all { it == 0.toByte() }
+            )
         } finally {
             runCatching { helper?.close() }
             issuedPassphrases.forEach { it.fill(0) }
