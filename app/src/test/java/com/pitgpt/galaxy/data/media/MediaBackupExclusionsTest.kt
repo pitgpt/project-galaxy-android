@@ -1,13 +1,16 @@
 package com.pitgpt.galaxy.data.media
 
-import android.content.pm.ApplicationInfo
 import com.pitgpt.galaxy.R
+import java.io.File
+import javax.xml.parsers.DocumentBuilderFactory
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.w3c.dom.Element
 import org.xmlpull.v1.XmlPullParser
 
 @RunWith(RobolectricTestRunner::class)
@@ -36,13 +39,43 @@ class MediaBackupExclusionsTest {
     }
 
     @Test
-    fun applicationManifestKeepsBackupEnabledForItsExplicitExclusionRules() {
-        val applicationInfo = RuntimeEnvironment.getApplication().applicationInfo
+    fun manifestWiresBothBackupRuleResourcesAndKeepsBackupEnabled() {
+        val application = readApplicationManifest()
+        val androidNamespace = "http://schemas.android.com/apk/res/android"
 
-        assertTrue(
-            "The device-only backup policy expects backup to remain enabled with explicit exclusions",
-            applicationInfo.flags and ApplicationInfo.FLAG_ALLOW_BACKUP != 0
+        assertEquals(
+            "Backup must remain enabled so the explicit exclusion policy is applied",
+            "true",
+            application.getAttributeNS(androidNamespace, "allowBackup")
         )
+        assertEquals(
+            "Android 11 and earlier must use the explicit full-backup exclusions",
+            "@xml/backup_rules",
+            application.getAttributeNS(androidNamespace, "fullBackupContent")
+        )
+        assertEquals(
+            "Android 12 and later must use explicit cloud-backup and device-transfer exclusions",
+            "@xml/data_extraction_rules",
+            application.getAttributeNS(androidNamespace, "dataExtractionRules")
+        )
+    }
+
+    private fun readApplicationManifest(): Element {
+        val manifest = sequenceOf(
+            File("src/main/AndroidManifest.xml"),
+            File("app/src/main/AndroidManifest.xml")
+        ).firstOrNull(File::isFile)
+            ?: error("The app source AndroidManifest.xml could not be located from the Gradle test directory.")
+
+        val factory = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+            setFeature("http://xml.org/sax/features/external-general-entities", false)
+            setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+        }
+        val document = factory.newDocumentBuilder().parse(manifest)
+        return document.getElementsByTagName("application").item(0) as? Element
+            ?: error("The app source manifest does not contain an application element.")
     }
 
     private fun readExclusions(resourceId: Int): Map<String, Set<Pair<String, String>>> {
