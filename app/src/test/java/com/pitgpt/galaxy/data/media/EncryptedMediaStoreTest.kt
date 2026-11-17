@@ -159,25 +159,37 @@ class EncryptedMediaStoreTest {
     }
 
     @Test
-    fun missingKeyOnReadDoesNotAttemptToCreateReplacement() {
+    fun missingKeyOnReadPreservesCiphertextWithoutCreatingReplacement() {
         store.save("asset_08", "image/png", byteArrayOf(8, 9))
+        val encryptedFile = File(directory, "asset_08.gcm")
+        val ciphertextBefore = encryptedFile.readBytes()
         keyProvider.available = false
 
         assertThrows(IllegalStateException::class.java) {
             store.read("asset_08", "image/png")
         }
+
         assertEquals(1, keyProvider.createCalls)
+        assertEquals(1, keyProvider.existingCalls)
+        assertTrue(store.contains("asset_08"))
+        assertArrayEquals(ciphertextBefore, encryptedFile.readBytes())
     }
 
     @Test
     fun missingKeyCannotBeReplacedWhileEncryptedAssetsExist() {
         store.save("asset_09", "image/png", byteArrayOf(9, 10))
+        val encryptedFile = File(directory, "asset_09.gcm")
+        val ciphertextBefore = encryptedFile.readBytes()
         keyProvider.available = false
 
         assertThrows(IllegalStateException::class.java) {
             store.save("asset_10", "image/png", byteArrayOf(10, 11))
         }
+
         assertEquals(1, keyProvider.createCalls)
+        assertEquals(1, keyProvider.existingCalls)
+        assertTrue(store.contains("asset_09"))
+        assertArrayEquals(ciphertextBefore, encryptedFile.readBytes())
         assertFalse(store.contains("asset_10"))
     }
 
