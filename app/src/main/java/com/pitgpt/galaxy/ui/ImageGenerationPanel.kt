@@ -194,7 +194,10 @@ internal fun ImageGenerationPanel(
     app: GalaxyApplication,
     characterId: String,
     modifier: Modifier = Modifier,
-    onSubmittingChanged: (Boolean) -> Unit
+    onSubmittingChanged: (Boolean) -> Unit,
+    runtimeFactory: suspend (GalaxyApplication, String) -> ComfyUiRuntime = { application, id ->
+        application.createComfyUiRuntimeFromSavedSettings(id)
+    }
 ) {
     var runtime by remember { mutableStateOf<ComfyUiRuntime?>(null) }
     var setupError by remember { mutableStateOf<String?>(null) }
@@ -224,7 +227,7 @@ internal fun ImageGenerationPanel(
         runtime = null
         setupError = null
         try {
-            runtime = app.createComfyUiRuntimeFromSavedSettings(clientId)
+            runtime = runtimeFactory(app, clientId)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
