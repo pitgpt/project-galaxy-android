@@ -5,6 +5,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.R
 import java.io.File
 import java.nio.file.Files
+import java.security.KeyStore
+import java.util.UUID
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -21,14 +23,18 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class EncryptedMediaStoreInstrumentedTest {
     private lateinit var directory: File
+    private lateinit var keyAlias: String
+    private lateinit var keyProvider: AndroidKeystoreMediaKeyProvider
     private lateinit var store: EncryptedMediaStore
 
     @Before
     fun setUp() {
         directory = Files.createTempDirectory("galaxy-keystore-media-test").toFile()
+        keyAlias = "galaxy_media_instrumented_test_${UUID.randomUUID()}"
+        keyProvider = AndroidKeystoreMediaKeyProvider(keyAlias)
         store = EncryptedMediaStore(
             directory = directory,
-            keyProvider = AndroidKeystoreMediaKeyProvider(),
+            keyProvider = keyProvider,
             maxAssetBytes = 4 * 1024
         )
     }
@@ -36,13 +42,16 @@ class EncryptedMediaStoreInstrumentedTest {
     @After
     fun tearDown() {
         directory.deleteRecursively()
+        if (::keyAlias.isInitialized) {
+            val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
+            if (keyStore.containsAlias(keyAlias)) keyStore.deleteEntry(keyAlias)
+        }
     }
 
     @Test
     fun androidKeystoreKeyIsNonExportableAndCanBeReadBack() {
-        val provider = AndroidKeystoreMediaKeyProvider()
-        val created = provider.getOrCreateKey()
-        val loaded = provider.getExistingKey()
+        val created = keyProvider.getOrCreateKey()
+        val loaded = keyProvider.getExistingKey()
 
         assertNull("Android Keystore must not export the AES key bytes", created.encoded)
         assertNull("Reloaded Android Keystore key must remain non-exportable", loaded.encoded)
@@ -88,6 +97,35 @@ class EncryptedMediaStoreInstrumentedTest {
     }
 
     @Test
+    fun missingKeystoreKeyPreservesCiphertextAndDoesNotCreateReplacement() {
+        val metadata = store.save("missing_key_asset", "image/png", "private-media".toByteArray())
+        val ciphertextFile = File(directory, "${metadata.assetId}.gcm")
+        val ciphertextBefore = ciphertextFile.readBytes()
+        val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
+
+        assertTrue("The test-owned key must exist before simulated key loss", keyStore.containsAlias(keyAlias))
+        keyStore.deleteEntry(keyAlias)
+        assertFalse("The test-owned key must be absent after simulated key loss", keyStore.containsAlias(keyAlias))
+
+        assertThrows(IllegalStateException::class.java) {
+            store.read(metadata.assetId, metadata.mimeType)
+        }
+
+        assertTrue("The encrypted asset must remain available for explicit recovery", store.contains(metadata.assetId))
+        assertTrue(ciphertextFile.isFile)
+        assertArrayEquals("Missing-key reads must not modify ciphertext", ciphertextBefore, ciphertextFile.readBytes())
+        assertFalse("Reading must not generate a replacement Android Keystore key", keyStore.containsAlias(keyAlias))
+
+        assertThrows(IllegalStateException::class.java) {
+            store.save("new_asset_after_key_loss", "image/png", byteArrayOf(1, 2, 3))
+        }
+
+        assertFalse(File(directory, "new_asset_after_key_loss.gcm").exists())
+        assertArrayEquals("A failed save must leave the original ciphertext unchanged", ciphertextBefore, ciphertextFile.readBytes())
+        assertFalse("Saving beside orphaned ciphertext must not generate a replacement key", keyStore.containsAlias(keyAlias))
+    }
+
+    @Test
     fun backupAndDeviceTransferRulesExcludeEncryptedMediaDirectory() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val legacyRules = readExclusions(context.resources.getXml(R.xml.backup_rules))
@@ -102,6 +140,10 @@ class EncryptedMediaStoreInstrumentedTest {
             mediaExclusion in extractionRules.getValue("device-transfer"))
         assertTrue(("database" to ".") in extractionRules.getValue("cloud-backup"))
         assertTrue(("database" to ".") in extractionRules.getValue("device-transfer"))
+    }
+
+    private companion object {
+        const val ANDROID_KEY_STORE = "AndroidKeyStore"
     }
 
     private fun readExclusions(
