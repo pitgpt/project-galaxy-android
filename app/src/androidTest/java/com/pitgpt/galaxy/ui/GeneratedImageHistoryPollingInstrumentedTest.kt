@@ -3,6 +3,7 @@ package com.pitgpt.galaxy.ui
 import androidx.compose.material3.Text
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -80,11 +81,6 @@ class GeneratedImageHistoryPollingInstrumentedTest {
             workflowJson = """{"1":{"inputs":{"text":""}}}""",
             positivePrompt = ComfyUiNodeInput("1", "text")
         )
-        val fakeRuntimeFactory = ComfyUiRuntimeFactory(
-            jobs = application.comfyUiJobStore,
-            images = application.generatedImages,
-            client = ComfyUiApiClient(transport)
-        )
         val showPanel = mutableStateOf(true)
         var contentSet = false
 
@@ -105,8 +101,12 @@ class GeneratedImageHistoryPollingInstrumentedTest {
                         app = application,
                         characterId = conversationId,
                         onSubmittingChanged = {},
-                        runtimeFactory = { _, clientId ->
-                            fakeRuntimeFactory.create(config, template, clientId)
+                        runtimeFactory = { runtimeApp, clientId ->
+                            ComfyUiRuntimeFactory(
+                                jobs = runtimeApp.comfyUiJobStore,
+                                images = runtimeApp.generatedImages,
+                                client = ComfyUiApiClient(transport)
+                            ).create(config, template, clientId)
                         }
                     )
                 } else {
@@ -122,8 +122,8 @@ class GeneratedImageHistoryPollingInstrumentedTest {
 
             composeRule.onNodeWithText("ИСТОРИЯ").performClick()
             composeRule.waitUntil(timeoutMillis = 10_000) {
-                composeRule.onNodeWithText("ИСТОРИЯ ИЗОБРАЖЕНИЙ")
-                    .fetchSemanticsNode().let { true }
+                composeRule.onAllNodesWithText("ИСТОРИЯ ИЗОБРАЖЕНИЙ")
+                    .fetchSemanticsNodes().isNotEmpty()
             }
             val pollsAfterHistoryOpened = statusPollCount.get()
             composeRule.waitUntil(timeoutMillis = 10_000) {
@@ -134,8 +134,8 @@ class GeneratedImageHistoryPollingInstrumentedTest {
 
             composeRule.onNodeWithText("‹  НАЗАД").performClick()
             composeRule.waitUntil(timeoutMillis = 10_000) {
-                composeRule.onNodeWithText("ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ")
-                    .fetchSemanticsNode().let { true }
+                composeRule.onAllNodesWithText("ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ")
+                    .fetchSemanticsNodes().isNotEmpty()
             }
             composeRule.onNodeWithText("Статус: Выполняется").assertExists()
         } finally {
