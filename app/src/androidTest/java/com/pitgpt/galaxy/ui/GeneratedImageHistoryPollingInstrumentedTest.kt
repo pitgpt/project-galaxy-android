@@ -141,8 +141,11 @@ class GeneratedImageHistoryPollingInstrumentedTest {
         } finally {
             if (contentSet) {
                 runCatching {
-                    composeRule.runOnIdle { showPanel.value = false }
-                    composeRule.waitForIdle()
+                    composeRule.runOnUiThread { showPanel.value = false }
+                    composeRule.waitUntil(timeoutMillis = 10_000) {
+                        composeRule.onAllNodesWithText("TEST FINISHED")
+                            .fetchSemanticsNodes().isNotEmpty()
+                    }
                 }
             }
             runCatching { application.imageGenerationRequests.delete(request.id) }
