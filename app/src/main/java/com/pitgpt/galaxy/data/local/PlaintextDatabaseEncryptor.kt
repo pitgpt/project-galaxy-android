@@ -139,11 +139,13 @@ internal class PlaintextDatabaseEncryptor {
         try {
             checkpoint(source)
             val snapshot = readSnapshot(source)
-            val passphrase = Base64.encodeToString(databaseKey, Base64.NO_WRAP)
-            source.execSQL(
-                "ATTACH DATABASE ? AS encrypted KEY ?;",
-                arrayOf(encryptedFile.absolutePath, passphrase)
-            )
+            withEncodedSqlCipherPassphrase(databaseKey) { passphrase ->
+                // SQLCipher's ATTACH KEY accepts BLOB values and consumes the bound bytes directly.
+                source.execSQL(
+                    "ATTACH DATABASE ? AS encrypted KEY ?;",
+                    arrayOf(encryptedFile.absolutePath, passphrase)
+                )
+            }
             try {
                 source.rawExecSQL("SELECT sqlcipher_export('encrypted');")
                 source.rawExecSQL("PRAGMA encrypted.user_version = ${snapshot.userVersion};")
@@ -180,23 +182,26 @@ internal class PlaintextDatabaseEncryptor {
         databaseKey: ByteArray,
         expectedSnapshot: DatabaseSnapshot?
     ) {
-        val passphrase = Base64.encodeToString(databaseKey, Base64.NO_WRAP)
-        val database = SQLiteDatabase.openDatabase(
-            file.absolutePath,
-            passphrase,
-            null,
-            SQLiteDatabase.OPEN_READWRITE,
-            null
-        )
-        try {
-            verifyIntegrity(database, "Encrypted Galaxy database")
-            expectedSnapshot?.let { expected ->
-                check(readSnapshot(database) == expected) {
-                    "Encrypted Galaxy database metadata, row counts, or content digest do not match the original database."
+        withEncodedSqlCipherPassphrase(databaseKey) { passphrase ->
+            // SQLiteDatabase retains this byte array in its configuration until close.
+            // Keep it valid for the full connection lifetime, then zero it in the helper's finally.
+            val database = SQLiteDatabase.openDatabase(
+                file.absolutePath,
+                passphrase,
+                null,
+                SQLiteDatabase.OPEN_READWRITE,
+                null
+            )
+            try {
+                verifyIntegrity(database, "Encrypted Galaxy database")
+                expectedSnapshot?.let { expected ->
+                    check(readSnapshot(database) == expected) {
+                        "Encrypted Galaxy database metadata, row counts, or content digest do not match the original database."
+                    }
                 }
+            } finally {
+                database.close()
             }
-        } finally {
-            database.close()
         }
     }
 
@@ -436,5 +441,23 @@ internal class PlaintextDatabaseEncryptor {
     private companion object {
         val SIDECAR_SUFFIXES = listOf("-wal", "-shm", "-journal")
         val SQLITE_HEADER = "SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)
+    }
+}
+
+
+/**
+ * Creates the same Base64 SQLCipher passphrase bytes used by the Room open-helper, but never
+ * materializes an immutable String. The caller must finish any SQLCipher operation that retains
+ * the buffer before this function returns; the buffer is zeroed on both success and failure.
+ */
+internal fun <T> withEncodedSqlCipherPassphrase(
+    databaseKey: ByteArray,
+    block: (ByteArray) -> T
+): T {
+    val passphrase = Base64.encode(databaseKey, Base64.NO_WRAP)
+    return try {
+        block(passphrase)
+    } finally {
+        passphrase.fill(0)
     }
 }
