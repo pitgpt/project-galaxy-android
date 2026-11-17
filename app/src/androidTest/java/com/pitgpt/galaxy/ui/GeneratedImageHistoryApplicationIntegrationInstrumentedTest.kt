@@ -122,11 +122,17 @@ class GeneratedImageHistoryApplicationIntegrationInstrumentedTest {
             )
             assertTrue("The encrypted asset must remain present after navigation", ciphertextFile.isFile)
         } finally {
-            composeRule.setContent {}
-            composeRule.waitForIdle()
-            stored?.let { repository.delete(it.assetId) }
-            plaintext.fill(0)
-            ciphertextBeforeOpen?.fill(0)
+            // Best-effort navigation cleanup; the Compose rule itself disposes the single content
+            // tree after the test. Calling setContent again here is not supported by createComposeRule.
+            runCatching { composeRule.onNodeWithText("ЗАКРЫТЬ ПРЕДПРОСМОТР").performClick() }
+            runCatching { composeRule.onNodeWithText("‹  НАЗАД").performClick() }
+            runCatching { composeRule.waitForIdle() }
+            try {
+                stored?.let { repository.delete(it.assetId) }
+            } finally {
+                plaintext.fill(0)
+                ciphertextBeforeOpen?.fill(0)
+            }
         }
     }
 
