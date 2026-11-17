@@ -22,10 +22,18 @@ private const val TAG_BITS = 128
  *
  * The database key is never regenerated when a database file already exists but the wrapped
  * key is missing or unreadable. That state is surfaced as an error so existing data is retained.
+ *
+ * [preferencesName] and [wrappingKeyAlias] default to the production values. Supplying isolated
+ * values lets instrumentation tests exercise the real Android Keystore and unwrap path without
+ * reading or mutating the application's production key material.
  */
-internal class EncryptedDatabaseKeyStore(context: Context) {
+internal class EncryptedDatabaseKeyStore(
+    context: Context,
+    private val preferencesName: String = PREFERENCES_NAME,
+    private val wrappingKeyAlias: String = KEY_ALIAS
+) {
     private val preferences = context.applicationContext.getSharedPreferences(
-        PREFERENCES_NAME,
+        preferencesName,
         Context.MODE_PRIVATE
     )
 
@@ -71,20 +79,20 @@ internal class EncryptedDatabaseKeyStore(context: Context) {
 
     private fun existingWrappingKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
-        return keyStore.getKey(KEY_ALIAS, null) as? SecretKey
+        return keyStore.getKey(wrappingKeyAlias, null) as? SecretKey
             ?: error("The Android Keystore key for Galaxy database encryption is missing.")
     }
 
     private fun getOrCreateWrappingKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
-        if (keyStore.containsAlias(KEY_ALIAS)) {
-            return keyStore.getKey(KEY_ALIAS, null) as? SecretKey
+        if (keyStore.containsAlias(wrappingKeyAlias)) {
+            return keyStore.getKey(wrappingKeyAlias, null) as? SecretKey
                 ?: error("The Galaxy database wrapping key is unavailable.")
         }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEY_STORE).run {
             init(
                 KeyGenParameterSpec.Builder(
-                    KEY_ALIAS,
+                    wrappingKeyAlias,
                     KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
                 )
                     .setKeySize(WRAPPING_KEY_BITS)
