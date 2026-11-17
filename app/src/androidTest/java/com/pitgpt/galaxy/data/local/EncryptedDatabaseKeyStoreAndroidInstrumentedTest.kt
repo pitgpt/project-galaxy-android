@@ -25,7 +25,6 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
         val wrappingAlias = "galaxy_test_db_wrap_$suffix"
         val preferencesName = "galaxy_test_database_key_$suffix"
         val databaseName = "keystore-sqlcipher-$suffix.db"
-        val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
         val keyStoreUnderTest = EncryptedDatabaseKeyStore(
             context = context,
             preferencesName = preferencesName,
@@ -53,8 +52,8 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
             )
             assertArrayEquals(
                 "The real Android Keystore unwrap must reproduce the stored SQLCipher key",
-                expectedKey,
-                secondKey
+                expectedKey!!,
+                secondKey!!
             )
             secondKey!!.fill(0)
 
@@ -124,7 +123,10 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
             expectedKey?.fill(0)
             secondKey?.fill(0)
             runCatching {
-                if (keyStore.containsAlias(wrappingAlias)) keyStore.deleteEntry(wrappingAlias)
+                KeyStore.getInstance(ANDROID_KEY_STORE).apply {
+                    load(null)
+                    if (containsAlias(wrappingAlias)) deleteEntry(wrappingAlias)
+                }
             }
             runCatching { context.deleteSharedPreferences(preferencesName) }
             context.deleteDatabase(databaseName)
