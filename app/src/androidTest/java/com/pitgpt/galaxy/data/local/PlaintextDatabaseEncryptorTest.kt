@@ -42,6 +42,38 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun encodedSqlCipherPassphraseIsZeroedAfterSuccessAndFailure() {
+        val expected = Base64.encode(databaseKey, Base64.NO_WRAP)
+        var successfulBuffer: ByteArray? = null
+        var failedBuffer: ByteArray? = null
+        try {
+            val encodedLength = withEncodedSqlCipherPassphrase(databaseKey) { passphrase ->
+                successfulBuffer = passphrase
+                assertArrayEquals(expected, passphrase)
+                passphrase.size
+            }
+            assertEquals(expected.size, encodedLength)
+            assertTrue(successfulBuffer!!.all { it == 0.toByte() })
+
+            val expectedFailure = IllegalStateException("simulated SQLCipher migration failure")
+            val actualFailure = runCatching {
+                withEncodedSqlCipherPassphrase(databaseKey) { passphrase ->
+                    failedBuffer = passphrase
+                    throw expectedFailure
+                }
+            }.exceptionOrNull()
+
+            assertTrue("The original migration failure must propagate", actualFailure === expectedFailure)
+            assertTrue(failedBuffer!!.all { it == 0.toByte() })
+            assertTrue("The caller-owned database key must remain available to its owner", databaseKey.any { it != 0.toByte() })
+        } finally {
+            expected.fill(0)
+            successfulBuffer?.fill(0)
+            failedBuffer?.fill(0)
+        }
+    }
+
+    @Test
     fun migrationEncryptsAllRowsAndPreservesSchemaMetadata() {
         createPlaintextDatabase()
 
