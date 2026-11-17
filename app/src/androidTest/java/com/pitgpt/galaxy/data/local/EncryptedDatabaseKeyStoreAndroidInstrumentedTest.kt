@@ -1,7 +1,5 @@
 package com.pitgpt.galaxy.data.local
 
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
@@ -9,11 +7,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.security.KeyStore
-import java.security.SecureRandom
 import java.util.UUID
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.spec.GCMParameterSpec
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,67 +18,45 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
     @Test
-    fun androidKeystoreUnwrapProducesSqlCipherKeyThatSurvivesHelperReopen() {
+    fun productionKeyStoreUnwrapFeedsSqlCipherAndSurvivesHelperReopen() {
         System.loadLibrary("sqlcipher")
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val suffix = UUID.randomUUID().toString()
         val wrappingAlias = "galaxy_test_db_wrap_$suffix"
+        val preferencesName = "galaxy_test_database_key_$suffix"
         val databaseName = "keystore-sqlcipher-$suffix.db"
         val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
-        val databaseKey = ByteArray(DATABASE_KEY_BYTES).also(SecureRandom()::nextBytes)
-        var iv: ByteArray? = null
-        var encryptedKey: ByteArray? = null
-        var wrappedPayload: ByteArray? = null
-        var encodedPayload: ByteArray? = null
-        var decodedPayload: ByteArray? = null
-        var unwrappedKey: ByteArray? = null
+        val keyStoreUnderTest = EncryptedDatabaseKeyStore(
+            context = context,
+            preferencesName = preferencesName,
+            wrappingKeyAlias = wrappingAlias
+        )
+        var firstKey: ByteArray? = null
+        var expectedKey: ByteArray? = null
+        var secondKey: ByteArray? = null
         var helper: SupportSQLiteOpenHelper? = null
         val issuedPassphrases = mutableListOf<ByteArray>()
 
         try {
-            val wrappingKey = KeyGenerator.getInstance(
-                KeyProperties.KEY_ALGORITHM_AES,
-                ANDROID_KEY_STORE
-            ).run {
-                init(
-                    KeyGenParameterSpec.Builder(
-                        wrappingAlias,
-                        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-                    )
-                        .setKeySize(256)
-                        .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                        .setRandomizedEncryptionRequired(true)
-                        .build()
-                )
-                generateKey()
-            }
-
-            val encryptCipher = Cipher.getInstance(TRANSFORMATION).apply {
-                init(Cipher.ENCRYPT_MODE, wrappingKey)
-            }
-            iv = encryptCipher.iv.copyOf()
-            encryptedKey = encryptCipher.doFinal(databaseKey)
-            wrappedPayload = iv!! + encryptedKey!!
-            encodedPayload = Base64.encode(wrappedPayload, Base64.NO_WRAP)
-            decodedPayload = Base64.decode(encodedPayload, Base64.NO_WRAP)
-
-            val sqlCipherKey = decryptWrappedDatabaseKeyPayload(decodedPayload!!) { ivBytes, ciphertext ->
-                Cipher.getInstance(TRANSFORMATION).run {
-                    init(
-                        Cipher.DECRYPT_MODE,
-                        wrappingKey,
-                        GCMParameterSpec(TAG_BITS, ivBytes)
-                    )
-                    doFinal(ciphertext)
-                }
-            }
-            unwrappedKey = sqlCipherKey
-            assertArrayEquals(databaseKey, sqlCipherKey)
-            assertTrue(
-                "The decoded wrapped payload must be zeroed after Android Keystore decryption",
-                decodedPayload!!.all { it == 0.toByte() }
+            firstKey = keyStoreUnderTest.getOrCreateDatabaseKey(
+                databaseExists = false,
+                databaseIsPlaintext = false,
+                encryptedTemporaryExists = false
             )
+            expectedKey = firstKey!!.copyOf()
+            firstKey!!.fill(0)
+
+            secondKey = keyStoreUnderTest.getOrCreateDatabaseKey(
+                databaseExists = true,
+                databaseIsPlaintext = false,
+                encryptedTemporaryExists = false
+            )
+            assertArrayEquals(
+                "The real Android Keystore unwrap must reproduce the stored SQLCipher key",
+                expectedKey,
+                secondKey
+            )
+            secondKey!!.fill(0)
 
             val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
                 .name(databaseName)
@@ -107,7 +79,16 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
 
             helper = ZeroizingSqlCipherOpenHelperFactory(
                 passphraseProvider = {
-                    Base64.encode(sqlCipherKey, Base64.NO_WRAP).also(issuedPassphrases::add)
+                    val key = keyStoreUnderTest.getOrCreateDatabaseKey(
+                        databaseExists = true,
+                        databaseIsPlaintext = false,
+                        encryptedTemporaryExists = false
+                    )
+                    try {
+                        Base64.encode(key, Base64.NO_WRAP).also(issuedPassphrases::add)
+                    } finally {
+                        key.fill(0)
+                    }
                 },
                 enableWriteAheadLogging = true
             ).create(configuration)
@@ -139,16 +120,13 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
         } finally {
             runCatching { helper?.close() }
             issuedPassphrases.forEach { it.fill(0) }
-            unwrappedKey?.fill(0)
-            decodedPayload?.fill(0)
-            encodedPayload?.fill(0)
-            wrappedPayload?.fill(0)
-            encryptedKey?.fill(0)
-            iv?.fill(0)
-            databaseKey.fill(0)
+            firstKey?.fill(0)
+            expectedKey?.fill(0)
+            secondKey?.fill(0)
             runCatching {
                 if (keyStore.containsAlias(wrappingAlias)) keyStore.deleteEntry(wrappingAlias)
             }
+            runCatching { context.deleteSharedPreferences(preferencesName) }
             context.deleteDatabase(databaseName)
             listOf("-wal", "-shm", "-journal").forEach { suffix ->
                 File(context.getDatabasePath(databaseName).path + suffix).delete()
@@ -158,8 +136,5 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
 
     private companion object {
         const val ANDROID_KEY_STORE = "AndroidKeyStore"
-        const val TRANSFORMATION = "AES/GCM/NoPadding"
-        const val DATABASE_KEY_BYTES = 32
-        const val TAG_BITS = 128
     }
 }
