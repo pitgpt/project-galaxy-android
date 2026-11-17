@@ -6,6 +6,7 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.nio.file.Files
@@ -20,6 +21,9 @@ data class EncryptedMediaAsset(
     val byteSize: Int,
     val sha256: String
 )
+
+class EncryptedMediaAssetMissingException :
+    IllegalStateException("The requested encrypted media asset does not exist.")
 
 /**
  * Stores image bytes only as AES-GCM ciphertext in app-private storage.
@@ -86,7 +90,7 @@ class EncryptedMediaStore(
         validateAssetId(assetId)
         validateMimeType(mimeType)
         val source = assetFile(assetId)
-        check(source.isFile) { "The requested encrypted media asset does not exist." }
+        if (!source.isFile) throw EncryptedMediaAssetMissingException()
 
         val maximumFileBytes = HEADER_BYTES + maxAssetBytes + GCM_TAG_BYTES
         val fileLength = source.length()
@@ -96,7 +100,11 @@ class EncryptedMediaStore(
 
         // The length check above is only an early rejection. The file may change between
         // length() and open(), so the stream itself must enforce the same hard upper bound.
-        val encoded = FileInputStream(source).use { readBounded(it, maximumFileBytes) }
+        val encoded = try {
+            FileInputStream(source).use { readBounded(it, maximumFileBytes) }
+        } catch (_: FileNotFoundException) {
+            throw EncryptedMediaAssetMissingException()
+        }
         val input = DataInputStream(ByteArrayInputStream(encoded))
         val magic = ByteArray(MAGIC.size)
         input.readFully(magic)

@@ -1,13 +1,14 @@
 package com.pitgpt.galaxy.ui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.repository.GeneratedImageReadFailure
 import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.InMemoryComfyUiJobStore
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runBlocking
-import kotlin.coroutines.CoroutineContext
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -16,6 +17,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImageGenerationPanelTest {
+    @Test
+    fun generatedImageReadFailuresHaveDistinctActionableMessages() {
+        val failures = GeneratedImageReadFailure.values().toList()
+        val messages = failures.map(::generatedImageReadFailureMessage)
+
+        assertEquals("Every storage failure must have a distinct message", failures.size, messages.toSet().size)
+        assertTrue(generatedImageReadFailureMessage(GeneratedImageReadFailure.KEY_UNAVAILABLE).contains("Ключ шифрования"))
+        assertTrue(generatedImageReadFailureMessage(GeneratedImageReadFailure.CORRUPT_CIPHERTEXT).contains("подлинность"))
+        assertTrue(generatedImageReadFailureMessage(GeneratedImageReadFailure.CIPHERTEXT_MISSING).contains("Файл"))
+    }
+
     @Test
     fun navigationIsLockedOnlyDuringSubmissionBecauseActiveJobsAreDurable() {
         assertTrue(imageGenerationNavigationLocked(isSubmitting = true))

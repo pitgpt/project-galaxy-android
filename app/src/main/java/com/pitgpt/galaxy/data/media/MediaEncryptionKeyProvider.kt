@@ -6,6 +6,13 @@ import java.security.KeyStore
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
+/**
+ * The device-bound media key cannot currently be retrieved or used.
+ * Callers must not create a replacement while ciphertext may still depend on this key.
+ */
+class MediaEncryptionKeyUnavailableException(cause: Throwable? = null) :
+    IllegalStateException("The Galaxy media encryption key is unavailable; encrypted media was preserved.", cause)
+
 /** Supplies a non-exportable AES key for local media encryption. */
 interface MediaEncryptionKeyProvider {
     fun getOrCreateKey(): SecretKey
@@ -42,9 +49,12 @@ class AndroidKeystoreMediaKeyProvider internal constructor(
 
     @Synchronized
     override fun getExistingKey(): SecretKey {
-        val keyStore = loadKeyStore()
-        return keyStore.getKey(keyAlias, null) as? SecretKey
-            ?: error("The Galaxy media encryption key is missing; encrypted media was preserved.")
+        val key = try {
+            loadKeyStore().getKey(keyAlias, null)
+        } catch (failure: Exception) {
+            throw MediaEncryptionKeyUnavailableException(failure)
+        }
+        return key as? SecretKey ?: throw MediaEncryptionKeyUnavailableException()
     }
 
     private fun loadKeyStore(): KeyStore =

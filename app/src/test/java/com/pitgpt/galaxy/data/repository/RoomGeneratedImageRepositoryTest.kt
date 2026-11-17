@@ -3,13 +3,18 @@ package com.pitgpt.galaxy.data.repository
 import androidx.room.Room
 import com.pitgpt.galaxy.core.model.GeneratedImageAsset
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.repository.GeneratedImageReadException
+import com.pitgpt.galaxy.core.repository.GeneratedImageReadFailure
 import com.pitgpt.galaxy.data.local.GalaxyDatabase
 import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
 import com.pitgpt.galaxy.data.local.entity.GeneratedImageEntity
 import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.media.MediaEncryptionKeyProvider
+import com.pitgpt.galaxy.data.media.MediaEncryptionKeyUnavailableException
+import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import javax.crypto.SecretKey
@@ -35,6 +40,7 @@ class RoomGeneratedImageRepositoryTest {
     private lateinit var database: GalaxyDatabase
     private lateinit var mediaDirectory: java.io.File
     private lateinit var mediaStore: EncryptedMediaStore
+    private lateinit var keyProvider: FakeKeyProvider
     private lateinit var repository: RoomGeneratedImageRepository
 
     @Before
@@ -44,7 +50,8 @@ class RoomGeneratedImageRepositoryTest {
             .allowMainThreadQueries()
             .build()
         mediaDirectory = Files.createTempDirectory("galaxy-generated-images").toFile()
-        mediaStore = EncryptedMediaStore(mediaDirectory, FakeKeyProvider(), maxAssetBytes = 1024)
+        keyProvider = FakeKeyProvider()
+        mediaStore = EncryptedMediaStore(mediaDirectory, keyProvider, maxAssetBytes = 1024)
         repository = RoomGeneratedImageRepository(database.generatedImageDao(), mediaStore)
     }
 
@@ -65,6 +72,119 @@ class RoomGeneratedImageRepositoryTest {
         assertEquals(request.conversationId, saved.conversationId)
         assertEquals(request.characterId, saved.characterId)
         assertArrayEquals(bytes, repository.read(saved.assetId))
+        assertEquals(saved, repository.get(saved.assetId))
+    }
+
+
+    @Test
+    fun reportsMissingMetadataSeparately() = runBlocking {
+        val failure = runCatching {
+            repository.read(UUID.randomUUID().toString())
+        }.exceptionOrNull()
+
+        assertEquals(
+            GeneratedImageReadFailure.METADATA_MISSING,
+            (failure as? GeneratedImageReadException)?.failure
+        )
+    }
+
+    @Test
+    fun reportsDatabaseReadFailureAsStorageUnavailable() = runBlocking {
+        val failingRepository = RoomGeneratedImageRepository(
+            failingDao(
+                insertAction = {},
+                getAction = { throw IllegalStateException("database unavailable") }
+            ),
+            mediaStore
+        )
+
+        val failure = runCatching {
+            failingRepository.read(UUID.randomUUID().toString())
+        }.exceptionOrNull()
+
+        assertEquals(
+            GeneratedImageReadFailure.STORAGE_UNAVAILABLE,
+            (failure as? GeneratedImageReadException)?.failure
+        )
+    }
+
+    @Test
+    fun reportsMissingCiphertextAndPreservesMetadata() = runBlocking {
+        val request = request("conversation-missing-ciphertext")
+        val bytes = ByteArray(40) { (it + 1).toByte() }
+        val saved = repository.save(request, asset(request.id, bytes), bytes)
+        val ciphertext = File(mediaDirectory, "${saved.assetId}.gcm")
+        assertTrue(ciphertext.delete())
+
+        val failure = runCatching { repository.read(saved.assetId) }.exceptionOrNull()
+
+        assertEquals(
+            GeneratedImageReadFailure.CIPHERTEXT_MISSING,
+            (failure as? GeneratedImageReadException)?.failure
+        )
+        assertEquals("Metadata must remain available for explicit recovery", saved, repository.get(saved.assetId))
+    }
+
+    @Test
+    fun reportsUnavailableKeyWithoutReplacingItOrDeletingCiphertext() = runBlocking {
+        val request = request("conversation-key-unavailable")
+        val bytes = ByteArray(40) { (it + 2).toByte() }
+        val saved = repository.save(request, asset(request.id, bytes), bytes)
+        val ciphertext = File(mediaDirectory, "${saved.assetId}.gcm")
+        val originalCiphertext = ciphertext.readBytes()
+        keyProvider.available = false
+
+        val failure = runCatching { repository.read(saved.assetId) }.exceptionOrNull()
+
+        assertEquals(
+            GeneratedImageReadFailure.KEY_UNAVAILABLE,
+            (failure as? GeneratedImageReadException)?.failure
+        )
+        assertEquals(1, keyProvider.createCalls)
+        assertTrue(ciphertext.isFile)
+        assertArrayEquals(originalCiphertext, ciphertext.readBytes())
+        assertEquals(saved, repository.get(saved.assetId))
+    }
+
+    @Test
+    fun reportsTamperedCiphertextWithoutDeletingTheAsset() = runBlocking {
+        val request = request("conversation-corrupt-ciphertext")
+        val bytes = ByteArray(40) { (it + 3).toByte() }
+        val saved = repository.save(request, asset(request.id, bytes), bytes)
+        val ciphertext = File(mediaDirectory, "${saved.assetId}.gcm")
+        val tampered = ciphertext.readBytes()
+        tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0x01).toByte()
+        ciphertext.writeBytes(tampered)
+
+        val failure = runCatching { repository.read(saved.assetId) }.exceptionOrNull()
+
+        assertEquals(
+            GeneratedImageReadFailure.CORRUPT_CIPHERTEXT,
+            (failure as? GeneratedImageReadException)?.failure
+        )
+        assertTrue(ciphertext.isFile)
+        assertEquals(saved, repository.get(saved.assetId))
+    }
+
+    @Test
+    fun reportsMetadataIntegrityMismatchWithoutDeletingCiphertext() = runBlocking {
+        val request = request("conversation-integrity-mismatch")
+        val bytes = ByteArray(40) { (it + 4).toByte() }
+        val saved = repository.save(request, asset(request.id, bytes), bytes)
+        val delegate = database.generatedImageDao()
+        val mismatchedDao = object : GeneratedImageDao by delegate {
+            override suspend fun get(assetId: String): GeneratedImageEntity? =
+                delegate.get(assetId)?.copy(sha256 = "0".repeat(64))
+        }
+        val mismatchedRepository = RoomGeneratedImageRepository(mismatchedDao, mediaStore)
+
+        val failure = runCatching { mismatchedRepository.read(saved.assetId) }.exceptionOrNull()
+
+        assertEquals(
+            GeneratedImageReadFailure.INTEGRITY_MISMATCH,
+            (failure as? GeneratedImageReadException)?.failure
+        )
+        assertTrue(mediaStore.contains(saved.assetId))
         assertEquals(saved, repository.get(saved.assetId))
     }
 
@@ -213,9 +333,11 @@ class RoomGeneratedImageRepositoryTest {
 
             assertNull(repository.get(saved.assetId))
             assertFalse(mediaStore.contains(saved.assetId))
-            assertThrows(IllegalArgumentException::class.java) {
-                runBlocking { repository.read(saved.assetId) }
-            }
+            val failure = runCatching { repository.read(saved.assetId) }.exceptionOrNull()
+            assertEquals(
+                GeneratedImageReadFailure.METADATA_MISSING,
+                (failure as? GeneratedImageReadException)?.failure
+            )
         }
     }
 
@@ -276,8 +398,18 @@ class RoomGeneratedImageRepositoryTest {
 
     private class FakeKeyProvider : MediaEncryptionKeyProvider {
         private val key: SecretKey = SecretKeySpec(ByteArray(32) { (it + 1).toByte() }, "AES")
-        override fun getOrCreateKey(): SecretKey = key
-        override fun getExistingKey(): SecretKey = key
+        var available = true
+        var createCalls = 0
+
+        override fun getOrCreateKey(): SecretKey {
+            createCalls++
+            return key
+        }
+
+        override fun getExistingKey(): SecretKey {
+            if (!available) throw MediaEncryptionKeyUnavailableException()
+            return key
+        }
     }
 
     private class RecordingDispatcher : CoroutineDispatcher() {

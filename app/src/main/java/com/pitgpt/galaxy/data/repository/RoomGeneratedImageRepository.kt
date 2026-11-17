@@ -3,13 +3,22 @@ package com.pitgpt.galaxy.data.repository
 import com.pitgpt.galaxy.core.model.GeneratedImageAsset
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.StoredGeneratedImage
+import com.pitgpt.galaxy.core.repository.GeneratedImageReadException
+import com.pitgpt.galaxy.core.repository.GeneratedImageReadFailure
 import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
 import com.pitgpt.galaxy.data.local.entity.toDomain
 import com.pitgpt.galaxy.data.local.entity.toEntity
+import com.pitgpt.galaxy.data.media.EncryptedMediaAssetMissingException
 import com.pitgpt.galaxy.data.media.EncryptedMediaStore
+import com.pitgpt.galaxy.data.media.MediaEncryptionKeyUnavailableException
+import java.io.EOFException
+import java.security.InvalidKeyException
+import java.security.InvalidAlgorithmParameterException
 import java.security.MessageDigest
 import java.util.UUID
+import javax.crypto.AEADBadTagException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -143,12 +152,47 @@ class RoomGeneratedImageRepository(
 
     override suspend fun read(assetId: String): ByteArray {
         requireValidAssetId(assetId)
-        val metadata = dao.get(assetId)?.toDomain()
-            ?: throw IllegalArgumentException("Generated image metadata was not found")
-        val bytes = withContext(ioDispatcher) {
-            mediaStore.read(assetId, metadata.mimeType)
+        val metadata = try {
+            dao.get(assetId)?.toDomain()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: IllegalArgumentException) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.INTEGRITY_MISMATCH, failure)
+        } catch (failure: Exception) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.STORAGE_UNAVAILABLE, failure)
+        } ?: throw GeneratedImageReadException(GeneratedImageReadFailure.METADATA_MISSING)
+
+        val bytes = try {
+            withContext(ioDispatcher) {
+                mediaStore.read(assetId, metadata.mimeType)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: MediaEncryptionKeyUnavailableException) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.KEY_UNAVAILABLE, failure)
+        } catch (failure: InvalidKeyException) {
+            // Android Keystore can return a key object that is no longer usable, for example
+            // after permanent invalidation. Treat it as unavailable, never as corrupt media.
+            throw GeneratedImageReadException(GeneratedImageReadFailure.KEY_UNAVAILABLE, failure)
+        } catch (failure: InvalidAlgorithmParameterException) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.CORRUPT_CIPHERTEXT, failure)
+        } catch (failure: EncryptedMediaAssetMissingException) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.CIPHERTEXT_MISSING, failure)
+        } catch (failure: AEADBadTagException) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.CORRUPT_CIPHERTEXT, failure)
+        } catch (failure: EOFException) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.CORRUPT_CIPHERTEXT, failure)
+        } catch (failure: IllegalArgumentException) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.CORRUPT_CIPHERTEXT, failure)
+        } catch (failure: Exception) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.STORAGE_UNAVAILABLE, failure)
         }
-        return validateDecryptedGeneratedImageBytes(bytes, metadata.byteSize, metadata.sha256)
+
+        return try {
+            validateDecryptedGeneratedImageBytes(bytes, metadata.byteSize, metadata.sha256)
+        } catch (failure: Exception) {
+            throw GeneratedImageReadException(GeneratedImageReadFailure.INTEGRITY_MISMATCH, failure)
+        }
     }
 
     override suspend fun delete(assetId: String) {

@@ -30,13 +30,15 @@ import com.pitgpt.galaxy.GalaxyApplication
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.ImageGenerationState
 import com.pitgpt.galaxy.core.model.ImageGenerationStatus
+import com.pitgpt.galaxy.core.repository.GeneratedImageReadException
+import com.pitgpt.galaxy.core.repository.GeneratedImageReadFailure
+import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
 import com.pitgpt.galaxy.core.usecase.CancelImageGeneration
 import com.pitgpt.galaxy.core.usecase.GetImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.SubmitImageGeneration
-import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionCancelledException
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionUncertainException
 import java.util.UUID
@@ -56,6 +58,22 @@ internal fun imageGenerationStatusLabel(state: ImageGenerationState): String =
         ImageGenerationState.COMPLETED -> "Готово"
         ImageGenerationState.FAILED -> "Ошибка генерации"
         ImageGenerationState.CANCELLED -> "Отменено"
+    }
+
+internal fun generatedImageReadFailureMessage(failure: GeneratedImageReadFailure): String =
+    when (failure) {
+        GeneratedImageReadFailure.METADATA_MISSING ->
+            "Запись изображения не найдена в защищённой базе. Файл автоматически не удаляется."
+        GeneratedImageReadFailure.CIPHERTEXT_MISSING ->
+            "Файл зашифрованного изображения не найден. Запись результата сохранена; изображение не показано."
+        GeneratedImageReadFailure.KEY_UNAVAILABLE ->
+            "Ключ шифрования недоступен. Сохранённые данные не изменены; не очищай данные приложения."
+        GeneratedImageReadFailure.CORRUPT_CIPHERTEXT ->
+            "Не удалось проверить подлинность зашифрованного изображения. Исходный файл не изменён."
+        GeneratedImageReadFailure.INTEGRITY_MISMATCH ->
+            "Содержимое изображения не совпадает с сохранёнными метаданными. Файл сохранён, но изображение не показано."
+        GeneratedImageReadFailure.STORAGE_UNAVAILABLE ->
+            "Защищённое хранилище изображений временно недоступно. Повтори попытку позже."
     }
 
 internal data class RecoverableImageGenerationRequest(
@@ -271,6 +289,12 @@ internal fun ImageGenerationPanel(
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (failure: GeneratedImageReadException) {
+            panelError = generatedImageReadFailureMessage(failure.failure)
+            // The provider already reported COMPLETED. A storage failure is not a status
+            // polling failure and must not suggest resubmitting the generation request.
+            terminal = true
+            statusNeedsRetry = false
         } catch (_: Exception) {
             panelError = if (status == null) {
                 "Состояние задания пока не подтверждено. Повтори проверку статуса; повторная отправка заблокирована."
