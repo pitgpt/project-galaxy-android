@@ -895,7 +895,7 @@ class PlaintextDatabaseEncryptorTest {
         val wrongKey = ByteArray(32).also(SecureRandom()::nextBytes)
 
         try {
-            val openFailure = runCatching {
+            val openFailure = try {
                 withEncodedSqlCipherPassphrase(wrongKey) { passphrase ->
                     val encrypted = SQLiteDatabase.openDatabase(
                         databaseFile.absolutePath,
@@ -906,15 +906,19 @@ class PlaintextDatabaseEncryptorTest {
                     )
                     try {
                         encrypted.rawQuery("PRAGMA integrity_check;", null).use { cursor ->
-                            check(cursor.moveToFirst()) {
-                                "The encrypted candidate did not return an integrity result."
-                            }
+                            assertTrue(
+                                "The encrypted candidate did not return an integrity result",
+                                cursor.moveToFirst()
+                            )
                         }
                     } finally {
                         encrypted.close()
                     }
                 }
-            }.exceptionOrNull()
+                null
+            } catch (failure: Exception) {
+                failure
+            }
 
             assertNotNull(
                 "Opening the migrated SQLCipher candidate with the wrong key must fail",
