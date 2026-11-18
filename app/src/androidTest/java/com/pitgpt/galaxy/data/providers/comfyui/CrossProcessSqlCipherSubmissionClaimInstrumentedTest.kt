@@ -36,6 +36,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
+private data class SqlCipherTestReply(val what: Int, val data: Bundle)
+
 @RunWith(AndroidJUnit4::class)
 class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
     @Test
@@ -59,11 +61,13 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
         var remoteClosed = false
         var remoteMayBeOpen = false
 
-        val replies = Channel<Message>(Channel.UNLIMITED)
+        val replies = Channel<SqlCipherTestReply>(Channel.UNLIMITED)
         val replyThread = HandlerThread("GalaxySqlCipherTestReplies").apply { start() }
         val replyMessenger = Messenger(
             Handler(replyThread.looper) { message ->
-                replies.trySend(message)
+                // Android recycles a delivered Message after this callback returns.
+                // Snapshot the primitive response data before handing it to the test coroutine.
+                replies.trySend(SqlCipherTestReply(message.what, Bundle(message.data)))
                 true
             }
         )
@@ -94,7 +98,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
             }
         }
 
-        suspend fun awaitReply(expectedWhat: Int, stage: String): Message = try {
+        suspend fun awaitReply(expectedWhat: Int, stage: String): SqlCipherTestReply = try {
             withTimeout(15_000) {
                 while (true) {
                     val message = replies.receive()
