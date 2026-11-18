@@ -11,6 +11,7 @@ import java.util.UUID
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -142,6 +143,169 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
             context.deleteDatabase(databaseName)
             listOf("-wal", "-shm", "-journal").forEach { suffix ->
                 File(context.getDatabasePath(databaseName).path + suffix).delete()
+            }
+        }
+    }
+
+    @Test
+    fun missingWrappingKeyNeverReplacesKeyForExistingEncryptedDatabase() {
+        System.loadLibrary("sqlcipher")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val suffix = UUID.randomUUID().toString()
+        val wrappingAlias = "galaxy_test_missing_wrap_$suffix"
+        val preferencesName = "galaxy_test_missing_key_$suffix"
+        val emptyPreferencesName = "galaxy_test_empty_key_$suffix"
+        val databaseName = "missing-key-sqlcipher-$suffix.db"
+        val databaseFile = context.getDatabasePath(databaseName)
+        val keyStoreUnderTest = EncryptedDatabaseKeyStore(
+            context = context,
+            preferencesName = preferencesName,
+            wrappingKeyAlias = wrappingAlias
+        )
+        var initialKey: ByteArray? = null
+        var helper: SupportSQLiteOpenHelper? = null
+        var encryptedDatabaseBefore: ByteArray? = null
+        val issuedPassphrases = mutableListOf<ByteArray>()
+
+        try {
+            initialKey = keyStoreUnderTest.getOrCreateDatabaseKey(
+                databaseExists = false,
+                databaseIsPlaintext = false,
+                encryptedTemporaryExists = false
+            )
+            assertEquals(32, initialKey!!.size)
+            initialKey!!.fill(0)
+
+            val preferences = context.getSharedPreferences(
+                preferencesName,
+                android.content.Context.MODE_PRIVATE
+            )
+            val wrappedKeyBefore = preferences.all.values.single() as String
+
+            val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(databaseName)
+                .callback(object : SupportSQLiteOpenHelper.Callback(1) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL(
+                            "CREATE TABLE preserved_ciphertext (value TEXT NOT NULL)"
+                        )
+                    }
+
+                    override fun onUpgrade(
+                        db: SupportSQLiteDatabase,
+                        oldVersion: Int,
+                        newVersion: Int
+                    ) {
+                        error("The isolated missing-key test has no migrations.")
+                    }
+                })
+                .build()
+
+            helper = ZeroizingSqlCipherOpenHelperFactory(
+                passphraseProvider = {
+                    val key = keyStoreUnderTest.getOrCreateDatabaseKey(
+                        databaseExists = databaseFile.exists(),
+                        databaseIsPlaintext = false,
+                        encryptedTemporaryExists = false
+                    )
+                    try {
+                        Base64.encode(key, Base64.NO_WRAP).also(issuedPassphrases::add)
+                    } finally {
+                        key.fill(0)
+                    }
+                },
+                enableWriteAheadLogging = true
+            ).create(configuration)
+
+            helper!!.writableDatabase.execSQL(
+                "INSERT INTO preserved_ciphertext(value) VALUES ('keep-existing-encrypted-data')"
+            )
+            helper!!.close()
+            assertTrue(issuedPassphrases.single().all { it == 0.toByte() })
+            assertTrue(databaseFile.isFile && databaseFile.length() > 0L)
+
+            encryptedDatabaseBefore = databaseFile.readBytes()
+            val sqliteHeader = "SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)
+            assertFalse(
+                "The test fixture must be an encrypted SQLCipher database",
+                encryptedDatabaseBefore!!.copyOfRange(0, sqliteHeader.size)
+                    .contentEquals(sqliteHeader)
+            )
+
+            KeyStore.getInstance(ANDROID_KEY_STORE).apply {
+                load(null)
+                assertTrue(containsAlias(wrappingAlias))
+                deleteEntry(wrappingAlias)
+            }
+
+            assertThrows(IllegalStateException::class.java) {
+                keyStoreUnderTest.getOrCreateDatabaseKey(
+                    databaseExists = true,
+                    databaseIsPlaintext = false,
+                    encryptedTemporaryExists = false
+                )
+            }
+
+            val keyStoreAfterWrappedPayloadFailure =
+                KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
+            assertFalse(
+                "A missing wrapping key must not be silently recreated for an encrypted database",
+                keyStoreAfterWrappedPayloadFailure.containsAlias(wrappingAlias)
+            )
+            assertEquals(wrappedKeyBefore, preferences.all.values.single())
+
+            val noPayloadStore = EncryptedDatabaseKeyStore(
+                context = context,
+                preferencesName = emptyPreferencesName,
+                wrappingKeyAlias = wrappingAlias
+            )
+            assertThrows(IllegalStateException::class.java) {
+                noPayloadStore.getOrCreateDatabaseKey(
+                    databaseExists = true,
+                    databaseIsPlaintext = false,
+                    encryptedTemporaryExists = false
+                )
+            }
+
+            val keyStoreAfterMissingPayloadFailure =
+                KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
+            assertFalse(
+                "A missing wrapped payload must not create a replacement key for an encrypted database",
+                keyStoreAfterMissingPayloadFailure.containsAlias(wrappingAlias)
+            )
+            assertTrue(
+                context.getSharedPreferences(
+                    emptyPreferencesName,
+                    android.content.Context.MODE_PRIVATE
+                ).all.isEmpty()
+            )
+
+            val encryptedDatabaseAfter = databaseFile.readBytes()
+            try {
+                assertArrayEquals(
+                    "Both fail-closed paths must preserve the original encrypted database byte-for-byte",
+                    encryptedDatabaseBefore,
+                    encryptedDatabaseAfter
+                )
+            } finally {
+                encryptedDatabaseAfter.fill(0)
+            }
+        } finally {
+            runCatching { helper?.close() }
+            issuedPassphrases.forEach { it.fill(0) }
+            initialKey?.fill(0)
+            encryptedDatabaseBefore?.fill(0)
+            runCatching {
+                KeyStore.getInstance(ANDROID_KEY_STORE).apply {
+                    load(null)
+                    if (containsAlias(wrappingAlias)) deleteEntry(wrappingAlias)
+                }
+            }
+            runCatching { context.deleteSharedPreferences(preferencesName) }
+            runCatching { context.deleteSharedPreferences(emptyPreferencesName) }
+            context.deleteDatabase(databaseName)
+            listOf("-wal", "-shm", "-journal").forEach { suffix ->
+                File(databaseFile.path + suffix).delete()
             }
         }
     }
