@@ -5,7 +5,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
 import android.os.Message
 import android.os.Messenger
 import android.os.Process
@@ -25,6 +25,7 @@ import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.runBlocking
@@ -59,8 +60,9 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
         var remoteMayBeOpen = false
 
         val replies = Channel<Message>(Channel.UNLIMITED)
+        val replyThread = HandlerThread("GalaxySqlCipherTestReplies").apply { start() }
         val replyMessenger = Messenger(
-            Handler(Looper.getMainLooper()) { message ->
+            Handler(replyThread.looper) { message ->
                 replies.trySend(message)
                 true
             }
@@ -92,18 +94,25 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
             }
         }
 
-        suspend fun awaitReply(expectedWhat: Int): Message = withTimeout(15_000) {
-            while (true) {
-                val message = replies.receive()
-                if (message.what == CrossProcessSqlCipherTestService.MSG_ERROR) {
-                    error(
-                        "Remote SQLCipher test service failed: " +
-                            message.data.getString(CrossProcessSqlCipherTestService.KEY_ERROR_TYPE)
-                    )
+        suspend fun awaitReply(expectedWhat: Int, stage: String): Message = try {
+            withTimeout(15_000) {
+                while (true) {
+                    val message = replies.receive()
+                    if (message.what == CrossProcessSqlCipherTestService.MSG_ERROR) {
+                        error(
+                            "Remote SQLCipher test service failed during $stage: " +
+                                message.data.getString(CrossProcessSqlCipherTestService.KEY_ERROR_TYPE)
+                        )
+                    }
+                    if (message.what == expectedWhat) return@withTimeout message
                 }
-                if (message.what == expectedWhat) return@withTimeout message
+                error("Expected remote SQLCipher response was not received during $stage")
             }
-            error("Expected remote SQLCipher response was not received")
+        } catch (timeout: TimeoutCancellationException) {
+            throw AssertionError(
+                "Timed out waiting for remote SQLCipher reply during $stage (message=$expectedWhat)",
+                timeout
+            )
         }
 
         fun sendRemote(what: Int, configure: Bundle.() -> Unit = {}) {
@@ -166,7 +175,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
                 putString(CrossProcessSqlCipherTestService.KEY_PREFERENCES_NAME, preferencesName)
                 putString(CrossProcessSqlCipherTestService.KEY_WRAPPING_ALIAS, wrappingAlias)
             }
-            val openedRemote = awaitReply(CrossProcessSqlCipherTestService.MSG_OPENED)
+            val openedRemote = awaitReply(CrossProcessSqlCipherTestService.MSG_OPENED, "opening the remote SQLCipher database")
             val remoteProcessId = openedRemote.data.getInt(CrossProcessSqlCipherTestService.KEY_PROCESS_ID)
             assertTrue("The remote service must report a valid process ID", remoteProcessId > 0)
             assertNotEquals(
@@ -197,7 +206,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
                     putString(CrossProcessSqlCipherTestService.KEY_ROUND_ID, roundId)
                     putString(CrossProcessSqlCipherTestService.KEY_PROMPT_ID, promptId)
                 }
-                val armed = awaitReply(CrossProcessSqlCipherTestService.MSG_CLAIM_ARMED)
+                val armed = awaitReply(CrossProcessSqlCipherTestService.MSG_CLAIM_ARMED, "arming claim round $round")
                 assertEquals(roundId, armed.data.getString(CrossProcessSqlCipherTestService.KEY_ROUND_ID))
 
                 val localStart = CompletableDeferred<Unit>()
@@ -211,7 +220,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
                 }
                 localStart.complete(Unit)
 
-                val remoteResult = awaitReply(CrossProcessSqlCipherTestService.MSG_CLAIM_RESULT)
+                val remoteResult = awaitReply(CrossProcessSqlCipherTestService.MSG_CLAIM_RESULT, "collecting claim result for round $round")
                 assertEquals(roundId, remoteResult.data.getString(CrossProcessSqlCipherTestService.KEY_ROUND_ID))
                 val localWon = localClaim.await()
                 val remoteWon = remoteResult.data.getBoolean(CrossProcessSqlCipherTestService.KEY_CLAIMED)
@@ -227,7 +236,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
                 sendRemote(CrossProcessSqlCipherTestService.MSG_READ_JOB) {
                     putString(CrossProcessSqlCipherTestService.KEY_PROMPT_ID, promptId)
                 }
-                val remoteRecord = awaitReply(CrossProcessSqlCipherTestService.MSG_JOB_READ)
+                val remoteRecord = awaitReply(CrossProcessSqlCipherTestService.MSG_JOB_READ, "reading job for round $round")
                 assertTrue(remoteRecord.data.getBoolean(CrossProcessSqlCipherTestService.KEY_FOUND))
                 assertTrue(remoteRecord.data.getBoolean(CrossProcessSqlCipherTestService.KEY_SUBMISSION_STARTED))
             }
@@ -239,7 +248,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
             assertEquals("ok", integrity.lowercase())
 
             sendRemote(CrossProcessSqlCipherTestService.MSG_CLOSE)
-            val closedRemote = awaitReply(CrossProcessSqlCipherTestService.MSG_CLOSED)
+            val closedRemote = awaitReply(CrossProcessSqlCipherTestService.MSG_CLOSED, "closing the remote SQLCipher helper")
             remoteClosed = true
             assertTrue(
                 "The remote process must have opened its own SQLCipher passphrase buffer",
@@ -261,7 +270,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
             if (!remoteClosed && remoteMessenger != null) {
                 try {
                     sendRemote(CrossProcessSqlCipherTestService.MSG_CLOSE)
-                    awaitReply(CrossProcessSqlCipherTestService.MSG_CLOSED)
+                    awaitReply(CrossProcessSqlCipherTestService.MSG_CLOSED, "closing the remote SQLCipher helper")
                     remoteClosed = true
                 } catch (_: Throwable) {
                     // If remote closure cannot be confirmed, preserve its test-owned database and key.
@@ -284,6 +293,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
                 }
             }
             replies.close()
+            replyThread.quitSafely()
         }
     }
 }
