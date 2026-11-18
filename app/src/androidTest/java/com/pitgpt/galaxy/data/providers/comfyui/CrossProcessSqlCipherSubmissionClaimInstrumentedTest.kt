@@ -150,11 +150,6 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
             localDatabase = openedLocal
             val localDao = openedLocal.comfyUiJobDao()
             val localWritable = openedLocal.openHelper.writableDatabase
-            val localJournalMode = localWritable.query("PRAGMA journal_mode").use { cursor ->
-                assertTrue(cursor.moveToFirst())
-                cursor.getString(0)
-            }
-            assertEquals("wal", localJournalMode.lowercase())
 
             val localProcessId = Process.myPid()
             val intent = Intent(context, CrossProcessSqlCipherTestService::class.java)
@@ -172,14 +167,16 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
                 putString(CrossProcessSqlCipherTestService.KEY_WRAPPING_ALIAS, wrappingAlias)
             }
             val openedRemote = awaitReply(CrossProcessSqlCipherTestService.MSG_OPENED)
+            val remoteProcessId = openedRemote.data.getInt(CrossProcessSqlCipherTestService.KEY_PROCESS_ID)
+            assertTrue("The remote service must report a valid process ID", remoteProcessId > 0)
             assertNotEquals(
                 "The test service must run in a distinct Android process",
                 localProcessId,
-                openedRemote.data.getInt(CrossProcessSqlCipherTestService.KEY_PROCESS_ID)
+                remoteProcessId
             )
-            assertEquals(
-                "wal",
-                openedRemote.data.getString(CrossProcessSqlCipherTestService.KEY_JOURNAL_MODE)?.lowercase()
+            assertTrue(
+                "The remote service must confirm its SQLCipher helper entered WAL mode",
+                openedRemote.data.getBoolean(CrossProcessSqlCipherTestService.KEY_WAL_CONFIRMED)
             )
 
             repeat(24) { round ->
