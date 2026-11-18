@@ -79,7 +79,7 @@ class CrossProcessSqlCipherTestService : Service() {
                     }
                     reply(replyTo, MSG_OPENED) {
                         putInt(KEY_PROCESS_ID, android.os.Process.myPid())
-                        putString(KEY_JOURNAL_MODE, journalMode)
+                        putBoolean(KEY_WAL_CONFIRMED, true)
                     }
                 }
 
@@ -248,7 +248,7 @@ class CrossProcessSqlCipherTestService : Service() {
         const val KEY_PREFERENCES_NAME = "preferences_name"
         const val KEY_WRAPPING_ALIAS = "wrapping_alias"
         const val KEY_PROCESS_ID = "process_id"
-        const val KEY_JOURNAL_MODE = "journal_mode"
+        const val KEY_WAL_CONFIRMED = "wal_confirmed"
         const val KEY_ROUND_ID = "round_id"
         const val KEY_PROMPT_ID = "prompt_id"
         const val KEY_CLAIMED = "claimed"
