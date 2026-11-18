@@ -52,12 +52,20 @@ internal class EncryptedDatabaseKeyStore(
         try {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateWrappingKey())
-            val payload = cipher.iv + cipher.doFinal(key)
-            val saved = preferences.edit()
-                .putString(WRAPPED_KEY, Base64.encodeToString(payload, Base64.NO_WRAP))
-                .commit()
-            check(saved) { "Could not persist the wrapped Galaxy database key." }
-            return key
+            val iv = cipher.iv
+            try {
+                val ciphertext = cipher.doFinal(key)
+                val encodedPayload = encodeWrappedDatabaseKeyPayload(iv, ciphertext) { payload ->
+                    Base64.encodeToString(payload, Base64.NO_WRAP)
+                }
+                val saved = preferences.edit()
+                    .putString(WRAPPED_KEY, encodedPayload)
+                    .commit()
+                check(saved) { "Could not persist the wrapped Galaxy database key." }
+                return key
+            } finally {
+                iv.fill(0)
+            }
         } catch (failure: Exception) {
             key.fill(0)
             throw failure
@@ -111,6 +119,37 @@ internal class EncryptedDatabaseKeyStore(
         const val KEY_ALIAS = "galaxy_database_key_wrap_aes"
         const val ANDROID_KEY_STORE = "AndroidKeyStore"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
+    }
+}
+
+/**
+ * Encodes the IV and AES-GCM ciphertext for persistence.
+ *
+ * Ownership of [iv] and [ciphertext] is transferred to this function. The combined payload and
+ * both input buffers are zeroed on every exit path. The [encode] callback must not retain the
+ * supplied payload after it returns.
+ */
+internal fun encodeWrappedDatabaseKeyPayload(
+    iv: ByteArray,
+    ciphertext: ByteArray,
+    encode: (payload: ByteArray) -> String
+): String {
+    var payload: ByteArray? = null
+    try {
+        require(iv.size == IV_BYTES) {
+            "Wrapped database key has an invalid IV length."
+        }
+        require(ciphertext.size >= GCM_TAG_BYTES) {
+            "Wrapped database key ciphertext is truncated."
+        }
+        payload = ByteArray(iv.size + ciphertext.size)
+        System.arraycopy(iv, 0, payload, 0, iv.size)
+        System.arraycopy(ciphertext, 0, payload, iv.size, ciphertext.size)
+        return encode(payload)
+    } finally {
+        payload?.fill(0)
+        ciphertext.fill(0)
+        iv.fill(0)
     }
 }
 
