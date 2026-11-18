@@ -20,6 +20,78 @@ class EncryptedDatabaseKeyStoreTest {
     )
 
     @Test
+    fun encodedWrappedPayloadPreservesValueAndZeroesAllOwnedBuffers() {
+        val iv = ByteArray(12) { (it + 1).toByte() }
+        val ciphertext = ByteArray(48) { (it + 21).toByte() }
+        val expectedPayload = iv + ciphertext
+        var combinedPayload: ByteArray? = null
+
+        try {
+            val encoded = encodeWrappedDatabaseKeyPayload(iv, ciphertext) { payload ->
+                combinedPayload = payload
+                assertArrayEquals(expectedPayload, payload)
+                Base64.encodeToString(payload, Base64.NO_WRAP)
+            }
+            val decoded = Base64.decode(encoded, Base64.NO_WRAP)
+            try {
+                assertArrayEquals(expectedPayload, decoded)
+            } finally {
+                decoded.fill(0)
+            }
+
+            assertAllZero(iv)
+            assertAllZero(ciphertext)
+            assertAllZero(checkNotNull(combinedPayload))
+        } finally {
+            expectedPayload.fill(0)
+            iv.fill(0)
+            ciphertext.fill(0)
+            combinedPayload?.fill(0)
+        }
+    }
+
+    @Test
+    fun encodedWrappedPayloadZeroesAllOwnedBuffersWhenEncoderFails() {
+        val iv = ByteArray(12) { (it + 2).toByte() }
+        val ciphertext = ByteArray(48) { (it + 31).toByte() }
+        val expectedFailure = IllegalStateException("simulated payload encoding failure")
+        var combinedPayload: ByteArray? = null
+
+        try {
+            val actualFailure = assertThrows(IllegalStateException::class.java) {
+                encodeWrappedDatabaseKeyPayload(iv, ciphertext) { payload ->
+                    combinedPayload = payload
+                    throw expectedFailure
+                }
+            }
+
+            assertTrue(actualFailure === expectedFailure)
+            assertAllZero(iv)
+            assertAllZero(ciphertext)
+            assertAllZero(checkNotNull(combinedPayload))
+        } finally {
+            iv.fill(0)
+            ciphertext.fill(0)
+            combinedPayload?.fill(0)
+        }
+    }
+
+    @Test
+    fun malformedWrappedPayloadInputsAreZeroedBeforeRejection() {
+        val invalidIv = ByteArray(11) { (it + 3).toByte() }
+        val ciphertext = ByteArray(48) { (it + 41).toByte() }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            encodeWrappedDatabaseKeyPayload(invalidIv, ciphertext) {
+                error("Encoder must not run for an invalid IV.")
+            }
+        }
+
+        assertAllZero(invalidIv)
+        assertAllZero(ciphertext)
+    }
+
+    @Test
     fun decodedPayloadAndSlicesAreZeroedAfterSuccessfulUnwrap() {
         val expectedDatabaseKey = ByteArray(32) { (it + 17).toByte() }
         val decodedPayload = encodedAndDecodedPayload(expectedDatabaseKey)
