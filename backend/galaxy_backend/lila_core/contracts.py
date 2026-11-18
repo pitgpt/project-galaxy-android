@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 Emotion = Literal[
@@ -26,6 +26,13 @@ class CoreTurnRequest(BaseModel):
 
     conversation_id: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=12_000)
+
+    @field_validator("message")
+    @classmethod
+    def reject_whitespace_only_message(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message must contain non-whitespace characters")
+        return value
 
 
 class EmotionPayload(BaseModel):
