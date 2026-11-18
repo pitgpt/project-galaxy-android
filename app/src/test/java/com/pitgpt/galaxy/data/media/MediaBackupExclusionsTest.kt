@@ -2,6 +2,7 @@ package com.pitgpt.galaxy.data.media
 
 import android.content.pm.ApplicationInfo
 import com.pitgpt.galaxy.R
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -42,6 +43,22 @@ class MediaBackupExclusionsTest {
         assertTrue(
             "The device-only backup policy expects backup to remain enabled with explicit exclusions",
             applicationInfo.flags and ApplicationInfo.FLAG_ALLOW_BACKUP != 0
+        )
+    }
+
+    @Test
+    fun applicationManifestReferencesBothBackupRuleResources() {
+        val applicationInfo = RuntimeEnvironment.getApplication().applicationInfo
+
+        assertEquals(
+            "Legacy full-backup rules must be wired through android:fullBackupContent",
+            R.xml.backup_rules,
+            applicationInfo.fullBackupContent
+        )
+        assertEquals(
+            "Cloud backup and device-transfer rules must be wired through android:dataExtractionRules",
+            R.xml.data_extraction_rules,
+            applicationInfo.dataExtractionRules
         )
     }
 
