@@ -132,7 +132,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
                 databaseName
             )
                 .openHelperFactory(
-                    ZeroizingSqlCipherOpenHelperFactory {
+                    ZeroizingSqlCipherOpenHelperFactory(passphraseProvider = {
                         val key = keyStore.getOrCreateDatabaseKey(
                             databaseExists = databaseFile.exists(),
                             databaseIsPlaintext = false,
@@ -143,7 +143,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
                         } finally {
                             key.fill(0)
                         }
-                    }
+                    })
                 )
                 .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
                 .build()
