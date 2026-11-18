@@ -32,6 +32,19 @@ class ComfyUiConnectionTest {
     }
 
     @Test
+    fun rejectsDnsHostnamesForCleartextEvenWhenTheyUseLocalSuffixes() {
+        listOf(
+            "http://comfy.local:8188",
+            "http://printer.localhost:8188",
+            "http://render-node.local:8188"
+        ).forEach { url ->
+            assertThrows(IllegalArgumentException::class.java) {
+                ComfyUiConnectionConfig(url)
+            }
+        }
+    }
+
+    @Test
     fun rejectsCredentialsQueryAndFragment() {
         listOf(
             "http://user:password@192.168.1.25:8188",
