@@ -56,6 +56,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
         var remoteMessenger: Messenger? = null
         var serviceBound = false
         var remoteClosed = false
+        var remoteMayBeOpen = false
 
         val replies = Channel<Message>(Channel.UNLIMITED)
         val replyMessenger = Messenger(
@@ -164,6 +165,7 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
             serviceBound = true
             withTimeout(10_000) { connected.await() }
 
+            remoteMayBeOpen = true
             sendRemote(CrossProcessSqlCipherTestService.MSG_OPEN) {
                 putString(CrossProcessSqlCipherTestService.KEY_DATABASE_NAME, databaseName)
                 putString(CrossProcessSqlCipherTestService.KEY_PREFERENCES_NAME, preferencesName)
@@ -260,24 +262,29 @@ class CrossProcessSqlCipherSubmissionClaimInstrumentedTest {
             )
         } finally {
             if (!remoteClosed && remoteMessenger != null) {
-                runCatching {
+                try {
                     sendRemote(CrossProcessSqlCipherTestService.MSG_CLOSE)
                     awaitReply(CrossProcessSqlCipherTestService.MSG_CLOSED)
+                    remoteClosed = true
+                } catch (_: Throwable) {
+                    // If remote closure cannot be confirmed, preserve its test-owned database and key.
                 }
             }
             if (serviceBound) runCatching { context.unbindService(serviceConnection) }
             runCatching { localDatabase?.close() }
             localPassphrases.forEach { it.fill(0) }
-            runCatching {
-                KeyStore.getInstance("AndroidKeyStore").apply {
-                    load(null)
-                    if (containsAlias(wrappingAlias)) deleteEntry(wrappingAlias)
+            if (remoteClosed || !remoteMayBeOpen) {
+                runCatching {
+                    KeyStore.getInstance("AndroidKeyStore").apply {
+                        load(null)
+                        if (containsAlias(wrappingAlias)) deleteEntry(wrappingAlias)
+                    }
                 }
-            }
-            runCatching { context.deleteSharedPreferences(preferencesName) }
-            context.deleteDatabase(databaseName)
-            listOf("-wal", "-shm", "-journal").forEach { suffix ->
-                File(databaseFile.path + suffix).delete()
+                runCatching { context.deleteSharedPreferences(preferencesName) }
+                context.deleteDatabase(databaseName)
+                listOf("-wal", "-shm", "-journal").forEach { suffix ->
+                    File(databaseFile.path + suffix).delete()
+                }
             }
             replies.close()
         }
