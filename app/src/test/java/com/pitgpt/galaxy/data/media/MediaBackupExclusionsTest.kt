@@ -12,7 +12,6 @@ import org.robolectric.annotation.Config
 import org.w3c.dom.Element
 import org.xmlpull.v1.XmlPullParser
 import java.io.File
-import javax.xml.XMLConstants
 import javax.xml.parsers.DocumentBuilderFactory
 
 @RunWith(RobolectricTestRunner::class)
@@ -77,10 +76,10 @@ class MediaBackupExclusionsTest {
             isNamespaceAware = true
             isXIncludeAware = false
             isExpandEntityReferences = false
-            setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+            setFeature("http://javax.xml.XMLConstants/feature/secure-processing", true)
             setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-            setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
-            setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
+            setFeature("http://xml.org/sax/features/external-general-entities", false)
+            setFeature("http://xml.org/sax/features/external-parameter-entities", false)
         }
         val document = manifestFile.inputStream().use { input ->
             factory.newDocumentBuilder().parse(input)
