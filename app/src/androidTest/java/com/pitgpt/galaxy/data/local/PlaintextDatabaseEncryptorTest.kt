@@ -887,6 +887,65 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun rollbackRestoresPlaintextWhenEncryptedCandidateCannotBeOpened() {
+        createPlaintextDatabase()
+        val pending = checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val failedEncrypted = File(directory, "galaxy-test.db.encrypted-failed")
+        val wrongKey = ByteArray(32).also(SecureRandom()::nextBytes)
+
+        try {
+            val openFailure = runCatching {
+                withEncodedSqlCipherPassphrase(wrongKey) { passphrase ->
+                    val encrypted = SQLiteDatabase.openDatabase(
+                        databaseFile.absolutePath,
+                        passphrase,
+                        null,
+                        SQLiteDatabase.OPEN_READWRITE,
+                        null
+                    )
+                    try {
+                        encrypted.rawQuery("PRAGMA integrity_check;", null).use { cursor ->
+                            check(cursor.moveToFirst()) {
+                                "The encrypted candidate did not return an integrity result."
+                            }
+                        }
+                    } finally {
+                        encrypted.close()
+                    }
+                }
+            }.exceptionOrNull()
+
+            assertNotNull(
+                "Opening the migrated SQLCipher candidate with the wrong key must fail",
+                openFailure
+            )
+            assertTrue("The plaintext rollback copy must remain available after open failure", backup.isFile)
+            assertTrue("The encrypted candidate must remain at the canonical path until rollback", databaseFile.isFile)
+            assertFalse(encryptor.isPlaintextDatabase(databaseFile))
+
+            encryptor.rollback(pending)
+
+            assertTrue("Rollback must restore the original plaintext database", encryptor.isPlaintextDatabase(databaseFile))
+            assertFalse("The rollback backup must be moved back to the canonical path", backup.exists())
+            assertFalse("The failed encrypted candidate must be removed after successful rollback", failedEncrypted.exists())
+
+            FrameworkSQLiteDatabase.openDatabase(
+                databaseFile.absolutePath,
+                null,
+                FrameworkSQLiteDatabase.OPEN_READONLY
+            ).use { restored ->
+                assertEquals(2L, countFrameworkRows(restored, "character_profiles"))
+                assertEquals(3L, countFrameworkRows(restored, "conversation_messages"))
+                assertEquals(2L, countFrameworkRows(restored, "memory_items"))
+                assertEquals(2, restored.version)
+            }
+        } finally {
+            wrongKey.fill(0)
+        }
+    }
+
+    @Test
     fun wrongKeyDoesNotDeleteOriginalPlaintextRollbackCopy() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
