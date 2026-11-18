@@ -1,5 +1,6 @@
 package com.pitgpt.galaxy.data.local
 
+import android.database.sqlite.SQLiteDatabase as FrameworkSQLiteDatabase
 import android.util.Base64
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
@@ -8,6 +9,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
 import java.security.KeyStore
 import java.util.UUID
+import net.zetetic.database.sqlcipher.SQLiteDatabase as SqlCipherDatabase
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -306,6 +308,191 @@ class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
             context.deleteDatabase(databaseName)
             listOf("-wal", "-shm", "-journal").forEach { suffix ->
                 File(databaseFile.path + suffix).delete()
+            }
+        }
+    }
+
+    @Test
+    fun missingWrappingKeyPreservesEncryptedMigrationCandidateAndPlaintextBackup() {
+        System.loadLibrary("sqlcipher")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val suffix = UUID.randomUUID().toString()
+        val wrappingAlias = "galaxy_test_candidate_wrap_$suffix"
+        val preferencesName = "galaxy_test_candidate_key_$suffix"
+        val emptyPreferencesName = "galaxy_test_candidate_empty_$suffix"
+        val canonicalName = "migration-candidate-$suffix.db"
+        val canonicalFile = context.getDatabasePath(canonicalName)
+        val candidateFile = File(canonicalFile.parentFile, canonicalFile.name + ".encrypted-tmp")
+        val backupFile = File(canonicalFile.parentFile, canonicalFile.name + ".plaintext-backup")
+        canonicalFile.parentFile?.mkdirs()
+
+        val keyStoreUnderTest = EncryptedDatabaseKeyStore(
+            context = context,
+            preferencesName = preferencesName,
+            wrappingKeyAlias = wrappingAlias
+        )
+        var databaseKey: ByteArray? = null
+        var candidateBytesBefore: ByteArray? = null
+        var backupBytesBefore: ByteArray? = null
+
+        try {
+            val key = keyStoreUnderTest.getOrCreateDatabaseKey(
+                databaseExists = false,
+                databaseIsPlaintext = false,
+                encryptedTemporaryExists = false
+            )
+            databaseKey = key
+            assertEquals(32, key.size)
+
+            val candidatePassphrase = Base64.encode(key, Base64.NO_WRAP)
+            try {
+                SqlCipherDatabase.openDatabase(
+                    candidateFile.absolutePath,
+                    candidatePassphrase,
+                    null,
+                    SqlCipherDatabase.OPEN_READWRITE or SqlCipherDatabase.CREATE_IF_NECESSARY,
+                    null
+                ).use { candidate ->
+                    candidate.execSQL(
+                        "CREATE TABLE candidate_marker (id TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL)"
+                    )
+                    candidate.execSQL(
+                        "INSERT INTO candidate_marker VALUES ('candidate', 'preserve encrypted candidate')"
+                    )
+                }
+            } finally {
+                candidatePassphrase.fill(0)
+            }
+
+            FrameworkSQLiteDatabase.openOrCreateDatabase(backupFile, null).use { backup ->
+                backup.execSQL(
+                    "CREATE TABLE rollback_marker (id TEXT NOT NULL PRIMARY KEY, value TEXT NOT NULL)"
+                )
+                backup.execSQL(
+                    "INSERT INTO rollback_marker VALUES ('backup', 'preserve plaintext rollback copy')"
+                )
+            }
+
+            assertFalse("The simulated crash state must not have a canonical database", canonicalFile.exists())
+            assertTrue(candidateFile.isFile && candidateFile.length() > 0L)
+            assertTrue(backupFile.isFile && backupFile.length() > 0L)
+
+            candidateBytesBefore = candidateFile.readBytes()
+            backupBytesBefore = backupFile.readBytes()
+            val sqliteHeader = "SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)
+            assertFalse(
+                "The migration candidate must be encrypted SQLCipher data",
+                candidateBytesBefore!!.copyOfRange(0, sqliteHeader.size).contentEquals(sqliteHeader)
+            )
+            assertTrue(
+                "The rollback copy must remain a plaintext SQLite database",
+                backupBytesBefore!!.copyOfRange(0, sqliteHeader.size).contentEquals(sqliteHeader)
+            )
+
+            val preferences = context.getSharedPreferences(
+                preferencesName,
+                android.content.Context.MODE_PRIVATE
+            )
+            val wrappedKeyBefore = preferences.all.values.single() as String
+
+            KeyStore.getInstance(ANDROID_KEY_STORE).apply {
+                load(null)
+                assertTrue(containsAlias(wrappingAlias))
+                deleteEntry(wrappingAlias)
+            }
+
+            assertThrows(IllegalStateException::class.java) {
+                keyStoreUnderTest.getOrCreateDatabaseKey(
+                    databaseExists = false,
+                    databaseIsPlaintext = false,
+                    encryptedTemporaryExists = true
+                )
+            }
+            assertEquals(
+                "The existing wrapped payload must not be modified after key lookup fails",
+                wrappedKeyBefore,
+                preferences.all.values.single()
+            )
+
+            val noPayloadStore = EncryptedDatabaseKeyStore(
+                context = context,
+                preferencesName = emptyPreferencesName,
+                wrappingKeyAlias = wrappingAlias
+            )
+            assertThrows(IllegalStateException::class.java) {
+                noPayloadStore.getOrCreateDatabaseKey(
+                    databaseExists = false,
+                    databaseIsPlaintext = false,
+                    encryptedTemporaryExists = true
+                )
+            }
+
+            val keyStoreAfterFailures = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
+            assertFalse(
+                "An encrypted temporary candidate must never trigger replacement wrapping-key creation",
+                keyStoreAfterFailures.containsAlias(wrappingAlias)
+            )
+            assertTrue(
+                context.getSharedPreferences(
+                    emptyPreferencesName,
+                    android.content.Context.MODE_PRIVATE
+                ).all.isEmpty()
+            )
+            assertFalse(canonicalFile.exists())
+            assertArrayEquals(candidateBytesBefore, candidateFile.readBytes())
+            assertArrayEquals(backupBytesBefore, backupFile.readBytes())
+
+            val verificationPassphrase = Base64.encode(key, Base64.NO_WRAP)
+            try {
+                SqlCipherDatabase.openDatabase(
+                    candidateFile.absolutePath,
+                    verificationPassphrase,
+                    null,
+                    SqlCipherDatabase.OPEN_READWRITE,
+                    null
+                ).use { candidate ->
+                    candidate.rawQuery(
+                        "SELECT value FROM candidate_marker WHERE id = 'candidate'",
+                        null
+                    ).use { cursor ->
+                        assertTrue(cursor.moveToFirst())
+                        assertEquals("preserve encrypted candidate", cursor.getString(0))
+                    }
+                }
+            } finally {
+                verificationPassphrase.fill(0)
+            }
+
+            FrameworkSQLiteDatabase.openDatabase(
+                backupFile.absolutePath,
+                null,
+                FrameworkSQLiteDatabase.OPEN_READONLY
+            ).use { backup ->
+                backup.rawQuery(
+                    "SELECT value FROM rollback_marker WHERE id = 'backup'",
+                    null
+                ).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals("preserve plaintext rollback copy", cursor.getString(0))
+                }
+            }
+        } finally {
+            databaseKey?.fill(0)
+            candidateBytesBefore?.fill(0)
+            backupBytesBefore?.fill(0)
+            runCatching {
+                KeyStore.getInstance(ANDROID_KEY_STORE).apply {
+                    load(null)
+                    if (containsAlias(wrappingAlias)) deleteEntry(wrappingAlias)
+                }
+            }
+            runCatching { context.deleteSharedPreferences(preferencesName) }
+            runCatching { context.deleteSharedPreferences(emptyPreferencesName) }
+            listOf(canonicalFile, candidateFile, backupFile).forEach { file ->
+                file.delete()
+                listOf("-wal", "-shm", "-journal").forEach { suffix ->
+                    File(file.path + suffix).delete()
+                }
             }
         }
     }
