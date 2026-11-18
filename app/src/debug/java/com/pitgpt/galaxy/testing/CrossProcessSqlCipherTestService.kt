@@ -137,6 +137,13 @@ class CrossProcessSqlCipherTestService : Service() {
                 }
 
                 MSG_CLOSE -> {
+                    // Let any in-flight test claim finish before closing the remote connection pool.
+                    pendingClaims.values.forEach { it.countDown() }
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (pendingClaims.isNotEmpty() && System.nanoTime() < deadline) {
+                        Thread.sleep(10)
+                    }
+                    check(pendingClaims.isEmpty()) { "Remote SQLCipher claims did not drain before close" }
                     val current = database
                     database = null
                     current?.close()
