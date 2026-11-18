@@ -810,6 +810,83 @@ class PlaintextDatabaseEncryptorTest {
     }
 
     @Test
+    fun preservesEncryptedCandidateAndPlaintextBackupWhenCandidateKeyIsWrong() {
+        createPlaintextDatabase()
+        checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+
+        val backup = File(directory, "galaxy-test.db.plaintext-backup")
+        val temporary = File(directory, "galaxy-test.db.encrypted-tmp")
+        assertTrue("The plaintext rollback copy must exist before simulating process death", backup.isFile)
+        assertTrue(databaseFile.isFile)
+        assertTrue("The verified encrypted database must move to the temporary candidate path", databaseFile.renameTo(temporary))
+        assertFalse(databaseFile.exists())
+
+        val candidateBefore = temporary.readBytes()
+        val backupBefore = backup.readBytes()
+        val wrongKey = ByteArray(32).also(SecureRandom()::nextBytes)
+
+        try {
+            val failure = runCatching {
+                encryptor.migrateIfNeeded(databaseFile, wrongKey)
+            }.exceptionOrNull()
+
+            assertNotNull("A candidate that cannot be authenticated must not be promoted", failure)
+            assertFalse("The canonical database path must remain absent after failed verification", databaseFile.exists())
+            assertTrue("The encrypted candidate must remain available", temporary.isFile)
+            assertTrue("The plaintext rollback copy must remain available", backup.isFile)
+            assertArrayEquals("Failed candidate verification must not alter encrypted bytes", candidateBefore, temporary.readBytes())
+            assertArrayEquals("Failed candidate verification must not alter the plaintext rollback copy", backupBefore, backup.readBytes())
+
+            FrameworkSQLiteDatabase.openDatabase(
+                backup.absolutePath,
+                null,
+                FrameworkSQLiteDatabase.OPEN_READONLY
+            ).use { plaintext ->
+                assertEquals(2L, countFrameworkRows(plaintext, "character_profiles"))
+                assertEquals(3L, countFrameworkRows(plaintext, "conversation_messages"))
+                assertEquals(2L, countFrameworkRows(plaintext, "memory_items"))
+            }
+
+            withEncodedSqlCipherPassphrase(databaseKey) { passphrase ->
+                SQLiteDatabase.openDatabase(
+                    temporary.absolutePath,
+                    passphrase,
+                    null,
+                    SQLiteDatabase.OPEN_READWRITE,
+                    null
+                ).use { candidate ->
+                    assertEquals(2L, countRows(candidate, "character_profiles"))
+                    assertEquals(3L, countRows(candidate, "conversation_messages"))
+                    assertEquals(2L, countRows(candidate, "memory_items"))
+                }
+            }
+
+            val recovered = checkNotNull(encryptor.migrateIfNeeded(databaseFile, databaseKey))
+            assertTrue("The candidate must be promoted only after successful verification", databaseFile.isFile)
+            assertFalse(temporary.exists())
+            withEncodedSqlCipherPassphrase(databaseKey) { passphrase ->
+                SQLiteDatabase.openDatabase(
+                    databaseFile.absolutePath,
+                    passphrase,
+                    null,
+                    SQLiteDatabase.OPEN_READWRITE,
+                    null
+                ).use { encrypted ->
+                    assertEquals(2L, countRows(encrypted, "character_profiles"))
+                    assertEquals(3L, countRows(encrypted, "conversation_messages"))
+                    assertEquals(2L, countRows(encrypted, "memory_items"))
+                }
+            }
+            encryptor.complete(recovered)
+            assertFalse("The rollback copy is removed only after successful recovery", backup.exists())
+        } finally {
+            wrongKey.fill(0)
+            candidateBefore.fill(0)
+            backupBefore.fill(0)
+        }
+    }
+
+    @Test
     fun wrongKeyDoesNotDeleteOriginalPlaintextRollbackCopy() {
         createPlaintextDatabase()
         val pending = encryptor.migrateIfNeeded(databaseFile, databaseKey)
