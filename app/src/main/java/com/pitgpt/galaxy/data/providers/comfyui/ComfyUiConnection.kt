@@ -5,8 +5,9 @@ import java.net.URI
 /**
  * Explicit user-configured ComfyUI endpoint.
  *
- * Plain HTTP is restricted to local/private network destinations. Public endpoints must use
- * HTTPS. Redirects are disabled by the transport so credentials cannot be forwarded elsewhere.
+ * Plain HTTP is restricted to literal local/private IP addresses and the exact `localhost`
+ * hostname. Other DNS hostnames require HTTPS: suffix checks such as `.local` do not pin DNS
+ * answers and can be abused by DNS rebinding. Redirects are disabled by the transport.
  */
 data class ComfyUiConnectionConfig(
     val baseUrl: String,
@@ -84,7 +85,7 @@ object ComfyUiEndpointPolicy {
 
         if (scheme == "http") {
             require(isLocalOrPrivateHost(host)) {
-                "Plain HTTP is allowed only for local or private-network ComfyUI endpoints"
+                "Plain HTTP requires a literal local/private IP address or exact localhost; DNS hostnames require HTTPS"
             }
         }
 
@@ -97,9 +98,9 @@ object ComfyUiEndpointPolicy {
     }
 
     private fun isLocalOrPrivateHost(host: String): Boolean {
-        if (host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) {
-            return true
-        }
+        // Only the reserved exact localhost name is trusted without DNS. Arbitrary
+        // .localhost/.local suffixes are still DNS names and can be rebound to public hosts.
+        if (host == "localhost") return true
 
         if (host.contains(':')) {
             // IPv6 literals only; no DNS lookup is performed by this validator.
