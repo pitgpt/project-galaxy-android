@@ -9,7 +9,11 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.w3c.dom.Element
 import org.xmlpull.v1.XmlPullParser
+import java.io.File
+import javax.xml.XMLConstants
+import javax.xml.parsers.DocumentBuilderFactory
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -48,18 +52,42 @@ class MediaBackupExclusionsTest {
 
     @Test
     fun applicationManifestReferencesBothBackupRuleResources() {
-        val applicationInfo = RuntimeEnvironment.getApplication().applicationInfo
+        val application = readSourceApplicationManifest()
 
         assertEquals(
             "Legacy full-backup rules must be wired through android:fullBackupContent",
-            R.xml.backup_rules,
-            applicationInfo.fullBackupContent
+            "@xml/backup_rules",
+            application.getAttributeNS(ANDROID_NAMESPACE, "fullBackupContent")
         )
         assertEquals(
             "Cloud backup and device-transfer rules must be wired through android:dataExtractionRules",
-            R.xml.data_extraction_rules,
-            applicationInfo.dataExtractionRules
+            "@xml/data_extraction_rules",
+            application.getAttributeNS(ANDROID_NAMESPACE, "dataExtractionRules")
         )
+    }
+
+    private fun readSourceApplicationManifest(): Element {
+        val manifestFile = listOf(
+            File("src/main/AndroidManifest.xml"),
+            File("app/src/main/AndroidManifest.xml")
+        ).firstOrNull(File::isFile)
+            ?: throw AssertionError("Could not locate app/src/main/AndroidManifest.xml from the unit-test working directory.")
+
+        val factory = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+            isXIncludeAware = false
+            isExpandEntityReferences = false
+            setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+            setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "")
+            setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "")
+        }
+        val document = manifestFile.inputStream().use { input ->
+            factory.newDocumentBuilder().parse(input)
+        }
+
+        return document.getElementsByTagName("application").item(0) as? Element
+            ?: throw AssertionError("The Android manifest does not contain an application element.")
     }
 
     private fun readExclusions(resourceId: Int): Map<String, Set<Pair<String, String>>> {
@@ -97,6 +125,8 @@ class MediaBackupExclusionsTest {
     }
 
     private companion object {
+        const val ANDROID_NAMESPACE = "http://schemas.android.com/apk/res/android"
+
         val deviceOnlyExclusions = setOf(
             "sharedpref" to "galaxy_secure_auth.xml",
             "sharedpref" to "galaxy_provider_vault.xml",
