@@ -27,11 +27,38 @@ data class EncryptedMediaAsset(
  * The temporary file contains ciphertext only. A completed encrypted file is atomically
  * promoted into place; reads decrypt into memory and never create a plaintext temporary file.
  */
-class EncryptedMediaStore(
+class EncryptedMediaStore private constructor(
     private val directory: File,
     private val keyProvider: MediaEncryptionKeyProvider,
-    private val maxAssetBytes: Int = DEFAULT_MAX_ASSET_BYTES
+    private val maxAssetBytes: Int,
+    private val atomicPromote: (File, File) -> Unit,
+    @Suppress("UNUSED_PARAMETER") constructorMarker: Unit
 ) {
+    constructor(
+        directory: File,
+        keyProvider: MediaEncryptionKeyProvider,
+        maxAssetBytes: Int = DEFAULT_MAX_ASSET_BYTES
+    ) : this(
+        directory,
+        keyProvider,
+        maxAssetBytes,
+        { source, destination ->
+            Files.move(source.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        },
+        Unit
+    )
+
+    /**
+     * Internal file-promotion seam used to exercise failures after ciphertext has been fully
+     * written and synced, without weakening the production atomic-move implementation.
+     */
+    internal constructor(
+        directory: File,
+        keyProvider: MediaEncryptionKeyProvider,
+        maxAssetBytes: Int,
+        atomicPromote: (File, File) -> Unit
+    ) : this(directory, keyProvider, maxAssetBytes, atomicPromote, Unit)
+
     init {
         require(maxAssetBytes > 0) { "The media size limit must be positive." }
         require(maxAssetBytes <= Int.MAX_VALUE - HEADER_BYTES - GCM_TAG_BYTES - 1) {
@@ -68,7 +95,7 @@ class EncryptedMediaStore(
                 output.fd.sync()
             }
             check(!destination.exists()) { "A media asset with this ID already exists." }
-            Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            atomicPromote(temporary, destination)
         } finally {
             if (temporary.exists()) temporary.delete()
         }
