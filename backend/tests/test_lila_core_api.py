@@ -328,3 +328,24 @@ def test_lila_turn_rate_limiter_backend_failure_is_sanitized():
     assert history.calls == []
     assert memories.calls == []
     assert adapter.contexts == []
+
+
+
+def test_production_requires_shared_redis_for_lila_turn_limits():
+    from dataclasses import replace
+
+    settings = replace(make_settings(), environment="production")
+    app = create_app(
+        settings=settings,
+        http_client=FakeHttpClient(),
+        authenticator=FakeAuthenticator(),
+        rate_limiter=object(),
+        lila_turn_rate_limiter=RecordingTurnLimiter(),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Production requires Redis-backed Lila turn rate limiting",
+    ):
+        with TestClient(app):
+            pass
