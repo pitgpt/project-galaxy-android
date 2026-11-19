@@ -6,7 +6,10 @@ from typing import Annotated, Any
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+
+from .lila_core.contracts import CoreTurnRequest, CoreTurnResponse
+from .lila_core.service import CoreTurnService, ModelAdapterContractError
 from redis.asyncio import Redis
 
 from .config import Settings
@@ -45,6 +48,7 @@ def create_app(
     authenticator: JwtAuthenticator | None = None,
     rate_limiter: Any | None = None,
     session_registry: Any | None = None,
+    lila_core_service: CoreTurnService | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -98,6 +102,7 @@ def create_app(
             await app.state.http_client.aclose()
 
     app = FastAPI(title="Galaxy Backend", version="0.2.0", lifespan=lifespan)
+    app.state.lila_core_service = lila_core_service
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -143,6 +148,33 @@ def create_app(
             except Exception as exc:
                 raise HTTPException(status_code=503, detail="Redis readiness check failed") from exc
         return {"status": "ready"}
+
+    @app.post("/v1/lila/turns", response_model=CoreTurnResponse)
+    async def create_lila_turn(
+        payload: CoreTurnRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service: CoreTurnService | None = request.app.state.lila_core_service
+        if service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila Core is not configured",
+            )
+        try:
+            return await service.handle(payload, principal_id=user_id)
+        except (ModelAdapterContractError, ValidationError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Lila model returned an invalid response",
+            ) from exc
+        except Exception as exc:
+            # Do not expose provider, memory-store, or history-store details.
+            # asyncio cancellation is a BaseException and remains propagatable.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila Core is temporarily unavailable",
+            ) from exc
 
     @app.post("/v1/realtime/sessions", response_model=CreateSessionResponse)
     async def create_realtime_session(
