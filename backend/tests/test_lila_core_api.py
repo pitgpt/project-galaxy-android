@@ -40,6 +40,7 @@ class RecordingTurnLimiter:
 class RecordingHistoryReader:
     def __init__(self):
         self.calls = []
+        self.appended_turns = []
 
     async def load_recent_messages(self, *, principal_id, conversation_id, limit):
         self.calls.append((principal_id, conversation_id, limit))
@@ -49,6 +50,9 @@ class RecordingHistoryReader:
                 content=f"history:{principal_id}",
             )
         ]
+
+    async def append_turn(self, *, principal_id, conversation_id, user_message, assistant_message):
+        self.appended_turns.append((principal_id, conversation_id, user_message, assistant_message))
 
 
 class RecordingMemoryReader:
@@ -107,7 +111,7 @@ def build_service(*, adapter=None):
     memories = RecordingMemoryReader()
     model = adapter or RecordingModelAdapter()
     assembler = ContextAssembler(history, memories)
-    service = CoreTurnService(assembler, model)
+    service = CoreTurnService(assembler, model, history)
     return service, history, memories, model
 
 
@@ -175,6 +179,9 @@ def test_lila_turn_uses_jwt_subject_and_returns_typed_avatar_events():
     assert limiter.calls == ["user-a"]
     assert history.calls == [("user-a", "conversation-1", 20)]
     assert memories.calls == [("user-a", "Привет, Лила", 8)]
+    assert history.appended_turns == [
+        ("user-a", "conversation-1", "Привет, Лила", "Ответ Лилы")
+    ]
     assert adapter.contexts[0].messages[-1].content == "Привет, Лила"
     assert adapter.contexts[0].relevant_memories[0].content == "memory:user-a"
 
@@ -215,6 +222,10 @@ def test_same_conversation_id_is_scoped_by_authenticated_user():
     assert memories.calls == [
         ("user-a", "Привет, Лила", 8),
         ("user-b", "Привет, Лила", 8),
+    ]
+    assert history.appended_turns == [
+        ("user-a", "conversation-1", "Привет, Лила", "Ответ Лилы"),
+        ("user-b", "conversation-1", "Привет, Лила", "Ответ Лилы"),
     ]
     assert adapter.contexts[0].messages[0].content == "history:user-a"
     assert adapter.contexts[1].messages[0].content == "history:user-b"
