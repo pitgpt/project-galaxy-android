@@ -74,8 +74,9 @@ def test_redis_lila_limiter_uses_hashed_owner_keys_and_separate_namespace():
 
     run(limiter.check("user-b"))
     first_minute_key, first_daily_key, minute_ttl, daily_ttl = redis.calls[0]
-    assert first_minute_key.startswith("galaxy:lila:turns:minute:")
-    assert first_daily_key.startswith("galaxy:lila:turns:day:")
+    assert first_minute_key.startswith("galaxy:lila:turns:{")
+    assert first_daily_key.startswith("galaxy:lila:turns:{")
+    assert first_minute_key.split("}", 1)[0] == first_daily_key.split("}", 1)[0]
     assert "user-a" not in first_minute_key
     assert "user-a" not in first_daily_key
     assert minute_ttl > 0

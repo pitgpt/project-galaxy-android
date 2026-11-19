@@ -233,8 +233,9 @@ class RedisLilaTurnRateLimiter:
         minute_bucket = int(now // self.window_seconds)
         daily_bucket = int(now // 86400)
         user_digest = sha256(user_id.encode("utf-8")).hexdigest()
-        minute_key = f"galaxy:lila:turns:minute:{user_digest}:{minute_bucket}"
-        daily_key = f"galaxy:lila:turns:day:{user_digest}:{daily_bucket}"
+        # The shared Redis hash tag keeps both keys in one Redis Cluster slot.
+        minute_key = f"galaxy:lila:turns:{{{user_digest}}}:minute:{minute_bucket}"
+        daily_key = f"galaxy:lila:turns:{{{user_digest}}}:day:{daily_bucket}"
         minute_ttl_ms = max(
             1, int(((minute_bucket + 1) * self.window_seconds - now) * 1000)
         )
