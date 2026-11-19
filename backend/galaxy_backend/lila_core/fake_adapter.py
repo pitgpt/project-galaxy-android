@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from .contracts import CoreTurnRequest, CoreTurnResponse, Emotion
+from .context import AssembledContext
+from .contracts import CoreTurnResponse, Emotion
 
 
 class FakeModelAdapter:
@@ -16,9 +17,9 @@ class FakeModelAdapter:
         self._response_text = response_text
         self._emotion = emotion
 
-    async def generate(self, request: CoreTurnRequest) -> CoreTurnResponse:
+    async def generate(self, context: AssembledContext) -> CoreTurnResponse:
         return CoreTurnResponse(
-            conversation_id=request.conversation_id,
+            conversation_id=context.conversation_id,
             text=self._response_text,
             emotion=self._emotion,
         )
