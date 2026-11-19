@@ -13,7 +13,7 @@ The first release is deliberately visual-only. It does not speak, listen, make a
 1. Launch the Desktop application and open its chat shell.
 2. Press the avatar button to show or hide Lila as a desktop overlay.
 3. Drag the avatar to reposition it.
-4. Select a look from an avatar gallery.
+4. Load one fixed, approved Live2D appearance; the MVP has no look gallery or runtime appearance switching.
 5. Change emotion and pose using explicit UI controls.
 6. Let the avatar play a small set of idle / walking-in-place animations.
 7. Keep the avatar visible when the chat window is minimized, with a tray/menu control to bring the chat back.
@@ -28,7 +28,7 @@ The first release is deliberately visual-only. It does not speak, listen, make a
 - position: user-controlled desktop coordinates, persisted locally
 - asset_version: version of the selected avatar asset bundle
 
-All state transitions are explicit and validated. The first milestone can use local demo state; later the same state is driven by versioned events from Lila Core.
+All state transitions are explicit and validated. For the fixed-appearance MVP, `look_id` identifies the one configured model/look and cannot be changed at runtime. The first milestone can use local demo state; later emotion, pose and motion are driven by versioned events from Lila Core.
 
 ## Rendering architecture
 
@@ -43,7 +43,7 @@ The model must never send raw JavaScript, CSS, HTML, filesystem paths or arbitra
 
 ## Technology direction
 
-Evaluate a lightweight Windows shell with a web-based renderer (Tauri 2 + TypeScript is a candidate) against a native Windows shell before committing. The decision must account for transparent always-on-top overlays, DPI scaling, multi-monitor coordinates, click-through behavior, accessibility, GPU use, packaging and the eventual Live2D/2D-rig renderer.
+Evaluate a lightweight Windows shell with a web-based renderer (Tauri 2 + TypeScript is a candidate) against a native Windows shell before committing. Live2D is the first concrete avatar-rendering target; validate runtime licensing, redistribution and Windows integration. The shell decision must account for transparent always-on-top overlays, DPI scaling, multi-monitor coordinates, click-through behavior, accessibility, GPU use and packaging.
 
 Do not lock the rendering technology before a small overlay proof-of-concept validates Windows behavior.
 
@@ -120,7 +120,7 @@ If the Tauri spike cannot satisfy transparent hit testing, stable mixed-DPI plac
 
 ## Asset format
 
-Start with an explicit manifest rather than hard-coded file names. Each look should declare:
+Start with an explicit manifest rather than hard-coded file names. The MVP ships one fixed approved Live2D model/look. Keep the manifest versioned and extensible for future compatible appearance bundles, but do not implement appearance generation or switching in the MVP. Each declared look should describe:
 - stable look ID and display name;
 - asset bundle version;
 - layered image assets and their z-order;
@@ -135,29 +135,32 @@ Keep source art separate from generated runtime caches. Do not commit private us
 ### D0 — Desktop shell proof
 A Windows window opens; an avatar overlay can be shown, hidden and dragged. No Core connection.
 
-### D1 — Avatar Studio integration
-Gallery, look switching, emotion controls and asset manifest. Local demo state only.
+### D1 — Fixed-appearance Live2D integration
+Load one approved Live2D model with a fixed appearance. Validate renderer lifecycle, scaling, anchoring, asset loading and performance. No look gallery or appearance switching.
 
-### D2 — Motion
-Idle and walking animation, pose switching, stable positioning across restarts and monitors.
+### D2 — Motion and expressions
+Idle animation, supported movement/walking, pose switching and emotion controls; stable positioning across restarts and monitors.
 
 ### D3 — Chat shell
-Desktop chat window with image-generation results presented in the conversation. Requests route through Galaxy services; credentials remain server-side.
+Desktop chat window with conversation UI. Requests route through Galaxy/Lila Core services; credentials remain server-side.
 
-### D4 — Core events
-Authenticated connection to Lila Core; receive versioned avatar events and update visual state.
+### D4 — Shared Core events
+Authenticated connection to Lila Core; receive versioned, allowlisted emotion, pose and motion events. The model/look remains fixed.
 
 ### D5 — Voice synchronization
 Only after D4 is stable: speech-driven mouth movement and voice-linked expressions.
+
+### D6 — Deferred appearance operations (after MVP)
+Only after Galaxy, Lila Core, Desktop chat and the fixed-appearance Live2D avatar are integrated and validated, consider an Avatar Operations Manager and prompt-driven appearance generation. This is not part of the MVP.
 
 ## Acceptance criteria for the first visual MVP
 
 - Chat window and avatar overlay can be opened independently.
 - Avatar can be shown, hidden and dragged without moving the chat window.
-- At least three catalog looks can be selected without restarting the app.
+- Exactly one approved Live2D model/look is used by the MVP; its fixed appearance survives application restart.
 - At least five emotions can be selected and visibly reflected.
 - The renderer rejects unknown emotion/action identifiers.
-- User position and selected look survive an application restart.
+- User position and the configured fixed model/look survive an application restart.
 - No microphone, speaker, model-provider key or autonomous desktop-action permission is required.
 
 ## Repository boundary
