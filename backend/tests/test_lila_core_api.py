@@ -26,6 +26,17 @@ class FakeHttpClient:
         pass
 
 
+class RecordingTurnLimiter:
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+
+    async def check(self, principal_id):
+        self.calls.append(principal_id)
+        if self.error is not None:
+            raise self.error
+
+
 class RecordingHistoryReader:
     def __init__(self):
         self.calls = []
@@ -100,12 +111,13 @@ def build_service(*, adapter=None):
     return service, history, memories, model
 
 
-def make_client(service=None):
+def make_client(service=None, turn_limiter=None):
     app = create_app(
         settings=make_settings(),
         http_client=FakeHttpClient(),
         authenticator=FakeAuthenticator(),
         lila_core_service=service,
+        lila_turn_rate_limiter=turn_limiter,
     )
     return TestClient(app)
 
@@ -120,9 +132,11 @@ def turn_payload(**extra):
 
 def test_lila_turn_requires_bearer_token():
     service, history, memories, adapter = build_service()
-    with make_client(service) as client:
+    limiter = RecordingTurnLimiter()
+    with make_client(service, limiter) as client:
         response = client.post("/v1/lila/turns", json=turn_payload())
     assert response.status_code == 401
+    assert limiter.calls == []
     assert history.calls == []
     assert memories.calls == []
     assert adapter.contexts == []
@@ -144,7 +158,8 @@ def test_lila_turn_rejects_invalid_bearer_token():
 
 def test_lila_turn_uses_jwt_subject_and_returns_typed_avatar_events():
     service, history, memories, adapter = build_service()
-    with make_client(service) as client:
+    limiter = RecordingTurnLimiter()
+    with make_client(service, limiter) as client:
         response = client.post(
             "/v1/lila/turns",
             headers={"Authorization": "Bearer user-a-token"},
@@ -157,6 +172,7 @@ def test_lila_turn_uses_jwt_subject_and_returns_typed_avatar_events():
     assert body["text"] == "Ответ Лилы"
     assert body["emotion"] == "happy"
     assert body["avatar_events"][0]["type"] == "avatar.emotion"
+    assert limiter.calls == ["user-a"]
     assert history.calls == [("user-a", "conversation-1", 20)]
     assert memories.calls == [("user-a", "Привет, Лила", 8)]
     assert adapter.contexts[0].messages[-1].content == "Привет, Лила"
@@ -269,3 +285,46 @@ def test_provider_response_for_another_conversation_is_sanitized():
         )
     assert response.status_code == 502
     assert response.json()["detail"] == "Lila model returned an invalid response"
+
+
+
+def test_lila_turn_rate_limit_rejects_before_context_or_model():
+    service, history, memories, adapter = build_service()
+    limiter = RecordingTurnLimiter(
+        error=HTTPException(
+            status_code=429,
+            detail="Lila turn rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
+    )
+    with make_client(service, limiter) as client:
+        response = client.post(
+            "/v1/lila/turns",
+            headers={"Authorization": "Bearer user-a-token"},
+            json=turn_payload(),
+        )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert limiter.calls == ["user-a"]
+    assert history.calls == []
+    assert memories.calls == []
+    assert adapter.contexts == []
+
+
+def test_lila_turn_rate_limiter_backend_failure_is_sanitized():
+    service, history, memories, adapter = build_service()
+    limiter = RecordingTurnLimiter(error=RuntimeError("redis-password-detail"))
+    with make_client(service, limiter) as client:
+        response = client.post(
+            "/v1/lila/turns",
+            headers={"Authorization": "Bearer user-a-token"},
+            json=turn_payload(),
+        )
+
+    assert response.status_code == 503
+    assert "redis-password-detail" not in response.text
+    assert response.json()["detail"] == "Lila turn service temporarily unavailable"
+    assert history.calls == []
+    assert memories.calls == []
+    assert adapter.contexts == []

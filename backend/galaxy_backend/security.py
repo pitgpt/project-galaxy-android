@@ -122,3 +122,162 @@ class RedisRateLimiter:
                 detail="Daily realtime session credential limit exceeded",
                 headers={"Retry-After": "86400"},
             )
+
+
+class InMemoryLilaTurnRateLimiter:
+    """Process-local fixed-window limiter for development and tests only."""
+
+    def __init__(
+        self,
+        limit: int,
+        daily_limit: int,
+        window_seconds: int = 60,
+    ) -> None:
+        if limit < 1 or daily_limit < 1 or window_seconds < 1:
+            raise ValueError("Lila turn rate limits must be positive")
+        self.limit = limit
+        self.daily_limit = daily_limit
+        self.window_seconds = window_seconds
+        self._minute_counts: dict[tuple[str, int], int] = {}
+        self._daily_counts: dict[tuple[str, int], int] = {}
+        self._lock = Lock()
+
+    async def check(self, user_id: str) -> None:
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must be a non-empty authenticated subject")
+
+        now = time.time()
+        minute_bucket = int(now // self.window_seconds)
+        daily_bucket = int(now // 86400)
+        user_key = sha256(user_id.encode("utf-8")).hexdigest()
+        minute_key = (user_key, minute_bucket)
+        daily_key = (user_key, daily_bucket)
+
+        with self._lock:
+            minute_count = self._minute_counts.get(minute_key, 0)
+            daily_count = self._daily_counts.get(daily_key, 0)
+            if minute_count >= self.limit:
+                retry_after = max(1, int(self.window_seconds - (now % self.window_seconds)))
+                raise HTTPException(
+                    status_code=429,
+                    detail="Lila turn rate limit exceeded",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            if daily_count >= self.daily_limit:
+                retry_after = max(1, int(86400 - (now % 86400)))
+                raise HTTPException(
+                    status_code=429,
+                    detail="Daily Lila turn limit exceeded",
+                    headers={"Retry-After": str(retry_after)},
+                )
+
+            self._minute_counts[minute_key] = minute_count + 1
+            self._daily_counts[daily_key] = daily_count + 1
+
+            if len(self._minute_counts) > 10000:
+                self._minute_counts = {
+                    key: value
+                    for key, value in self._minute_counts.items()
+                    if key[1] >= minute_bucket - 1
+                }
+            if len(self._daily_counts) > 10000:
+                self._daily_counts = {
+                    key: value
+                    for key, value in self._daily_counts.items()
+                    if key[1] >= daily_bucket
+                }
+
+
+class RedisLilaTurnRateLimiter:
+    """Atomic shared per-user Lila turn limits, separate from Realtime quotas."""
+
+    _SCRIPT = """
+    local minute_count = tonumber(redis.call('GET', KEYS[1]) or '0')
+    local daily_count = tonumber(redis.call('GET', KEYS[2]) or '0')
+    if minute_count >= tonumber(ARGV[3]) then
+        return {minute_count, daily_count, 1}
+    end
+    if daily_count >= tonumber(ARGV[4]) then
+        return {minute_count, daily_count, 2}
+    end
+    minute_count = redis.call('INCR', KEYS[1])
+    if minute_count == 1 then
+        redis.call('PEXPIRE', KEYS[1], ARGV[1])
+    end
+    daily_count = redis.call('INCR', KEYS[2])
+    if daily_count == 1 then
+        redis.call('PEXPIRE', KEYS[2], ARGV[2])
+    end
+    return {minute_count, daily_count, 0}
+    """
+
+    def __init__(
+        self,
+        redis_client: Any,
+        limit: int,
+        daily_limit: int,
+        window_seconds: int = 60,
+    ) -> None:
+        if limit < 1 or daily_limit < 1 or window_seconds < 1:
+            raise ValueError("Lila turn rate limits must be positive")
+        self.redis = redis_client
+        self.limit = limit
+        self.daily_limit = daily_limit
+        self.window_seconds = window_seconds
+
+    async def check(self, user_id: str) -> None:
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must be a non-empty authenticated subject")
+
+        now = time.time()
+        minute_bucket = int(now // self.window_seconds)
+        daily_bucket = int(now // 86400)
+        user_digest = sha256(user_id.encode("utf-8")).hexdigest()
+        minute_key = f"galaxy:lila:turns:minute:{user_digest}:{minute_bucket}"
+        daily_key = f"galaxy:lila:turns:day:{user_digest}:{daily_bucket}"
+        minute_ttl_ms = max(
+            1, int(((minute_bucket + 1) * self.window_seconds - now) * 1000)
+        )
+        daily_ttl_ms = max(
+            1, int(((daily_bucket + 1) * 86400 - now) * 1000)
+        )
+
+        try:
+            result = await self.redis.eval(
+                self._SCRIPT,
+                2,
+                minute_key,
+                daily_key,
+                minute_ttl_ms,
+                daily_ttl_ms,
+                self.limit,
+                self.daily_limit,
+            )
+            minute_count, daily_count, decision = (int(value) for value in result)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Lila turn service temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from exc
+
+        if decision == 1:
+            retry_after = max(1, int(self.window_seconds - (now % self.window_seconds)))
+            raise HTTPException(
+                status_code=429,
+                detail="Lila turn rate limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        if decision == 2:
+            retry_after = max(1, int(86400 - (now % 86400)))
+            raise HTTPException(
+                status_code=429,
+                detail="Daily Lila turn limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
+        if decision != 0 or minute_count < 1 or daily_count < 1:
+            raise HTTPException(
+                status_code=503,
+                detail="Lila turn service temporarily unavailable",
+                headers={"Retry-After": "5"},
+            )

@@ -13,7 +13,14 @@ from .lila_core.service import CoreTurnService, ModelAdapterContractError
 from redis.asyncio import Redis
 
 from .config import Settings
-from .security import InMemoryRateLimiter, JwtAuthenticator, RedisRateLimiter, safety_identifier
+from .security import (
+    InMemoryLilaTurnRateLimiter,
+    InMemoryRateLimiter,
+    JwtAuthenticator,
+    RedisLilaTurnRateLimiter,
+    RedisRateLimiter,
+    safety_identifier,
+)
 from .session_registry import InMemorySessionRegistry, RedisSessionRegistry
 
 logger = logging.getLogger("galaxy.request")
@@ -49,6 +56,7 @@ def create_app(
     rate_limiter: Any | None = None,
     session_registry: Any | None = None,
     lila_core_service: CoreTurnService | None = None,
+    lila_turn_rate_limiter: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -93,6 +101,28 @@ def create_app(
             app.state.session_registry = session_registry or InMemorySessionRegistry(
                 app.state.settings.max_active_sessions,
                 app.state.settings.session_lease_seconds
+            )
+
+        if app.state.settings.environment == "production":
+            if app.state.redis is None:
+                raise RuntimeError("Production requires Redis-backed Lila turn rate limiting")
+            app.state.lila_turn_rate_limiter = RedisLilaTurnRateLimiter(
+                app.state.redis,
+                app.state.settings.lila_turns_per_minute,
+                app.state.settings.lila_turns_per_day,
+            )
+        elif lila_turn_rate_limiter is not None:
+            app.state.lila_turn_rate_limiter = lila_turn_rate_limiter
+        elif app.state.redis is not None:
+            app.state.lila_turn_rate_limiter = RedisLilaTurnRateLimiter(
+                app.state.redis,
+                app.state.settings.lila_turns_per_minute,
+                app.state.settings.lila_turns_per_day,
+            )
+        else:
+            app.state.lila_turn_rate_limiter = InMemoryLilaTurnRateLimiter(
+                app.state.settings.lila_turns_per_minute,
+                app.state.settings.lila_turns_per_day,
             )
 
         yield
@@ -161,6 +191,17 @@ def create_app(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Lila Core is not configured",
             )
+        try:
+            await request.app.state.lila_turn_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila turn service temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from exc
+
         try:
             return await service.handle(payload, principal_id=user_id)
         except (ModelAdapterContractError, ValidationError) as exc:
