@@ -395,3 +395,126 @@ D0 Windows overlay acceptance remains separate and must still be demonstrated on
 ## Repository boundary and current blocker
 
 This document remains the only Desktop artifact in the Galaxy repository. The separate Lila Desktop repository is still not available through the current integration. No executable Desktop code, JSON Schema file, renderer package, native plugin, Windows project or generated/user media is added here. Once the separate repository is available, move this specification there as its initial architecture document before creating product code.
+
+
+## Desktop Shell state and lifecycle contract — draft v1
+
+Status: specification only. This section defines the Desktop Shell's local state and Windows session lifecycle; it does not add executable Desktop code or select a persistence library.
+
+### Responsibility and state separation
+
+The Desktop Shell owns operating-system window state and user-local presentation preferences. The Avatar Engine owns only the visual character state defined above. Lila Core events may update allowlisted avatar emotion/pose/motion, but may never show, hide, move, focus, resize, or change the z-order of a Windows window.
+
+Keep three state classes distinct:
+
+| State class | Examples | Persistence |
+|---|---|---|
+| User presentation preferences | selected bundle/version/look; chat window geometry; overlay placement | Persist locally after validation |
+| Runtime window/session state | chat visible/minimized; overlay visible; keyboard focus; visibility before session lock | Memory only; never restored as visible after a cold process start |
+| Avatar Engine state | current emotion, intensity, pose, motion, process-local event deduplication | Engine-owned; only explicitly selected look is mirrored into shell preferences |
+
+### Versioned local preference snapshot
+
+The proposed shell snapshot is a versioned, non-executable data document. Its logical fields are:
+
+| Field | Requirement |
+|---|---|
+| `schema_version` | Required supported integer; migrations are explicit and ordered |
+| `chat_geometry` | Optional monitor identity, logical size in DIP, normalized work-area anchor and DIP offset |
+| `overlay_placement` | Optional monitor identity, normalized work-area anchor, window anchor and DIP offset |
+| `selected_bundle_id` | Opaque ID from a validated installed bundle |
+| `selected_bundle_version` | Exact validated bundle version |
+| `selected_look_id` | Opaque look ID present in that bundle |
+| `updated_at` | Diagnostic timestamp; not an ordering or trust boundary |
+
+For placement, the normalized work-area anchor uses finite x/y values in [0, 1]. The window anchor is one of `top_left`, `top_right`, `bottom_left`, `bottom_right`, or `center`. The DIP offset is a bounded signed pair applied after resolving the monitor's current work area. This avoids persisting an unqualified physical desktop coordinate that becomes invalid after DPI or display-topology changes.
+
+The preferred monitor identifier is an opaque Windows display-device identity, not a user-entered path. It is a lookup hint, not a guarantee that the same physical monitor will always be connected.
+
+### Persistence and privacy rules
+
+- Store only validated presentation preferences in an app-specific, user-scoped local application-data location. The final product path and storage implementation remain a Desktop-repository decision.
+- Write a complete new snapshot to a temporary file in the same directory, flush it, and atomically replace the prior snapshot. Never stream partial JSON over the last known-good state.
+- Apply current-user-only filesystem access controls where supported. Do not use roaming/cloud synchronization by default.
+- Do not store access tokens, provider keys, JWTs, prompts, conversation history, memory snippets, generated image/video bytes, private reference images, or model responses in this shell snapshot.
+- Secrets, if ever needed by a future Desktop client, require a separate reviewed Windows credential-storage design; they must not be added to this preference file.
+- Validate schema version, field types, numeric bounds, IDs and referenced installed bundle/look before applying a snapshot. Unknown major versions or malformed state fall back to safe defaults without executing content or following paths from the file.
+- A corrupt or unsupported snapshot is not automatically deleted. Diagnostics must not log its raw contents. A later successful explicit preference save may atomically replace it with a newly validated snapshot.
+- No user media or image asset is copied to disk as part of this specification. Persistent user media remains blocked on the protected-media design.
+
+### Cold-start defaults
+
+- A fresh process starts with the overlay hidden, regardless of its visibility before the previous process exited or crashed.
+- The chat appears only through the normal user launch/show action; tray restoration may show it without changing overlay visibility.
+- Restore the last validated selected look if its bundle version is still installed. If it is unavailable, select the bundle's declared default look and report a recoverable local status; do not fetch or install assets automatically.
+- Restore placement after resolving the current monitor topology and DPI. If no valid placement exists, use a deterministic safe location inside the primary monitor's work area.
+- Visibility, focus and lock state are never read from the persisted preference snapshot.
+
+### Windows lifecycle policy
+
+| Trigger | Required behavior |
+|---|---|
+| Chat minimized or hidden to tray | Overlay visibility is unchanged; the two top-level windows remain independent |
+| User hides overlay | Hide only the overlay; chat and tray remain usable |
+| User exits application | Close both windows and stop renderer timers; persist only validated preference state |
+| Windows session locks | Immediately hide the overlay, stop animation/timers and relinquish focus; never attempt to appear above the secure desktop |
+| Session unlocks in the same process | Restore the overlay only if it was visible immediately before that lock and the user has not hidden it meanwhile |
+| Process starts while session is locked | Keep overlay hidden; do not schedule an automatic show over the lock screen |
+| Display sleeps / system suspends | Pause animation and nonessential polling; do not spin timers while suspended |
+| Resume from sleep | Re-enumerate displays, refresh per-monitor DPI/work areas and resolve placement before optionally restoring same-session visibility |
+| Saved monitor is disconnected | Use the primary monitor's work area, clamp the complete overlay rectangle inside it, and retain the preferred monitor identity for a later explicit restore/restart |
+| Display topology or scale changes | Recompute placement using current work area and Per-Monitor V2 DPI context; do not reuse stale physical-pixel coordinates |
+| Preference file is malformed or has an unknown major schema | Use safe defaults, keep overlay hidden, preserve the original file and emit a sanitized diagnostic |
+| Avatar asset/bundle is missing after update | Keep the previous valid in-memory render if available; otherwise use a validated default look and do not load an arbitrary path |
+
+Always-on-top applies only above ordinary application windows. It never means above the Windows lock screen, secure desktop, UAC consent UI, or other protected system surfaces.
+
+### Placement restoration algorithm
+
+1. Resolve the saved monitor identity against the current display list.
+2. If it is unavailable, choose the primary monitor for this restore operation; do not silently rewrite the preferred identity merely because a monitor is temporarily disconnected.
+3. Read that monitor's current work area and DPI in the active Per-Monitor V2 context.
+4. Convert the normalized work-area anchor and bounded DIP offset at the native/window boundary.
+5. Apply the saved window anchor, then clamp the complete overlay rectangle inside the selected work area.
+6. If the saved size cannot fit, apply the renderer's documented safe fit limit while preserving aspect ratio; never leave the avatar unreachable outside the work area.
+7. Persist a new placement only after an explicit user move/resize or a successful validated preference save.
+
+### D0 shell lifecycle acceptance criteria
+
+The Windows 11 x64 proof must demonstrate all of the following; none is claimed as passed by this documentation change:
+
+1. A cold process start always leaves the overlay hidden, even if it was visible before the previous process exited.
+2. Showing/hiding the overlay does not show, hide, minimize or focus the chat window.
+3. Minimizing the chat leaves an already visible overlay unchanged.
+4. Locking Windows hides the overlay and stops animation; unlocking restores it only within the same process session if it was visible before lock.
+5. Sleep/resume refreshes display topology and DPI before any same-session overlay restoration.
+6. Disconnecting the saved monitor moves the overlay fully into the primary monitor's work area without a coordinate jump or unreachable window.
+7. Moving between mixed-DPI monitors preserves the intended anchor and logical size.
+8. A valid preference snapshot restores the selected installed look and placement after restart, while overlay visibility remains hidden.
+9. Malformed, stale or unknown-major-version preference data cannot crash startup, load arbitrary assets, or make the overlay visible.
+10. Preference writes are atomic: simulated interruption leaves either the prior complete snapshot or the new complete snapshot, never a partial document.
+11. Shell/window actions are accepted only from local UI/tray/session lifecycle code; Core/model events cannot invoke them.
+12. The preference snapshot contains no token, prompt, conversation, memory, generated-media or private-reference content.
+
+### Future shell-state conformance tests
+
+These are planned tests for the separate Lila Desktop repository, not tests executed in Galaxy:
+
+1. Cold-start overlay visibility defaults to hidden.
+2. Chat minimize does not change overlay visibility.
+3. Overlay hide does not change chat visibility or focus.
+4. Lock/unlock follows the same-session visibility rule.
+5. A process started while Windows is locked keeps the overlay hidden.
+6. Sleep/resume refreshes monitor and DPI metadata before restoring visibility.
+7. Missing-monitor fallback clamps the full overlay rectangle to the primary work area.
+8. Mixed-DPI restoration preserves the normalized anchor and DIP offset.
+9. A valid snapshot restores only an installed bundle/version/look.
+10. Corrupt and unknown-major snapshots fall back safely without destructive automatic deletion.
+11. Interrupted preference writes preserve a complete old or new snapshot.
+12. Serialized preferences contain no credentials, conversation content, memory or user media.
+
+These shell-state tests complement, but do not replace, the 14 Avatar Engine/Asset Manifest D1 conformance cases and the ten D0 native transparency/hit-testing/window-lifecycle checks above.
+
+### Open implementation decisions
+
+The separate Desktop repository must still choose and validate the concrete single-instance mechanism, tray integration, Windows session notification API, preference serializer, atomic-replace implementation and Per-Monitor V2 integration. These choices must be proven in the Windows 11 x64 PoC; this document does not assume a Tauri plugin or native adapter already exists.
