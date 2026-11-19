@@ -13,7 +13,7 @@ import java.io.FileOutputStream
 import java.security.KeyStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.AssertNotEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.FixMethodOrder
