@@ -3,6 +3,7 @@ package com.pitgpt.galaxy.data.media
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileFilter
+import java.io.IOException
 import java.nio.file.Files
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
@@ -10,6 +11,7 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.Assert.assertThrows
@@ -41,6 +43,42 @@ class EncryptedMediaStoreTest {
             java.security.MessageDigest.getInstance("SHA-256").digest(plaintext)
                 .joinToString("") { "%02x".format(it) },
             metadata.sha256
+        )
+    }
+
+    @Test
+    fun failedAtomicPromotionRemovesCiphertextTemporaryFile() {
+        val plaintext = "private-image-payload-that-must-never-reach-a-temporary-file".toByteArray()
+        var temporaryFile: File? = null
+        var temporaryBytes: ByteArray? = null
+        val promotionFailure = IOException("simulated atomic promotion failure")
+        val failingStore = EncryptedMediaStore(directory, keyProvider, 1024) { source, destination ->
+            temporaryFile = source
+            temporaryBytes = source.readBytes()
+            assertTrue("Ciphertext must be fully written before promotion", source.isFile)
+            assertTrue("The temporary file must use the encrypted-media prefix", source.name.startsWith("galaxy-media-"))
+            assertFalse("The final asset must not exist before promotion", destination.exists())
+            throw promotionFailure
+        }
+
+        val actualFailure = assertThrows(IOException::class.java) {
+            failingStore.save("asset_13", "image/png", plaintext)
+        }
+
+        assertSame("The original promotion failure must propagate", promotionFailure, actualFailure)
+        val writtenBytes = requireNotNull(temporaryBytes)
+        assertTrue("The temporary payload must include the encrypted header and GCM tag", writtenBytes.size > plaintext.size)
+        assertFalse(
+            "The temporary file must contain ciphertext, never the plaintext image bytes",
+            String(writtenBytes, Charsets.ISO_8859_1).contains(
+                String(plaintext, Charsets.ISO_8859_1)
+            )
+        )
+        assertFalse("The failed temporary file must be removed", requireNotNull(temporaryFile).exists())
+        assertFalse("A failed promotion must not leave a committed asset", File(directory, "asset_13.gcm").exists())
+        assertTrue(
+            "No temporary encrypted-media files may remain after a failed promotion",
+            directory.listFiles().orEmpty().none { it.name.endsWith(".tmp") }
         )
     }
 
