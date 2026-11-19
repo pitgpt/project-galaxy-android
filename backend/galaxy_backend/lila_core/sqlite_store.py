@@ -1,8 +1,10 @@
 """Encrypted, owner-scoped SQLite persistence for Lila conversations and memories.
 
-The database contains only HMAC-derived owner/resource indexes and AES-GCM
-ciphertexts. The 32-byte master key is supplied by the application composition
-root and is never persisted by this adapter.
+Sensitive message/memory content is stored as AES-GCM ciphertext and raw owner,
+conversation, and memory identifiers are replaced by HMAC-derived indexes.
+Roles, sequence numbers, timestamps, and schema metadata remain visible.
+The 32-byte master key is supplied by the application composition root and is
+never persisted by this adapter.
 """
 from __future__ import annotations
 
@@ -32,9 +34,10 @@ class LilaStoreIntegrityError(RuntimeError):
 class SqliteLilaStore:
     """One-file encrypted store implementing history and memory reader/writers.
 
-    SQLite WAL plus FULL synchronous commits provide local durability. A
-    production deployment must place the absolute database path on a persistent
-    volume and supply the master key from a secret manager/environment secret.
+    SQLite WAL plus FULL synchronous commits provide local durability for one
+    backend instance on a local persistent volume. Do not share this WAL database
+    across replicas or network filesystems. Production must supply an absolute
+    database path on a persistent volume and a stable key from a secret manager.
     This adapter does not make an ephemeral container filesystem durable.
     """
 
