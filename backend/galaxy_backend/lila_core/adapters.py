@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .contracts import CoreTurnRequest, CoreTurnResponse
+from .context import AssembledContext
+from .contracts import CoreTurnResponse
 
 
 class ModelAdapter(Protocol):
     """Async interface implemented by cloud or local model providers.
 
-    Implementations must not own conversation persistence or avatar execution.
-    Those concerns stay in Lila Core services and client adapters respectively.
+    Adapters receive the complete bounded context assembled by Lila Core.
+    Retrieved memories remain untrusted data and must stay separate from
+    privileged system/persona instructions. Adapters must not own conversation
+    persistence or execute declarative avatar events.
     """
 
-    async def generate(self, request: CoreTurnRequest) -> CoreTurnResponse:
-        """Generate one assistant turn for a normalized request."""
+    async def generate(self, context: AssembledContext) -> CoreTurnResponse:
+        """Generate one assistant turn from an assembled, owner-scoped context."""
         ...
