@@ -7,6 +7,10 @@ from fastapi.testclient import TestClient
 
 from galaxy_backend.config import Settings
 from galaxy_backend.main import create_app
+from galaxy_backend.lila_core.openai_compatible import (
+    ModelProviderConfigurationError,
+    ModelProviderUnavailable,
+)
 
 
 KEY = bytes.fromhex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
@@ -22,6 +26,15 @@ class FakeAuthenticator:
 class NoopTurnLimiter:
     async def check(self, principal_id):
         assert principal_id == "owner-1"
+
+
+class RaisingCoreService:
+    def __init__(self, error):
+        self.error = error
+
+    async def handle(self, request, *, principal_id):
+        assert principal_id == "owner-1"
+        raise self.error
 
 
 class FakeResponse:
@@ -73,11 +86,12 @@ def make_settings(database_path):
     )
 
 
-def make_app(settings, http_client):
+def make_app(settings, http_client, lila_core_service=None):
     return create_app(
         settings=settings,
         http_client=http_client,
         authenticator=FakeAuthenticator(),
+        lila_core_service=lila_core_service,
         lila_turn_rate_limiter=NoopTurnLimiter(),
     )
 
@@ -210,3 +224,55 @@ def test_app_startup_rejects_partial_manual_lila_settings(tmp_path):
     with pytest.raises(RuntimeError, match="Lila configuration is incomplete"):
         with TestClient(app):
             pass
+
+@pytest.mark.parametrize(
+    ("reason_code", "expected_detail"),
+    [
+        (
+            "authentication_rejected",
+            "Lila model provider rejected authentication; verify its credentials and access permissions.",
+        ),
+        (
+            "endpoint_or_model_not_found",
+            "Lila model endpoint or model was not found; verify the configured base URL and model ID.",
+        ),
+        (
+            "redirect_refused",
+            "Lila model endpoint redirected the request; configure its final HTTPS endpoint directly.",
+        ),
+        (
+            "request_rejected",
+            "Lila model provider rejected the request; verify API compatibility and model configuration.",
+        ),
+    ],
+)
+def test_provider_configuration_errors_return_safe_bad_gateway(
+    tmp_path, reason_code, expected_detail
+):
+    settings = make_settings(tmp_path / "lila.sqlite3")
+    service = RaisingCoreService(ModelProviderConfigurationError(reason_code))
+    app = make_app(settings, ScriptedHttpClient(), lila_core_service=service)
+
+    with TestClient(app) as client:
+        response = send_turn(client, "Проверь подключение")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == expected_detail
+    assert "provider-secret" not in response.text
+    assert "private-provider-detail" not in response.text
+
+
+def test_transient_provider_failure_returns_retryable_service_unavailable(tmp_path):
+    settings = make_settings(tmp_path / "lila.sqlite3")
+    service = RaisingCoreService(
+        ModelProviderUnavailable("provider-secret must remain private")
+    )
+    app = make_app(settings, ScriptedHttpClient(), lila_core_service=service)
+
+    with TestClient(app) as client:
+        response = send_turn(client, "Продолжим?")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Lila model provider is temporarily unavailable"
+    assert response.headers["Retry-After"] == "5"
+    assert "provider-secret" not in response.text
