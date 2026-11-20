@@ -30,8 +30,16 @@ data class LilaHistoryMessage(
     val sequence: Long,
     val role: String,
     val content: String,
-    val createdAtEpochMillis: Long
-)
+    val createdAtEpochMillis: Long,
+    val providerId: String? = null,
+    val modelId: String? = null
+) {
+    val displayModelLabel: String?
+        get() = listOfNotNull(providerId, modelId)
+            .joinToString(" · ")
+            .take(96)
+            .takeIf { it.isNotBlank() }
+}
 
 /**
  * Stable across Galaxy and Desktop for the same authenticated owner partition
@@ -324,14 +332,19 @@ class HttpLilaTurnProvider(
                 val role = item.optString("role", "")
                 val content = item.optString("content", "")
                 val createdAt = item.optLong("created_at_epoch_millis", -1L)
+                val providerId = optionalString(item, "provider_id", 64)
+                val modelId = optionalString(item, "model_id", 256)
                 if (sequence <= previousSequence ||
                     role !in setOf("user", "assistant") ||
                     content.isBlank() || content.length > MAX_ASSISTANT_TEXT_CHARS ||
-                    createdAt < 0
+                    createdAt < 0 ||
+                    (role == "user" && (providerId != null || modelId != null))
                 ) {
                     throw GalaxyApiException(null, "Сервис Lila вернул некорректную историю.")
                 }
-                pageMessages += LilaHistoryMessage(sequence, role, content, createdAt)
+                pageMessages += LilaHistoryMessage(
+                    sequence, role, content, createdAt, providerId, modelId
+                )
                 previousSequence = sequence
             }
 

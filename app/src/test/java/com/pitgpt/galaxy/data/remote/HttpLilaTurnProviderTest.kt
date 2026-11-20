@@ -154,7 +154,8 @@ class HttpLilaTurnProviderTest {
                         .put(JSONObject().put("sequence", 3).put("role", "user")
                             .put("content", "third").put("created_at_epoch_millis", 3000))
                         .put(JSONObject().put("sequence", 4).put("role", "assistant")
-                            .put("content", "fourth").put("created_at_epoch_millis", 4000))
+                            .put("content", "fourth").put("created_at_epoch_millis", 4000)
+                            .put("provider_id", "cloud-primary").put("model_id", "model-a"))
                 )
                 .put("next_before_sequence", 3)
                 .toString(),
@@ -184,6 +185,9 @@ class HttpLilaTurnProviderTest {
 
         assertEquals(listOf("first", "second", "third", "fourth"), history.map { it.content })
         assertEquals(listOf(1L, 2L, 3L, 4L), history.map { it.sequence })
+        assertEquals("cloud-primary", history.last().providerId)
+        assertEquals("model-a", history.last().modelId)
+        assertEquals("cloud-primary · model-a", history.last().displayModelLabel)
         assertEquals(2, connections.size)
         assertEquals("GET", connections[0].requestMethod)
         assertEquals("Bearer test-access-token", connections[0].requestHeaders["Authorization"])

@@ -130,16 +130,25 @@ fun GalaxyHome() {
         }
         val ownerKey = conversationOwnerKey
         if (ownerKey == null) {
+            activeModelLabel = null
             historySyncWarning = "Войди в аккаунт Galaxy, чтобы синхронизировать историю Лилы."
             return@LaunchedEffect
         }
 
         val conversationId = getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
+        val activeModelPreferenceKey = "lila_active_model_$conversationId"
+        val preferences = context.getSharedPreferences("galaxy_preferences", 0)
+        activeModelLabel = preferences.getString(activeModelPreferenceKey, null)
         val storageCharacterId = conversationStorageKey(conversationOwnerKey, activeCharacterId)
         historySyncWarning = null
         isLoading = true
         try {
             val remoteHistory = app.lilaTurnProvider.loadAllHistory(conversationId)
+            val latestRemoteModel = remoteHistory.lastOrNull { it.role == "assistant" }?.displayModelLabel
+            if (latestRemoteModel != null) {
+                activeModelLabel = latestRemoteModel
+                preferences.edit().putString(activeModelPreferenceKey, latestRemoteModel).apply()
+            }
             if (remoteHistory.isNotEmpty()) {
                 val localHistory = app.conversations.getForCharacter(storageCharacterId)
                 val mergedHistory = mergeRemoteHistory(
@@ -342,7 +351,14 @@ fun GalaxyHome() {
                     clearPendingLilaTurnKey(context, pendingTurnKey.preferenceKey)
                     messages.add(userMessage)
                     messages.add(assistantMessage)
-                    activeModelLabel = response.displayModel
+                    activeModelLabel = response.displayModel.takeIf {
+                        response.providerId != null || response.modelId != null
+                    }
+                    activeModelLabel?.let { label ->
+                        context.getSharedPreferences("galaxy_preferences", 0).edit()
+                            .putString("lila_active_model_$conversationId", label)
+                            .apply()
+                    }
                 } else {
                     val message = SendMessage(app.conversations).invoke(storageCharacterId, text)
                     messages.add(message)
