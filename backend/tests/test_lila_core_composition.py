@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import pytest
@@ -41,25 +42,35 @@ class FakeResponse:
     def __init__(self, payload):
         self._payload = payload
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
     def raise_for_status(self):
         return None
 
-    def json(self):
-        return self._payload
+    async def aiter_bytes(self, chunk_size=65536):
+        encoded = json.dumps(self._payload, ensure_ascii=False).encode("utf-8")
+        for offset in range(0, len(encoded), chunk_size):
+            yield encoded[offset : offset + chunk_size]
 
 
 class ScriptedHttpClient:
     def __init__(self):
         self.calls = []
 
-    async def post(self, url, *, json, headers, timeout):
+    @asynccontextmanager
+    async def stream(self, method, url, *, json, headers, timeout):
+        assert method == "POST"
         self.calls.append({
             "url": url,
             "json": json,
             "headers": dict(headers),
             "timeout": timeout,
         })
-        return FakeResponse({
+        yield FakeResponse({
             "choices": [{"message": {"content": f"Ответ {len(self.calls)}"}}]
         })
 
