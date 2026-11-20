@@ -55,6 +55,7 @@ import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import com.pitgpt.galaxy.data.remote.GalaxyApiException
 import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
+import com.pitgpt.galaxy.data.remote.stableLilaConversationId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
@@ -1170,10 +1171,11 @@ private fun getOrCreateLilaConversationId(
 ): String {
     val preferences = context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
     val key = "lila_conversation_id_${ownerKey}_${characterId}"
-    return preferences.getString(key, null)?.takeIf { it.isNotBlank() }
-        ?: UUID.randomUUID().toString().also { generated ->
-            preferences.edit().putString(key, generated).apply()
-        }
+    val stableId = stableLilaConversationId(ownerKey, characterId)
+    if (preferences.getString(key, null) != stableId) {
+        preferences.edit().putString(key, stableId).apply()
+    }
+    return stableId
 }
 
 
