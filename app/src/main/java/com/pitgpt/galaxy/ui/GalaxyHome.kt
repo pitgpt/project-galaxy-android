@@ -1123,7 +1123,7 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
 }
 
 
-private fun mergeRemoteHistory(
+internal fun mergeRemoteHistory(
     characterId: String,
     conversationId: String,
     local: List<ConversationMessage>,
@@ -1141,11 +1141,11 @@ private fun mergeRemoteHistory(
         }
         val previous = if (matchIndex >= 0) unmatchedLocal.removeAt(matchIndex) else null
         ConversationMessage(
-            id = previous?.id ?: "lila-$conversationId-${entry.sequence}",
+            id = previous?.id ?: "lila-$conversationId-${entry.sequence.toString().padStart(20, '0')}",
             characterId = characterId,
             role = role,
             content = entry.content,
-            createdAtEpochMillis = entry.createdAtEpochMillis
+            createdAtEpochMillis = previous?.createdAtEpochMillis ?: entry.createdAtEpochMillis
         )
     }
     return (remoteMessages + unmatchedLocal)
