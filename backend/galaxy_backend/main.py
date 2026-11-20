@@ -1,6 +1,7 @@
 import logging
 import time
 import uuid
+from uuid import UUID
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
@@ -16,6 +17,7 @@ from .lila_core.openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleModelAdapter,
 )
+from .lila_core.memory import IdempotencyKeyConflict, IdempotentTurnInProgress
 from .lila_core.service import CoreTurnService, ModelAdapterContractError
 from .lila_core.sqlite_store import SqliteLilaStore
 from redis.asyncio import Redis
@@ -233,6 +235,7 @@ def create_app(
         payload: CoreTurnRequest,
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
+        idempotency_key: Annotated[UUID | None, Header(alias="Idempotency-Key")] = None,
     ):
         service: CoreTurnService | None = request.app.state.lila_core_service
         if service is None:
@@ -252,7 +255,22 @@ def create_app(
             ) from exc
 
         try:
-            return await service.handle(payload, principal_id=user_id)
+            return await service.handle(
+                payload,
+                principal_id=user_id,
+                idempotency_key=str(idempotency_key) if idempotency_key is not None else None,
+            )
+        except IdempotencyKeyConflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Idempotency-Key was already used for a different request",
+            ) from None
+        except IdempotentTurnInProgress:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A turn with this Idempotency-Key is still processing; retry the same request.",
+                headers={"Retry-After": "2"},
+            ) from None
         except ModelProviderConfigurationError as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,

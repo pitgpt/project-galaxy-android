@@ -17,7 +17,7 @@ import httpx
 
 from .context import AssembledContext
 from .contracts import CoreTurnResponse
-from .adapters import ModelAdapterContractError
+from .adapters import ModelAdapterContractError, ModelProviderRejected
 
 
 MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
@@ -36,7 +36,7 @@ class ModelProviderUnavailable(RuntimeError):
     """The configured model endpoint could not complete a request safely."""
 
 
-class ModelProviderConfigurationError(RuntimeError):
+class ModelProviderConfigurationError(ModelProviderRejected):
     """The provider rejected its configured endpoint, model, credentials, or request."""
 
     _PUBLIC_DETAILS = {

@@ -17,6 +17,7 @@ import java.net.URL
 
 @RunWith(RobolectricTestRunner::class)
 class HttpLilaTurnProviderTest {
+    private val idempotencyKey = "00000000-0000-4000-8000-000000000201"
     @Test
     fun postsAuthenticatedTurnAndReturnsProviderIdentity() = runBlocking {
         val connection = FakeConnection(
@@ -35,7 +36,7 @@ class HttpLilaTurnProviderTest {
             connectionFactory = { connection }
         )
 
-        val result = provider.sendTurn("conversation-1", "Привет")
+        val result = provider.sendTurn("conversation-1", "Привет", idempotencyKey)
 
         assertEquals("conversation-1", result.conversationId)
         assertEquals("Привет! Я Лила.", result.text)
@@ -43,6 +44,7 @@ class HttpLilaTurnProviderTest {
         assertEquals("model-a", result.modelId)
         assertEquals("cloud-primary · model-a", result.displayModel)
         assertEquals("Bearer test-access-token", connection.requestHeaders["Authorization"])
+        assertEquals(idempotencyKey, connection.requestHeaders["Idempotency-Key"])
         assertEquals("application/json; charset=utf-8", connection.requestHeaders["Content-Type"])
         assertFalse(connection.instanceFollowRedirects)
         assertTrue(connection.disconnected)
@@ -65,7 +67,7 @@ class HttpLilaTurnProviderTest {
             }
         )
 
-        val error = expectApiError { provider.sendTurn("conversation-1", "hello") }
+        val error = expectApiError { provider.sendTurn("conversation-1", "hello", idempotencyKey) }
 
         assertEquals(401, error.httpStatus)
         assertFalse(opened)
@@ -84,7 +86,7 @@ class HttpLilaTurnProviderTest {
             connectionFactory = { connection }
         )
 
-        val error = expectApiError { provider.sendTurn("conversation-1", "hello") }
+        val error = expectApiError { provider.sendTurn("conversation-1", "hello", idempotencyKey) }
 
         assertEquals(503, error.httpStatus)
         assertFalse(error.message.orEmpty().contains("provider-secret"))
@@ -105,7 +107,7 @@ class HttpLilaTurnProviderTest {
             connectionFactory = { mismatch }
         )
         val mismatchError = expectApiError {
-            mismatchProvider.sendTurn("conversation-1", "hello")
+            mismatchProvider.sendTurn("conversation-1", "hello", idempotencyKey)
         }
         assertTrue(mismatchError.message.orEmpty().contains("другого диалога"))
         assertTrue(mismatch.disconnected)
@@ -121,7 +123,7 @@ class HttpLilaTurnProviderTest {
             connectionFactory = { oversized }
         )
         val oversizedError = expectApiError {
-            oversizedProvider.sendTurn("conversation-1", "hello")
+            oversizedProvider.sendTurn("conversation-1", "hello", idempotencyKey)
         }
         assertTrue(oversizedError.message.orEmpty().contains("допустимый размер"))
         assertTrue(oversized.disconnected)
@@ -134,7 +136,7 @@ class HttpLilaTurnProviderTest {
             GalaxyAccessTokenProvider { "token" }
         )
         assertFalse(insecure.isConfigured)
-        val insecureError = expectApiError { insecure.sendTurn("conversation-1", "hello") }
+        val insecureError = expectApiError { insecure.sendTurn("conversation-1", "hello", idempotencyKey) }
         assertFalse(insecureError.message.orEmpty().contains("token"))
 
         val placeholder = HttpLilaTurnProvider(
@@ -148,7 +150,7 @@ class HttpLilaTurnProviderTest {
             GalaxyAccessTokenProvider { "token" }
         )
         assertFalse(malformed.isConfigured)
-        val malformedError = expectApiError { malformed.sendTurn("conversation-1", "hello") }
+        val malformedError = expectApiError { malformed.sendTurn("conversation-1", "hello", idempotencyKey) }
         assertTrue(malformedError.message.orEmpty().contains("host"))
     }
 

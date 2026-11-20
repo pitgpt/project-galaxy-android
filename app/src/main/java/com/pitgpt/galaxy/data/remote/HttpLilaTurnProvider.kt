@@ -9,6 +9,7 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.util.UUID
 
 data class LilaTurnResult(
     val conversationId: String,
@@ -59,10 +60,11 @@ class HttpLilaTurnProvider(
         require(connectTimeoutMillis > 0 && readTimeoutMillis > 0)
     }
 
-    suspend fun sendTurn(conversationId: String, message: String): LilaTurnResult =
+    suspend fun sendTurn(conversationId: String, message: String, idempotencyKey: String): LilaTurnResult =
         withContext(Dispatchers.IO) {
             require(conversationId.isNotBlank() && conversationId.length <= 128)
             require(message.isNotBlank() && message.length <= 12_000)
+            require(runCatching { UUID.fromString(idempotencyKey) }.isSuccess)
 
             configurationError?.let { error ->
                 throw GalaxyApiException(null, error)
@@ -102,6 +104,7 @@ class HttpLilaTurnProvider(
                 connection.setRequestProperty("Accept", "application/json")
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 connection.setRequestProperty("Authorization", "Bearer $token")
+                connection.setRequestProperty("Idempotency-Key", idempotencyKey)
                 val body = JSONObject()
                     .put("conversation_id", conversationId)
                     .put("message", message)
@@ -186,6 +189,7 @@ class HttpLilaTurnProvider(
         401 -> "Сессия Galaxy истекла. Войди снова."
         403 -> "У этого аккаунта нет доступа к диалогу."
         404 -> "Маршрут Lila Core не найден на backend."
+        409 -> "Предыдущая отправка ещё обрабатывается или её результат не подтверждён. Повтори то же сообщение позже."
         422 -> "Сообщение не прошло проверку Lila Core."
         429 -> "Достигнут лимит сообщений. Попробуй позже."
         502 -> "Провайдер модели вернул некорректный ответ."

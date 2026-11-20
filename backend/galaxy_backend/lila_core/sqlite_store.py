@@ -26,7 +26,13 @@ from typing import Sequence
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .memory import ConversationMessage, MemorySnippet
+from .contracts import CoreTurnResponse
+from .memory import (
+    ConversationMessage,
+    IdempotencyKeyConflict,
+    IdempotentTurnInProgress,
+    MemorySnippet,
+)
 
 
 class LilaStoreIntegrityError(RuntimeError):
@@ -43,7 +49,7 @@ class SqliteLilaStore:
     This adapter does not make an ephemeral container filesystem durable.
     """
 
-    _SCHEMA_VERSION = 2
+    _SCHEMA_VERSION = 3
     _NONCE_BYTES = 12
     _MEMORY_BACKFILL_BATCH = 128
     _MAX_MEMORY_CANDIDATES = 256
@@ -150,7 +156,7 @@ class SqliteLilaStore:
                         ) WITHOUT ROWID"""
                     )
                     version = 1
-                elif version not in {1, self._SCHEMA_VERSION}:
+                elif version not in {1, 2, self._SCHEMA_VERSION}:
                     raise RuntimeError("Unsupported Lila database schema version")
                 else:
                     row = connection.execute(
@@ -175,6 +181,28 @@ class SqliteLilaStore:
                 connection.execute(
                     "CREATE INDEX IF NOT EXISTS idx_lila_memory_terms_owner_memory "
                     "ON lila_memory_terms(owner_key, memory_key)"
+                )
+                # Version 3 stores encrypted, replayable results for authenticated
+                # idempotency keys. Raw keys, messages, and responses are never indexed.
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS lila_turn_requests (
+                        owner_key TEXT NOT NULL,
+                        request_key TEXT NOT NULL,
+                        conversation_key TEXT NOT NULL,
+                        request_digest TEXT NOT NULL,
+                        state TEXT NOT NULL CHECK(state IN ('pending', 'completed')),
+                        response_nonce BLOB,
+                        response_ciphertext BLOB,
+                        created_at_ms INTEGER NOT NULL,
+                        updated_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY(owner_key, request_key),
+                        CHECK(
+                            (state='pending' AND response_nonce IS NULL AND response_ciphertext IS NULL)
+                            OR
+                            (state='completed' AND response_nonce IS NOT NULL
+                                AND length(response_nonce)=12 AND response_ciphertext IS NOT NULL)
+                        )
+                    ) WITHOUT ROWID"""
                 )
                 connection.execute(f"PRAGMA user_version={self._SCHEMA_VERSION}")
                 connection.execute("COMMIT")
@@ -338,6 +366,268 @@ class SqliteLilaStore:
             except Exception:
                 raise LilaStoreIntegrityError("Stored Lila data failed validation") from None
         return tuple(messages)
+
+    def _idempotency_material(
+        self,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+    ) -> tuple[str, str, str, str]:
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("idempotency_key must be a non-empty string")
+        owner_key = self._owner_key(principal_id)
+        conversation_key = self._resource_key("conversation", conversation_id, 128)
+        request_key = self._resource_key("turn", idempotency_key, 128)
+        digest = hmac.new(
+            self._index_key,
+            b"lila-idempotency-request-v1\\0"
+            + owner_key.encode("ascii")
+            + b"\\0"
+            + conversation_key.encode("ascii")
+            + b"\\0"
+            + user_message.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return owner_key, conversation_key, request_key, digest
+
+    async def reserve_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+    ) -> CoreTurnResponse | None:
+        ConversationMessage(role="user", content=user_message)
+        await self.initialize()
+        owner_key, conversation_key, request_key, digest = self._idempotency_material(
+            principal_id, conversation_id, idempotency_key, user_message
+        )
+        return await asyncio.to_thread(
+            self._reserve_idempotent_turn_sync,
+            owner_key,
+            conversation_key,
+            request_key,
+            digest,
+            conversation_id,
+        )
+
+    def _reserve_idempotent_turn_sync(
+        self,
+        owner_key: str,
+        conversation_key: str,
+        request_key: str,
+        request_digest: str,
+        conversation_id: str,
+    ) -> CoreTurnResponse | None:
+        cached: tuple[bytes, bytes] | None = None
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT conversation_key, request_digest, state, response_nonce, response_ciphertext "
+                    "FROM lila_turn_requests WHERE owner_key=? AND request_key=?",
+                    (owner_key, request_key),
+                ).fetchone()
+                if row is None:
+                    now = int(time.time() * 1000)
+                    connection.execute(
+                        "INSERT INTO lila_turn_requests(owner_key, request_key, conversation_key, "
+                        "request_digest, state, response_nonce, response_ciphertext, created_at_ms, updated_at_ms) "
+                        "VALUES(?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)",
+                        (owner_key, request_key, conversation_key, request_digest, now, now),
+                    )
+                    connection.execute("COMMIT")
+                    return None
+
+                if (
+                    row["conversation_key"] != conversation_key
+                    or not hmac.compare_digest(str(row["request_digest"]), request_digest)
+                ):
+                    raise IdempotencyKeyConflict(
+                        "Idempotency key was already used for a different request"
+                    )
+                if row["state"] == "pending":
+                    raise IdempotentTurnInProgress(
+                        "An idempotent turn with this key is still pending"
+                    )
+                if row["state"] != "completed" or row["response_nonce"] is None:
+                    raise LilaStoreIntegrityError("Stored Lila idempotency result is invalid")
+                cached = (bytes(row["response_nonce"]), bytes(row["response_ciphertext"]))
+                connection.execute("COMMIT")
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        finally:
+            connection.close()
+
+        plaintext = self._decrypt(
+            cached[0],
+            cached[1],
+            self._aad("turn_response", owner_key, request_key),
+        )
+        try:
+            response = CoreTurnResponse.model_validate_json(plaintext)
+        except Exception:
+            raise LilaStoreIntegrityError("Stored Lila idempotency result failed validation") from None
+        if response.conversation_id != conversation_id:
+            raise LilaStoreIntegrityError("Stored Lila idempotency result belongs to another conversation")
+        return response
+
+    async def complete_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+        assistant_message: str,
+        response: CoreTurnResponse,
+    ) -> None:
+        user = ConversationMessage(role="user", content=user_message)
+        assistant = ConversationMessage(role="assistant", content=assistant_message)
+        validated_response = CoreTurnResponse.model_validate(response)
+        if validated_response.conversation_id != conversation_id:
+            raise ValueError("idempotent response conversation does not match the request")
+        await self.initialize()
+        owner_key, conversation_key, request_key, digest = self._idempotency_material(
+            principal_id, conversation_id, idempotency_key, user_message
+        )
+        response_payload = bytearray(validated_response.model_dump_json().encode("utf-8"))
+        try:
+            nonce, ciphertext = self._encrypt(
+                bytes(response_payload),
+                self._aad("turn_response", owner_key, request_key),
+            )
+        finally:
+            response_payload[:] = b"\\0" * len(response_payload)
+        await asyncio.to_thread(
+            self._complete_idempotent_turn_sync,
+            owner_key,
+            conversation_key,
+            request_key,
+            digest,
+            user,
+            assistant,
+            nonce,
+            ciphertext,
+        )
+
+    def _complete_idempotent_turn_sync(
+        self,
+        owner_key: str,
+        conversation_key: str,
+        request_key: str,
+        request_digest: str,
+        user: ConversationMessage,
+        assistant: ConversationMessage,
+        response_nonce: bytes,
+        response_ciphertext: bytes,
+    ) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                reservation = connection.execute(
+                    "SELECT conversation_key, request_digest, state FROM lila_turn_requests "
+                    "WHERE owner_key=? AND request_key=?",
+                    (owner_key, request_key),
+                ).fetchone()
+                if (
+                    reservation is None
+                    or reservation["conversation_key"] != conversation_key
+                    or not hmac.compare_digest(str(reservation["request_digest"]), request_digest)
+                    or reservation["state"] != "pending"
+                ):
+                    raise IdempotencyKeyConflict("Idempotent turn reservation is no longer available")
+
+                current = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) FROM lila_messages "
+                        "WHERE owner_key=? AND conversation_key=?",
+                        (owner_key, conversation_key),
+                    ).fetchone()[0]
+                )
+                now = int(time.time() * 1000)
+                for offset, message in enumerate((user, assistant), start=1):
+                    sequence = current + offset
+                    role = message.role
+                    message_nonce, message_ciphertext = self._encrypt(
+                        message.content.encode("utf-8"),
+                        self._aad("message", owner_key, conversation_key, f"{sequence}:{role}"),
+                    )
+                    connection.execute(
+                        "INSERT INTO lila_messages(owner_key, conversation_key, sequence, role, nonce, ciphertext, created_at_ms) "
+                        "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                        (owner_key, conversation_key, sequence, role, message_nonce, message_ciphertext, now),
+                    )
+                updated = connection.execute(
+                    "UPDATE lila_turn_requests SET state='completed', response_nonce=?, "
+                    "response_ciphertext=?, updated_at_ms=? WHERE owner_key=? AND request_key=? "
+                    "AND request_digest=? AND state='pending'",
+                    (
+                        response_nonce,
+                        response_ciphertext,
+                        now,
+                        owner_key,
+                        request_key,
+                        request_digest,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise IdempotencyKeyConflict("Idempotent turn reservation is no longer available")
+                connection.execute("COMMIT")
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        finally:
+            connection.close()
+
+    async def release_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+    ) -> None:
+        await self.initialize()
+        owner_key, conversation_key, request_key, digest = self._idempotency_material(
+            principal_id, conversation_id, idempotency_key, user_message
+        )
+        await asyncio.to_thread(
+            self._release_idempotent_turn_sync,
+            owner_key,
+            request_key,
+            digest,
+        )
+
+    def _release_idempotent_turn_sync(
+        self,
+        owner_key: str,
+        request_key: str,
+        request_digest: str,
+    ) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "DELETE FROM lila_turn_requests WHERE owner_key=? AND request_key=? "
+                    "AND request_digest=? AND state='pending'",
+                    (owner_key, request_key, request_digest),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        finally:
+            connection.close()
 
     async def append_turn(
         self,

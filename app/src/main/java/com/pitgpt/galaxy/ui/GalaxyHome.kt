@@ -270,7 +270,8 @@ fun GalaxyHome() {
                         ownerKey,
                         activeCharacterId
                     )
-                    val response = app.lilaTurnProvider.sendTurn(conversationId, text)
+                    val pendingTurnKey = getOrCreatePendingLilaTurnKey(context, ownerKey, conversationId, text)
+                    val response = app.lilaTurnProvider.sendTurn(conversationId, text, pendingTurnKey.value)
                     val createdAt = System.currentTimeMillis()
                     val userMessage = ConversationMessage(
                         id = UUID.randomUUID().toString(),
@@ -291,9 +292,10 @@ fun GalaxyHome() {
                     } catch (error: Exception) {
                         throw GalaxyApiException(
                             null,
-                            "Ответ Лилы получен, но локальная копия не сохранилась. Не отправляй сообщение повторно."
+                            "Ответ Лилы получен, но локальная копия не сохранилась. Повтори отправку того же сообщения: сервер вернёт сохранённый ответ без повторного вызова модели."
                         )
                     }
+                    clearPendingLilaTurnKey(context, pendingTurnKey.preferenceKey)
                     messages.add(userMessage)
                     messages.add(assistantMessage)
                     activeModelLabel = response.displayModel
@@ -1094,4 +1096,37 @@ private fun getOrCreateLilaConversationId(
         ?: UUID.randomUUID().toString().also { generated ->
             preferences.edit().putString(key, generated).apply()
         }
+}
+
+
+
+private data class PendingLilaTurnKey(
+    val value: String,
+    val preferenceKey: String
+)
+
+private fun getOrCreatePendingLilaTurnKey(
+    context: Context,
+    ownerKey: String,
+    conversationId: String,
+    message: String
+): PendingLilaTurnKey {
+    val fingerprint = MessageDigest.getInstance("SHA-256")
+        .digest("$ownerKey\\u0000$conversationId\\u0000$message".toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+    val preferenceKey = "lila_pending_turn_$fingerprint"
+    val preferences = context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
+    val existing = preferences.getString(preferenceKey, null)
+        ?.takeIf { runCatching { UUID.fromString(it) }.isSuccess }
+    val value = existing ?: UUID.randomUUID().toString().also { generated ->
+        preferences.edit().putString(preferenceKey, generated).apply()
+    }
+    return PendingLilaTurnKey(value, preferenceKey)
+}
+
+private fun clearPendingLilaTurnKey(context: Context, preferenceKey: String) {
+    context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
+        .edit()
+        .remove(preferenceKey)
+        .apply()
 }
