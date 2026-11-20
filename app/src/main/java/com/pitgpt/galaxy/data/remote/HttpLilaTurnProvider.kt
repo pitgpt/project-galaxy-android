@@ -9,6 +9,8 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.util.UUID
 
 data class LilaTurnResult(
@@ -30,6 +32,22 @@ data class LilaHistoryMessage(
     val content: String,
     val createdAtEpochMillis: Long
 )
+
+/**
+ * Stable across Galaxy and Desktop for the same authenticated owner partition
+ * and character. This is an identifier, not an authentication credential.
+ */
+internal fun stableLilaConversationId(ownerKey: String, characterId: String): String {
+    require(ownerKey.isNotBlank() && ownerKey.length <= 128)
+    require(characterId.isNotBlank() && characterId.length <= 128)
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest("lila-conversation-v1\u0000$ownerKey\u0000$characterId".toByteArray(Charsets.UTF_8))
+    val uuidBytes = digest.copyOfRange(0, 16)
+    uuidBytes[6] = ((uuidBytes[6].toInt() and 0x0f) or 0x50).toByte()
+    uuidBytes[8] = ((uuidBytes[8].toInt() and 0x3f) or 0x80).toByte()
+    val buffer = ByteBuffer.wrap(uuidBytes)
+    return UUID(buffer.long, buffer.long).toString()
+}
 
 /**
  * Authenticated Galaxy -> Lila Core text-turn client.
