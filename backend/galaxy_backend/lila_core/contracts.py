@@ -84,3 +84,25 @@ class CoreTurnResponse(BaseModel):
     avatar_events: list[AvatarEvent] = Field(default_factory=list)
     provider_id: str | None = Field(default=None, min_length=1, max_length=64)
     model_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+
+class ConversationHistoryItem(BaseModel):
+    """One decrypted message returned by the authenticated history endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sequence: int = Field(ge=1)
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=12_000)
+    created_at_epoch_millis: int = Field(ge=0)
+
+
+class ConversationHistoryPage(BaseModel):
+    """A bounded, owner-scoped page of committed conversation messages."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: str = Field(min_length=1, max_length=128)
+    messages: list[ConversationHistoryItem] = Field(default_factory=list, max_length=20)
+    next_before_sequence: int | None = Field(default=None, ge=1)
