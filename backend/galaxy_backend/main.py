@@ -133,6 +133,12 @@ def create_app(
             )
 
         app.state.lila_store = None
+        if (
+            lila_core_service is None
+            and app.state.settings.lila_configuration_requested
+            and not app.state.settings.lila_is_configured
+        ):
+            raise RuntimeError("Lila configuration is incomplete")
         if lila_core_service is not None:
             app.state.lila_core_service = lila_core_service
         elif app.state.settings.lila_is_configured:
