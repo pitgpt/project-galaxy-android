@@ -155,6 +155,19 @@ class EncryptedMediaStoreTest {
     }
 
     @Test
+    fun zeroizingAccumulatorWipesReplacedBackingBufferWhenGrowing() {
+        val accumulator = ZeroizingByteArrayOutputStream(initialSize = 2)
+        val originalBuffer = accumulator.backingBufferForTesting
+        val expected = byteArrayOf(1, 2, 3, 4, 5)
+
+        accumulator.write(expected, 0, expected.size)
+
+        assertTrue("The previous backing buffer must be wiped during growth", originalBuffer.all { it == 0.toByte() })
+        assertArrayEquals(expected, accumulator.copyAndWipe())
+        assertTrue("The replacement backing buffer must also be wiped", accumulator.isWiped)
+    }
+
+    @Test
     fun boundedReadZeroizesScratchAndAccumulatorBuffersAfterSuccess() {
         val expected = "encrypted-media-buffer".toByteArray()
         var scratchBuffer: ByteArray? = null
