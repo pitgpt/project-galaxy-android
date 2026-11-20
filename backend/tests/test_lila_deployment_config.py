@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -46,6 +47,16 @@ def test_compose_mounts_lila_database_on_a_named_persistent_volume():
     assert "galaxy-lila-data" in config["volumes"]
 
 
+def test_compose_injects_storage_and_provider_secrets_from_runtime_environment():
+    config = _resolved_compose_config()
+    backend_environment = config["services"]["backend"]["environment"]
+    storage_key = os.environ.get("LILA_STORAGE_ENCRYPTION_KEY")
+
+    assert storage_key is not None and len(storage_key) == 64
+    assert backend_environment["LILA_STORAGE_ENCRYPTION_KEY"] == storage_key
+    assert "LILA_PROVIDER_API_KEY" in backend_environment
+
+
 def test_backend_image_prepares_private_store_directory_for_runtime_uid():
     dockerfile = (BACKEND_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
@@ -53,9 +64,10 @@ def test_backend_image_prepares_private_store_directory_for_runtime_uid():
     assert "USER 10001:10001" in dockerfile
 
 
-def test_env_example_contains_no_real_lila_credentials_or_storage_key():
+def test_env_example_does_not_store_lila_secrets():
+    env_text = (BACKEND_ROOT / ".env.example").read_text(encoding="utf-8")
     values = {}
-    for raw_line in (BACKEND_ROOT / ".env.example").read_text(encoding="utf-8").splitlines():
+    for raw_line in env_text.splitlines():
         line = raw_line.strip()
         if line and not line.startswith("#") and "=" in line:
             name, value = line.split("=", 1)
@@ -63,6 +75,7 @@ def test_env_example_contains_no_real_lila_credentials_or_storage_key():
 
     assert values["LILA_PROVIDER_BASE_URL"] == ""
     assert values["LILA_MODEL_ID"] == ""
-    assert values["LILA_PROVIDER_API_KEY"] == ""
-    assert values["LILA_STORAGE_ENCRYPTION_KEY"] == ""
+    assert "LILA_PROVIDER_API_KEY" not in values
+    assert "LILA_STORAGE_ENCRYPTION_KEY" not in values
     assert values["LILA_DATABASE_PATH"] == LILA_DATABASE_PATH
+    assert "host secret manager" in env_text

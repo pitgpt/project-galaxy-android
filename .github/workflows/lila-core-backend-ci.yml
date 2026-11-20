@@ -41,7 +41,9 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Prepare non-secret Compose validation environment
-        run: cp .env.example .env
+        run: |
+          cp .env.example .env
+          echo "LILA_STORAGE_ENCRYPTION_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
 
       - name: Validate Compose configuration and build backend image
         run: |
