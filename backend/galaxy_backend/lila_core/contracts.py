@@ -96,6 +96,8 @@ class ConversationHistoryItem(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=12_000)
     created_at_epoch_millis: int = Field(ge=0)
+    provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    model_id: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class ConversationHistoryPage(BaseModel):

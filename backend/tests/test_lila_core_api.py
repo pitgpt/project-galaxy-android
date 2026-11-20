@@ -48,6 +48,7 @@ class RecordingHistoryReader:
     def __init__(self):
         self.calls = []
         self.appended_turns = []
+        self.model_identities = []
 
     async def load_recent_messages(self, *, principal_id, conversation_id, limit):
         self.calls.append((principal_id, conversation_id, limit))
@@ -58,8 +59,12 @@ class RecordingHistoryReader:
             )
         ]
 
-    async def append_turn(self, *, principal_id, conversation_id, user_message, assistant_message):
+    async def append_turn(
+        self, *, principal_id, conversation_id, user_message, assistant_message,
+        provider_id=None, model_id=None
+    ):
         self.appended_turns.append((principal_id, conversation_id, user_message, assistant_message))
+        self.model_identities.append((provider_id, model_id))
 
 
 class RecordingMemoryReader:
@@ -92,6 +97,8 @@ class RecordingModelAdapter:
             conversation_id=context.conversation_id,
             text="Ответ Лилы",
             emotion="happy",
+            provider_id="test-provider",
+            model_id="test-model",
             avatar_events=[
                 {
                     "type": "avatar.emotion",
@@ -183,6 +190,9 @@ def test_lila_turn_uses_jwt_subject_and_returns_typed_avatar_events():
     assert body["conversation_id"] == "conversation-1"
     assert body["text"] == "Ответ Лилы"
     assert body["emotion"] == "happy"
+    assert body["provider_id"] == "test-provider"
+    assert body["model_id"] == "test-model"
+    assert history.model_identities == [("test-provider", "test-model")]
     assert body["avatar_events"][0]["type"] == "avatar.emotion"
     assert limiter.calls == ["user-a"]
     assert history.calls == [("user-a", "conversation-1", 20)]
@@ -516,6 +526,8 @@ def test_lila_history_is_owner_scoped_and_paginates_without_gaps(tmp_path):
             conversation_id="shared-conversation",
             user_message=f"user-{index}",
             assistant_message=f"assistant-{index}",
+            provider_id=f"provider-{index}",
+            model_id=f"model-{index}",
         ))
     asyncio.run(store.append_turn(
         principal_id="user-b",
@@ -552,6 +564,10 @@ def test_lila_history_is_owner_scoped_and_paginates_without_gaps(tmp_path):
     assert [item["content"] for item in first.json()["messages"]] == [
         "user-2", "assistant-2"
     ]
+    assert first.json()["messages"][0]["provider_id"] is None
+    assert first.json()["messages"][0]["model_id"] is None
+    assert first.json()["messages"][1]["provider_id"] == "provider-2"
+    assert first.json()["messages"][1]["model_id"] == "model-2"
     assert first.json()["next_before_sequence"] == 5
     assert [item["content"] for item in second.json()["messages"]] == [
         "user-1", "assistant-1"

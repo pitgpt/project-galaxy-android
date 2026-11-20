@@ -38,6 +38,8 @@ class StoredConversationMessage(BaseModel):
     role: ConversationRole
     content: str = Field(min_length=1, max_length=12_000)
     created_at_epoch_millis: int = Field(ge=0)
+    provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    model_id: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class MemorySnippet(BaseModel):
@@ -96,6 +98,8 @@ class ConversationHistoryWriter(Protocol):
         conversation_id: str,
         user_message: str,
         assistant_message: str,
+        provider_id: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         """Persist the user and assistant messages as one indivisible turn."""
         ...

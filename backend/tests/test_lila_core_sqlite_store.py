@@ -262,7 +262,7 @@ def test_schema_v1_migration_backfills_existing_encrypted_memories(tmp_path, mon
         "history survives schema migration", "confirmed"
     ]
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 4
     assert database.execute(
         "SELECT COUNT(DISTINCT memory_key) FROM lila_memory_terms"
     ).fetchone()[0] == 3
@@ -476,6 +476,37 @@ def test_idempotent_turn_replays_encrypted_response_and_rejects_key_reuse(tmp_pa
         ("user", "private idempotent user message"),
         ("assistant", "private idempotent assistant response"),
     ]
+    page, cursor = run(store.load_conversation_page(
+        principal_id="owner-a", conversation_id="chat", limit=20
+    ))
+    assert cursor is None
+    assert page[0].provider_id is None and page[0].model_id is None
+    assert page[1].provider_id == "cloud-primary"
+    assert page[1].model_id == "model-a"
+
+
+def test_provider_model_identity_is_persisted_with_assistant_history_after_restart(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    store = SqliteLilaStore(path, KEY)
+    run(store.append_turn(
+        principal_id="owner",
+        conversation_id="chat",
+        user_message="Привет",
+        assistant_message="Ответ",
+        provider_id="local-ollama",
+        model_id="qwen-local",
+    ))
+
+    reopened = SqliteLilaStore(path, KEY)
+    page, cursor = run(reopened.load_conversation_page(
+        principal_id="owner", conversation_id="chat", limit=20
+    ))
+
+    assert cursor is None
+    assert [(item.role, item.provider_id, item.model_id) for item in page] == [
+        ("user", None, None),
+        ("assistant", "local-ollama", "qwen-local"),
+    ]
 
 
 def test_releasing_pre_provider_reservation_allows_safe_retry(tmp_path):
@@ -489,6 +520,39 @@ def test_releasing_pre_provider_reservation_allows_safe_retry(tmp_path):
     assert run(store.reserve_idempotent_turn(**values)) is None
     run(store.release_idempotent_turn(**values))
     assert run(store.reserve_idempotent_turn(**values)) is None
+
+
+def test_schema_v3_migration_adds_turn_metadata_without_data_loss(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    original = SqliteLilaStore(path, KEY)
+    run(original.append_turn(
+        principal_id="owner",
+        conversation_id="legacy-chat",
+        user_message="legacy history",
+        assistant_message="legacy answer",
+    ))
+
+    database = sqlite3.connect(path)
+    database.execute("DROP TABLE lila_turn_metadata")
+    database.execute("PRAGMA user_version=3")
+    database.commit()
+    database.close()
+
+    migrated = SqliteLilaStore(path, KEY)
+    run(migrated.initialize())
+    page, cursor = run(migrated.load_conversation_page(
+        principal_id="owner", conversation_id="legacy-chat", limit=20
+    ))
+    assert cursor is None
+    assert [item.content for item in page] == ["legacy history", "legacy answer"]
+    assert page[1].provider_id is None and page[1].model_id is None
+
+    database = sqlite3.connect(path)
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert database.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lila_turn_metadata'"
+    ).fetchone()[0] == 1
+    database.close()
 
 
 def test_schema_v2_migration_adds_idempotency_ledger_without_data_loss(tmp_path):
@@ -526,5 +590,5 @@ def test_schema_v2_migration_adds_idempotency_ledger_without_data_loss(tmp_path)
         user_message="new turn",
     )) is None
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 4
     database.close()
