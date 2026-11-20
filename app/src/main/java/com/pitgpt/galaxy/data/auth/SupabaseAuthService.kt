@@ -46,6 +46,11 @@ class SupabaseAuthService(private val client: SupabaseClient) : GalaxyAccessToke
         client.auth.awaitInitialization()
         return client.auth.currentAccessTokenOrNull()
     }
+
+    suspend fun currentUserId(): String? {
+        client.auth.awaitInitialization()
+        return client.auth.currentUserOrNull()?.id
+    }
 }
 
 internal object CredentialValidation {

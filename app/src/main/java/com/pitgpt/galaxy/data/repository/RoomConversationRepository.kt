@@ -16,6 +16,11 @@ class RoomConversationRepository(
         dao.insert(message.toEntity())
     }
 
+    override suspend fun appendTurn(userMessage: ConversationMessage, assistantMessage: ConversationMessage) {
+        require(userMessage.characterId == assistantMessage.characterId)
+        dao.insertTurn(userMessage.toEntity(), assistantMessage.toEntity())
+    }
+
     override suspend fun clearForCharacter(characterId: String) {
         dao.deleteForCharacter(characterId)
     }

@@ -1,5 +1,6 @@
 package com.pitgpt.galaxy.ui
 
+import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -52,7 +53,9 @@ import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
+import com.pitgpt.galaxy.data.remote.GalaxyApiException
 import kotlinx.coroutines.launch
+import java.security.MessageDigest
 import java.util.UUID
 
 private val Night = Color(0xFF080B18)
@@ -79,6 +82,8 @@ fun GalaxyHome() {
     var editorProfile by remember { mutableStateOf<CharacterProfile?>(null) }
     var editorError by remember { mutableStateOf<String?>(null) }
     var profile by remember { mutableStateOf<CharacterProfile?>(null) }
+    var conversationOwnerKey by remember { mutableStateOf<String?>(null) }
+    var activeModelLabel by remember { mutableStateOf<String?>(null) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
     val scope = rememberCoroutineScope()
 
@@ -93,7 +98,11 @@ fun GalaxyHome() {
             val activeProfile = loadedCharacters.firstOrNull { it.id == preferredId }
                 ?: loadedCharacters.firstOrNull { it.id == CHARACTER_ID }
                 ?: throw IllegalStateException("Built-in character is missing")
-            val loadedMessages = app.conversations.getForCharacter(activeProfile.id)
+            val ownerId = app.auth?.currentUserId()
+            conversationOwnerKey = ownerId?.let(::ownerPartitionKey)
+            val loadedMessages = app.conversations.getForCharacter(
+                conversationStorageKey(conversationOwnerKey, activeProfile.id)
+            )
             characters = loadedCharacters
             activeCharacterId = activeProfile.id
             context.getSharedPreferences("galaxy_preferences", 0).edit()
@@ -154,6 +163,7 @@ fun GalaxyHome() {
                         profile = created
                         characterName = created.displayName
                         messages.clear()
+                        activeModelLabel = null
                         loadError = null
                         showCreateCharacter = false
                     } catch (error: Exception) {
@@ -183,7 +193,12 @@ fun GalaxyHome() {
                             profile = fallback
                             characterName = fallback.displayName
                             messages.clear()
-                            messages.addAll(app.conversations.getForCharacter(fallback.id))
+                            activeModelLabel = null
+                            messages.addAll(
+                                app.conversations.getForCharacter(
+                                    conversationStorageKey(conversationOwnerKey, fallback.id)
+                                )
+                            )
                         }
                     } catch (error: Exception) {
                         loadError = "Не удалось удалить персонажа. Данные не были изменены."
@@ -197,7 +212,9 @@ fun GalaxyHome() {
                     try {
                         val selectedProfile = app.characters.getById(selected.id)
                             ?: throw IllegalStateException("Character not found")
-                        val selectedMessages = app.conversations.getForCharacter(selectedProfile.id)
+                        val selectedMessages = app.conversations.getForCharacter(
+                            conversationStorageKey(conversationOwnerKey, selectedProfile.id)
+                        )
                         activeCharacterId = selectedProfile.id
                         context.getSharedPreferences("galaxy_preferences", 0).edit()
                             .putString("active_character_id", selectedProfile.id).apply()
@@ -205,6 +222,7 @@ fun GalaxyHome() {
                         characterName = selectedProfile.displayName
                         messages.clear()
                         messages.addAll(selectedMessages)
+                        activeModelLabel = null
                         showCharacters = false
                     } catch (error: Exception) {
                         loadError = "Не удалось переключить персонажа. Попробуй ещё раз."
@@ -236,13 +254,54 @@ fun GalaxyHome() {
         ConversationScreen(
             characterName = characterName,
             messages = messages,
+            activeModelLabel = activeModelLabel,
+            aiConfigured = app.lilaTurnProvider.isConfigured,
             isLoading = isLoading,
             loadError = loadError,
             onRetryLoad = { reloadKey += 1 },
             onBack = { showChat = false },
             onSend = { text ->
-                val message = SendMessage(app.conversations).invoke(activeCharacterId, text)
-                messages.add(message)
+                val storageCharacterId = conversationStorageKey(conversationOwnerKey, activeCharacterId)
+                if (app.lilaTurnProvider.isConfigured) {
+                    val ownerKey = conversationOwnerKey
+                        ?: throw GalaxyApiException(401, "Войди в аккаунт Galaxy, чтобы отправить сообщение Лиле.")
+                    val conversationId = getOrCreateLilaConversationId(
+                        context,
+                        ownerKey,
+                        activeCharacterId
+                    )
+                    val response = app.lilaTurnProvider.sendTurn(conversationId, text)
+                    val createdAt = System.currentTimeMillis()
+                    val userMessage = ConversationMessage(
+                        id = UUID.randomUUID().toString(),
+                        characterId = storageCharacterId,
+                        role = MessageRole.USER,
+                        content = text.trim(),
+                        createdAtEpochMillis = createdAt
+                    )
+                    val assistantMessage = ConversationMessage(
+                        id = UUID.randomUUID().toString(),
+                        characterId = storageCharacterId,
+                        role = MessageRole.CHARACTER,
+                        content = response.text,
+                        createdAtEpochMillis = createdAt + 1
+                    )
+                    try {
+                        app.conversations.appendTurn(userMessage, assistantMessage)
+                    } catch (error: Exception) {
+                        throw GalaxyApiException(
+                            null,
+                            "Ответ Лилы получен, но локальная копия не сохранилась. Не отправляй сообщение повторно."
+                        )
+                    }
+                    messages.add(userMessage)
+                    messages.add(assistantMessage)
+                    activeModelLabel = response.displayModel
+                } else {
+                    val message = SendMessage(app.conversations).invoke(storageCharacterId, text)
+                    messages.add(message)
+                    activeModelLabel = null
+                }
             }
         )
     } else {
@@ -381,6 +440,8 @@ private fun HomeScreen(
 private fun ConversationScreen(
     characterName: String,
     messages: List<ConversationMessage>,
+    activeModelLabel: String?,
+    aiConfigured: Boolean,
     isLoading: Boolean,
     loadError: String?,
     onRetryLoad: () -> Unit,
@@ -403,7 +464,8 @@ private fun ConversationScreen(
                 onSend(value)
                 draft = ""
             } catch (error: Exception) {
-                sendError = "Не удалось сохранить сообщение. Текст остался в поле, попробуй ещё раз."
+                sendError = (error as? GalaxyApiException)?.message
+                    ?: "Не удалось завершить отправку. Текст остался в поле, попробуй ещё раз."
             } finally {
                 isSending = false
             }
@@ -424,8 +486,14 @@ private fun ConversationScreen(
                 Column(horizontalAlignment = Alignment.End) {
                     Text(characterName, color = Color.White, fontSize = 18.sp,
                         fontWeight = FontWeight.SemiBold)
-                    Text("ЛОКАЛЬНЫЙ ДИАЛОГ · AI НЕ ПОДКЛЮЧЁН",
-                        color = Color(0xFFE9BD70), fontSize = 8.sp, letterSpacing = 0.7.sp)
+                    Text(
+                        activeModelLabel?.let { "LILA · $it" }
+                            ?: if (aiConfigured) "LILA CORE · BACKEND НАСТРОЕН"
+                            else "ЛОКАЛЬНЫЙ ДИАЛОГ · AI НЕ ПОДКЛЮЧЁН",
+                        color = if (activeModelLabel != null) Color(0xFF75E2BD) else Color(0xFFE9BD70),
+                        fontSize = 8.sp,
+                        letterSpacing = 0.7.sp
+                    )
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -985,4 +1053,29 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
             Text(detail, color = Muted, fontSize = 11.sp)
         }
     }
+}
+
+
+private fun ownerPartitionKey(ownerId: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(ownerId.toByteArray(Charsets.UTF_8))
+    return digest.take(16).joinToString("") { byte ->
+        (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+    }
+}
+
+private fun conversationStorageKey(ownerKey: String?, characterId: String): String =
+    ownerKey?.let { "owner:$it:$characterId" } ?: characterId
+
+private fun getOrCreateLilaConversationId(
+    context: Context,
+    ownerKey: String,
+    characterId: String
+): String {
+    val preferences = context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
+    val key = "lila_conversation_id_${ownerKey}_${characterId}"
+    return preferences.getString(key, null)?.takeIf { it.isNotBlank() }
+        ?: UUID.randomUUID().toString().also { generated ->
+            preferences.edit().putString(key, generated).apply()
+        }
 }
