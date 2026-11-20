@@ -6,10 +6,10 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, ValidationError
 
-from .lila_core.contracts import CoreTurnRequest, CoreTurnResponse
+from .lila_core.contracts import ConversationHistoryPage, CoreTurnRequest, CoreTurnResponse
 from .lila_core.context import ContextAssembler
 from .lila_core.openai_compatible import (
     ModelProviderConfigurationError,
@@ -67,6 +67,7 @@ def create_app(
     session_registry: Any | None = None,
     lila_core_service: CoreTurnService | None = None,
     lila_turn_rate_limiter: Any | None = None,
+    lila_history_reader: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -136,6 +137,7 @@ def create_app(
             )
 
         app.state.lila_store = None
+        app.state.lila_history_reader = lila_history_reader
         if (
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
@@ -169,6 +171,7 @@ def create_app(
                 store,
             )
             app.state.lila_store = store
+            app.state.lila_history_reader = store
         elif app.state.settings.environment == "production":
             raise RuntimeError(
                 "Production requires a configured Lila model provider and encrypted persistent storage"
@@ -184,6 +187,7 @@ def create_app(
 
     app = FastAPI(title="Galaxy Backend", version="0.2.0", lifespan=lifespan)
     app.state.lila_core_service = lila_core_service
+    app.state.lila_history_reader = lila_history_reader
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -229,6 +233,49 @@ def create_app(
             except Exception as exc:
                 raise HTTPException(status_code=503, detail="Redis readiness check failed") from exc
         return {"status": "ready"}
+
+    @app.get(
+        "/v1/lila/conversations/{conversation_id}/messages",
+        response_model=ConversationHistoryPage,
+    )
+    async def get_lila_conversation_history(
+        conversation_id: str,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+        limit: int = Query(default=20, ge=1, le=20),
+        before_sequence: int | None = Query(default=None, ge=1),
+    ):
+        if not conversation_id.strip() or len(conversation_id) > 128:
+            raise HTTPException(status_code=422, detail="Conversation ID is invalid")
+        reader = request.app.state.lila_history_reader
+        if reader is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila conversation history is not configured",
+            )
+        try:
+            messages, next_cursor = await reader.load_conversation_page(
+                principal_id=user_id,
+                conversation_id=conversation_id,
+                limit=limit,
+                before_sequence=before_sequence,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Conversation history request is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila conversation history is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        return ConversationHistoryPage(
+            conversation_id=conversation_id,
+            messages=[message.model_dump() for message in messages],
+            next_before_sequence=next_cursor,
+        )
 
     @app.post("/v1/lila/turns", response_model=CoreTurnResponse)
     async def create_lila_turn(
