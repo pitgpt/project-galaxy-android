@@ -8,9 +8,10 @@ from galaxy_backend.lila_core.context import AssembledContext
 from galaxy_backend.lila_core.contracts import CoreTurnResponse
 from galaxy_backend.lila_core.memory import ConversationMessage, MemorySnippet
 from galaxy_backend.lila_core.openai_compatible import (
+    ModelProviderConfigurationError,
+    ModelProviderUnavailable,
     OpenAICompatibleConfig,
     OpenAICompatibleModelAdapter,
-    ModelProviderUnavailable,
 )
 from galaxy_backend.lila_core.service import ModelAdapterContractError
 
@@ -102,11 +103,45 @@ def test_adapter_does_not_send_authorization_when_endpoint_has_no_api_key():
     assert captured["authorization"] is None
 
 
-def test_provider_http_error_is_sanitized():
+@pytest.mark.parametrize(
+    ("status_code", "expected_reason"),
+    [
+        (400, "request_rejected"),
+        (401, "authentication_rejected"),
+        (403, "authentication_rejected"),
+        (404, "endpoint_or_model_not_found"),
+        (307, "redirect_refused"),
+    ],
+)
+def test_provider_configuration_rejections_are_classified_and_sanitized(
+    status_code, expected_reason
+):
     async def handler(request):
         return httpx.Response(
-            401,
-            json={"error": {"message": "provider-secret must not escape"}},
+            status_code,
+            json={"error": {"message": "provider-secret private-provider-detail"}},
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelProviderConfigurationError) as captured:
+                await adapter.generate(make_context())
+            assert captured.value.reason_code == expected_reason
+            assert captured.value.public_detail
+            assert "provider-secret" not in str(captured.value)
+            assert "private-provider-detail" not in str(captured.value)
+            assert str(status_code) not in str(captured.value)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status_code", [408, 425, 429, 500, 502, 503])
+def test_provider_transient_statuses_remain_retryable(status_code):
+    async def handler(request):
+        return httpx.Response(
+            status_code,
+            json={"error": {"message": "provider-secret private-provider-detail"}},
         )
 
     async def scenario():
@@ -115,7 +150,23 @@ def test_provider_http_error_is_sanitized():
             with pytest.raises(ModelProviderUnavailable) as captured:
                 await adapter.generate(make_context())
             assert "provider-secret" not in str(captured.value)
-            assert "401" not in str(captured.value)
+            assert "private-provider-detail" not in str(captured.value)
+            assert str(status_code) not in str(captured.value)
+
+    asyncio.run(scenario())
+
+
+def test_provider_transport_failure_is_sanitized():
+    async def handler(request):
+        raise httpx.ConnectTimeout("provider-secret private-provider-detail")
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelProviderUnavailable) as captured:
+                await adapter.generate(make_context())
+            assert "provider-secret" not in str(captured.value)
+            assert "private-provider-detail" not in str(captured.value)
 
     asyncio.run(scenario())
 
