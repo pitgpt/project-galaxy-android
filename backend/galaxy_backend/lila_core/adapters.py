@@ -8,6 +8,10 @@ from .context import AssembledContext
 from .contracts import CoreTurnResponse
 
 
+class ModelAdapterContractError(RuntimeError):
+    """Raised when a provider returns a response outside the Core contract."""
+
+
 class ModelAdapter(Protocol):
     """Async interface implemented by cloud or local model providers.
 
