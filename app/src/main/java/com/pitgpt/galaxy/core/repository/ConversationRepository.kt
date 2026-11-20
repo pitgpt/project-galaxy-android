@@ -11,5 +11,10 @@ interface ConversationRepository {
         append(userMessage)
         append(assistantMessage)
     }
+    suspend fun replaceForCharacter(characterId: String, messages: List<ConversationMessage>) {
+        require(messages.all { it.characterId == characterId })
+        clearForCharacter(characterId)
+        messages.forEach { append(it) }
+    }
     suspend fun clearForCharacter(characterId: String)
 }
