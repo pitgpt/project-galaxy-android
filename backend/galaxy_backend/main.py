@@ -9,7 +9,14 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, ValidationError
 
 from .lila_core.contracts import CoreTurnRequest, CoreTurnResponse
+from .lila_core.context import ContextAssembler
+from .lila_core.openai_compatible import (
+    ModelProviderUnavailable,
+    OpenAICompatibleConfig,
+    OpenAICompatibleModelAdapter,
+)
 from .lila_core.service import CoreTurnService, ModelAdapterContractError
+from .lila_core.sqlite_store import SqliteLilaStore
 from redis.asyncio import Redis
 
 from .config import Settings
@@ -125,6 +132,41 @@ def create_app(
                 app.state.settings.lila_turns_per_day,
             )
 
+        app.state.lila_store = None
+        if lila_core_service is not None:
+            app.state.lila_core_service = lila_core_service
+        elif app.state.settings.lila_is_configured:
+            store = SqliteLilaStore(
+                app.state.settings.lila_database_path,
+                app.state.settings.lila_storage_encryption_key,
+            )
+            await store.initialize()
+            provider_config = OpenAICompatibleConfig(
+                provider_id=app.state.settings.lila_provider_id,
+                base_url=app.state.settings.lila_provider_base_url,
+                model_id=app.state.settings.lila_provider_model_id,
+                api_key=app.state.settings.lila_provider_api_key,
+                timeout_seconds=app.state.settings.lila_provider_timeout_seconds,
+                system_prompt=app.state.settings.lila_system_prompt,
+            )
+            adapter = OpenAICompatibleModelAdapter(
+                app.state.http_client,
+                provider_config,
+            )
+            assembler = ContextAssembler(store, store)
+            app.state.lila_core_service = CoreTurnService(
+                assembler,
+                adapter,
+                store,
+            )
+            app.state.lila_store = store
+        elif app.state.settings.environment == "production":
+            raise RuntimeError(
+                "Production requires a configured Lila model provider and encrypted persistent storage"
+            )
+        else:
+            app.state.lila_core_service = None
+
         yield
         if app.state.redis is not None:
             await app.state.redis.aclose()
@@ -204,6 +246,12 @@ def create_app(
 
         try:
             return await service.handle(payload, principal_id=user_id)
+        except ModelProviderUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila model provider is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
         except (ModelAdapterContractError, ValidationError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -224,6 +272,11 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         config: Settings = request.app.state.settings
+        if not config.openai_api_key or not config.safety_identifier_hmac_key:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Realtime provider is not configured",
+            )
         if payload.character_id not in config.allowed_character_ids:
             raise HTTPException(status_code=422, detail="Requested character is not available")
         provider_voice_id = VOICE_ID_ALIASES.get(payload.voice_id, payload.voice_id)
