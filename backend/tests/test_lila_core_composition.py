@@ -93,6 +93,8 @@ def test_composition_root_persists_history_across_app_restart(tmp_path):
     database_path = tmp_path / "lila.sqlite3"
     settings = make_settings(database_path)
     provider = ScriptedHttpClient()
+    assert "provider-secret" not in repr(settings)
+    assert KEY.hex() not in repr(settings)
 
     first_app = make_app(settings, provider)
     with TestClient(first_app) as client:
