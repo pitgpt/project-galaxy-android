@@ -561,7 +561,14 @@ def test_lila_history_is_owner_scoped_and_paginates_without_gaps(tmp_path):
         "user-0", "assistant-0"
     ]
     assert third.json()["next_before_sequence"] is None
-    assert other_owner.json()["messages"] == []
+    assert [item["content"] for item in other_owner.json()["messages"]] == [
+        "owner-b-private", "owner-b-answer"
+    ]
+    assert "owner-b-private" not in [
+        item["content"]
+        for page in (first.json(), second.json(), third.json())
+        for item in page["messages"]
+    ]
     assert all(
         item["sequence"] > 0 and item["created_at_epoch_millis"] >= 0
         for page in (first.json(), second.json(), third.json())
