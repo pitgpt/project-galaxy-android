@@ -29,6 +29,17 @@ class ConversationMessage(BaseModel):
     content: str = Field(min_length=1, max_length=12_000)
 
 
+class StoredConversationMessage(BaseModel):
+    """One authenticated, committed message with a stable per-conversation sequence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1)
+    role: ConversationRole
+    content: str = Field(min_length=1, max_length=12_000)
+    created_at_epoch_millis: int = Field(ge=0)
+
+
 class MemorySnippet(BaseModel):
     """A user-scoped memory result kept separate from privileged instructions."""
 
