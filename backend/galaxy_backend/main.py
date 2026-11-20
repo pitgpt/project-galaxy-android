@@ -255,10 +255,12 @@ def create_app(
             ) from exc
 
         try:
+            if idempotency_key is None:
+                return await service.handle(payload, principal_id=user_id)
             return await service.handle(
                 payload,
                 principal_id=user_id,
-                idempotency_key=str(idempotency_key) if idempotency_key is not None else None,
+                idempotency_key=str(idempotency_key),
             )
         except IdempotencyKeyConflict:
             raise HTTPException(
