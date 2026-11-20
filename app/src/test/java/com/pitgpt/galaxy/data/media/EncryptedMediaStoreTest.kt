@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileFilter
 import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
@@ -150,6 +151,90 @@ class EncryptedMediaStoreTest {
             "The reader may consume only the configured limit plus one detection byte",
             1,
             input.available()
+        )
+    }
+
+    @Test
+    fun boundedReadZeroizesScratchAndAccumulatorBuffersAfterSuccess() {
+        val expected = "encrypted-media-buffer".toByteArray()
+        var scratchBuffer: ByteArray? = null
+        var consumed = false
+        val input = object : InputStream() {
+            override fun read(): Int = -1
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                scratchBuffer = buffer
+                if (consumed) return -1
+                consumed = true
+                expected.copyInto(buffer, offset)
+                return expected.size
+            }
+        }
+        val accumulator = ZeroizingByteArrayOutputStream(expected.size)
+
+        val result = EncryptedMediaStore.readBounded(input, expected.size, accumulator)
+
+        assertArrayEquals(expected, result)
+        assertTrue("The accumulator backing array must be zeroized", accumulator.isWiped)
+        assertTrue(
+            "The reusable stream scratch buffer must be zeroized",
+            requireNotNull(scratchBuffer).all { it == 0.toByte() }
+        )
+    }
+
+    @Test
+    fun boundedReadZeroizesScratchAndAccumulatorBuffersAfterOversizeFailure() {
+        val maximumBytes = 32
+        var scratchBuffer: ByteArray? = null
+        val input = object : InputStream() {
+            override fun read(): Int = -1
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                scratchBuffer = buffer
+                repeat(maximumBytes + 1) { index ->
+                    buffer[offset + index] = 0x5a
+                }
+                return maximumBytes + 1
+            }
+        }
+        val accumulator = ZeroizingByteArrayOutputStream(maximumBytes)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            EncryptedMediaStore.readBounded(input, maximumBytes, accumulator)
+        }
+
+        assertTrue("The accumulator must be zeroized after rejection", accumulator.isWiped)
+        assertTrue(
+            "The scratch buffer must be zeroized after rejection",
+            requireNotNull(scratchBuffer).all { it == 0.toByte() }
+        )
+    }
+
+    @Test
+    fun decryptWipesEncodedCiphertextAndTemporaryCryptoBuffersAfterSuccess() {
+        val plaintext = "private decrypted media".toByteArray()
+        store.save("asset_14", "image/png", plaintext)
+        val encoded = File(directory, "asset_14.gcm").readBytes()
+
+        val decrypted = store.decryptEncoded("asset_14", "image/png", encoded)
+
+        assertArrayEquals(plaintext, decrypted)
+        assertTrue("The owned encoded ciphertext buffer must be zeroized", encoded.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun decryptWipesEncodedCiphertextAfterAuthenticationFailure() {
+        store.save("asset_15", "image/png", byteArrayOf(1, 3, 5, 7))
+        val encoded = File(directory, "asset_15.gcm").readBytes()
+        encoded[encoded.lastIndex] = (encoded.last().toInt() xor 0x01).toByte()
+
+        assertThrows(Exception::class.java) {
+            store.decryptEncoded("asset_15", "image/png", encoded)
+        }
+
+        assertTrue(
+            "The owned encoded ciphertext buffer must be zeroized on failure",
+            encoded.all { it == 0.toByte() }
         )
     }
 
