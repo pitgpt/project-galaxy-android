@@ -38,8 +38,9 @@ internal class ZeroizingByteArrayOutputStream(initialSize: Int) : ByteArrayOutpu
         var aliasCopy: ByteArray? = null
         try {
             if (bytes === buf && count.toLong() + length > buf.size) {
-                aliasCopy = bytes.copyOfRange(offset, offset + length)
-                source = aliasCopy
+                val copy = bytes.copyOfRange(offset, offset + length)
+                aliasCopy = copy
+                source = copy
                 sourceOffset = 0
             }
             ensureCapacityFor(length)
