@@ -43,7 +43,10 @@ jobs:
       - name: Prepare non-secret Compose validation environment
         run: |
           cp .env.example .env
-          echo "LILA_STORAGE_ENCRYPTION_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')" >> "$GITHUB_ENV"
+          test_key="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+          echo "::add-mask::$test_key"
+          printf 'LILA_STORAGE_ENCRYPTION_KEY=%s\n' "$test_key" >> "$GITHUB_ENV"
+          unset test_key
 
       - name: Validate Compose configuration and build backend image
         run: |
