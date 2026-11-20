@@ -1,6 +1,7 @@
 package com.pitgpt.galaxy.data.remote
 
 import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -127,6 +128,74 @@ class HttpLilaTurnProviderTest {
         }
         assertTrue(oversizedError.message.orEmpty().contains("допустимый размер"))
         assertTrue(oversized.disconnected)
+    }
+
+    @Test
+    fun loadsAuthenticatedHistoryPagesInChronologicalOrder() = runBlocking {
+        val conversationId = "00000000-0000-4000-8000-000000000301"
+        val responses = listOf(
+            JSONObject()
+                .put("conversation_id", conversationId)
+                .put(
+                    "messages",
+                    JSONArray()
+                        .put(JSONObject().put("sequence", 3).put("role", "user")
+                            .put("content", "third").put("created_at_epoch_millis", 3000))
+                        .put(JSONObject().put("sequence", 4).put("role", "assistant")
+                            .put("content", "fourth").put("created_at_epoch_millis", 4000))
+                )
+                .put("next_before_sequence", 3)
+                .toString(),
+            JSONObject()
+                .put("conversation_id", conversationId)
+                .put(
+                    "messages",
+                    JSONArray()
+                        .put(JSONObject().put("sequence", 1).put("role", "user")
+                            .put("content", "first").put("created_at_epoch_millis", 1000))
+                        .put(JSONObject().put("sequence", 2).put("role", "assistant")
+                            .put("content", "second").put("created_at_epoch_millis", 2000))
+                )
+                .put("next_before_sequence", JSONObject.NULL)
+                .toString()
+        )
+        val connections = mutableListOf<FakeConnection>()
+        val provider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "test-access-token" },
+            connectionFactory = { url ->
+                FakeConnection(url, 200, responses[connections.size]).also(connections::add)
+            }
+        )
+
+        val history = provider.loadAllHistory(conversationId)
+
+        assertEquals(listOf("first", "second", "third", "fourth"), history.map { it.content })
+        assertEquals(listOf(1L, 2L, 3L, 4L), history.map { it.sequence })
+        assertEquals(2, connections.size)
+        assertEquals("GET", connections[0].requestMethod)
+        assertEquals("Bearer test-access-token", connections[0].requestHeaders["Authorization"])
+        assertTrue(connections[0].url.query.orEmpty().contains("limit=20"))
+        assertTrue(connections[1].url.query.orEmpty().contains("before_sequence=3"))
+        assertTrue(connections.all { it.disconnected })
+    }
+
+    @Test
+    fun historyRequiresAnAuthenticatedTokenBeforeOpeningConnection() = runBlocking {
+        var opened = false
+        val provider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            accessTokenProvider = null,
+            connectionFactory = {
+                opened = true
+                FakeConnection(it, 200, "{}")
+            }
+        )
+
+        val error = expectApiError { provider.loadAllHistory("00000000-0000-4000-8000-000000000302") }
+
+        assertEquals(401, error.httpStatus)
+        assertFalse(opened)
     }
 
     @Test
