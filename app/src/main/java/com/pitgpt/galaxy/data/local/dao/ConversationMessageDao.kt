@@ -9,7 +9,7 @@ import com.pitgpt.galaxy.data.local.entity.ConversationMessageEntity
 
 @Dao
 interface ConversationMessageDao {
-    @Query("SELECT * FROM conversation_messages WHERE characterId = :characterId ORDER BY createdAtEpochMillis")
+    @Query("SELECT * FROM conversation_messages WHERE characterId = :characterId ORDER BY createdAtEpochMillis ASC, id ASC")
     suspend fun getForCharacter(characterId: String): List<ConversationMessageEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
