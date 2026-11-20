@@ -32,6 +32,7 @@ from .memory import (
     IdempotencyKeyConflict,
     IdempotentTurnInProgress,
     MemorySnippet,
+    StoredConversationMessage,
 )
 
 
@@ -366,6 +367,86 @@ class SqliteLilaStore:
             except Exception:
                 raise LilaStoreIntegrityError("Stored Lila data failed validation") from None
         return tuple(messages)
+
+    async def load_conversation_page(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        limit: int = 20,
+        before_sequence: int | None = None,
+    ) -> tuple[tuple[StoredConversationMessage, ...], int | None]:
+        """Load one bounded page, oldest first, for one authenticated owner.
+
+        The cursor is exclusive: a subsequent page returns only lower sequence
+        values. Unknown conversations intentionally return an empty page.
+        """
+        if not 1 <= limit <= 20:
+            raise ValueError("history page limit must be between 1 and 20")
+        if before_sequence is not None and before_sequence < 1:
+            raise ValueError("history cursor must be positive")
+        await self.initialize()
+        owner_key = self._owner_key(principal_id)
+        conversation_key = self._resource_key("conversation", conversation_id, 128)
+        return await asyncio.to_thread(
+            self._load_conversation_page_sync,
+            owner_key,
+            conversation_key,
+            limit,
+            before_sequence,
+        )
+
+    def _load_conversation_page_sync(
+        self,
+        owner_key: str,
+        conversation_key: str,
+        limit: int,
+        before_sequence: int | None,
+    ) -> tuple[tuple[StoredConversationMessage, ...], int | None]:
+        connection = self._connect()
+        try:
+            if before_sequence is None:
+                rows = connection.execute(
+                    "SELECT sequence, role, nonce, ciphertext, created_at_ms FROM lila_messages "
+                    "WHERE owner_key=? AND conversation_key=? "
+                    "ORDER BY sequence DESC LIMIT ?",
+                    (owner_key, conversation_key, limit + 1),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT sequence, role, nonce, ciphertext, created_at_ms FROM lila_messages "
+                    "WHERE owner_key=? AND conversation_key=? AND sequence < ? "
+                    "ORDER BY sequence DESC LIMIT ?",
+                    (owner_key, conversation_key, before_sequence, limit + 1),
+                ).fetchall()
+        finally:
+            connection.close()
+
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        messages: list[StoredConversationMessage] = []
+        for row in reversed(page_rows):
+            sequence = int(row["sequence"])
+            role = str(row["role"])
+            plaintext = self._decrypt(
+                row["nonce"],
+                row["ciphertext"],
+                self._aad("message", owner_key, conversation_key, f"{sequence}:{role}"),
+            )
+            try:
+                messages.append(
+                    StoredConversationMessage(
+                        sequence=sequence,
+                        role=role,
+                        content=plaintext.decode("utf-8"),
+                        created_at_epoch_millis=int(row["created_at_ms"]),
+                    )
+                )
+            except Exception:
+                raise LilaStoreIntegrityError("Stored Lila data failed validation") from None
+
+        next_cursor = int(page_rows[-1]["sequence"]) if has_more and page_rows else None
+        return tuple(messages), next_cursor
 
     def _idempotency_material(
         self,
