@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .adapters import ModelAdapter, ModelAdapterContractError
+from .adapters import ModelAdapter, ModelAdapterContractError, ModelProviderRejected
 from .context import ContextAssembler
 from .contracts import CoreTurnRequest, CoreTurnResponse
 from .memory import ConversationHistoryWriter
@@ -76,7 +76,21 @@ class CoreTurnService:
 
         # Once provider execution starts, keep the reservation on any ambiguous
         # failure. A retry must not trigger a second potentially billable call.
-        response = await self._generate_response(context)
+        try:
+            response = await self._generate_response(context)
+        except ModelProviderRejected:
+            # Authentication/model/endpoint rejection is definitive; after the
+            # operator fixes configuration, the same key can safely be retried.
+            try:
+                await self._history_writer.release_idempotent_turn(
+                    principal_id=principal_id,
+                    conversation_id=request.conversation_id,
+                    idempotency_key=idempotency_key,
+                    user_message=request.message,
+                )
+            except Exception:
+                pass
+            raise
         await self._history_writer.complete_idempotent_turn(
             principal_id=principal_id,
             conversation_id=request.conversation_id,

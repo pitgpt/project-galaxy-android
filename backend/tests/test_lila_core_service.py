@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from galaxy_backend.lila_core.context import AssembledContext, ContextAssembler
 from galaxy_backend.lila_core.contracts import CoreTurnRequest, CoreTurnResponse
 from galaxy_backend.lila_core.memory import ConversationMessage, MemorySnippet
+from galaxy_backend.lila_core.adapters import ModelProviderRejected
 from galaxy_backend.lila_core.service import CoreTurnService, ModelAdapterContractError
 
 
@@ -16,6 +17,33 @@ class FakeHistoryReader:
         self.append_error = append_error
         self.calls = []
         self.appended_turns = []
+        self.reservations = set()
+
+    async def reserve_idempotent_turn(
+        self, *, principal_id, conversation_id, idempotency_key, user_message
+    ):
+        key = (principal_id, conversation_id, idempotency_key)
+        if key in self.reservations:
+            raise RuntimeError("duplicate reservation")
+        self.reservations.add(key)
+        return None
+
+    async def complete_idempotent_turn(
+        self, *, principal_id, conversation_id, idempotency_key,
+        user_message, assistant_message, response
+    ):
+        self.reservations.discard((principal_id, conversation_id, idempotency_key))
+        await self.append_turn(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+        )
+
+    async def release_idempotent_turn(
+        self, *, principal_id, conversation_id, idempotency_key, user_message
+    ):
+        self.reservations.discard((principal_id, conversation_id, idempotency_key))
 
     async def load_recent_messages(self, *, principal_id, conversation_id, limit):
         self.calls.append((principal_id, conversation_id, limit))
@@ -190,3 +218,42 @@ async def test_persistence_failure_prevents_uncommitted_response_from_returning(
     assert history.appended_turns == [
         ("user-1", "conversation-1", "Привет", "Ответ Лилы")
     ]
+
+
+
+@pytest.mark.asyncio
+async def test_definitive_provider_rejection_releases_idempotency_reservation():
+    history = FakeHistoryReader()
+    service, _, _, _ = build_service(
+        history=history,
+        adapter=FakeModelAdapter(error=ModelProviderRejected("provider rejected request")),
+    )
+
+    with pytest.raises(ModelProviderRejected):
+        await service.handle(
+            CoreTurnRequest(conversation_id="conversation-1", message="Привет"),
+            principal_id="user-1",
+            idempotency_key="00000000-0000-4000-8000-000000000126",
+        )
+
+    assert history.reservations == set()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_provider_failure_keeps_idempotency_reservation():
+    history = FakeHistoryReader()
+    service, _, _, _ = build_service(
+        history=history,
+        adapter=FakeModelAdapter(error=RuntimeError("provider outcome unknown")),
+    )
+
+    with pytest.raises(RuntimeError):
+        await service.handle(
+            CoreTurnRequest(conversation_id="conversation-1", message="Привет"),
+            principal_id="user-1",
+            idempotency_key="00000000-0000-4000-8000-000000000127",
+        )
+
+    assert history.reservations == {
+        ("user-1", "conversation-1", "00000000-0000-4000-8000-000000000127")
+    }

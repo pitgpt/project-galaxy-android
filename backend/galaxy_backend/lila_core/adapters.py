@@ -12,6 +12,10 @@ class ModelAdapterContractError(RuntimeError):
     """Raised when a provider returns a response outside the Core contract."""
 
 
+class ModelProviderRejected(RuntimeError):
+    """A provider definitively rejected a request before generating a response."""
+
+
 class ModelAdapter(Protocol):
     """Async interface implemented by cloud or local model providers.
 
