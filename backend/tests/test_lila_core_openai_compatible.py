@@ -207,3 +207,53 @@ def test_provider_secret_is_excluded_from_config_and_adapter_repr():
 
     assert "provider-secret" not in repr(config)
     assert "provider-secret" not in repr(adapter)
+
+class TrackedChunkStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
+def test_oversized_chunked_provider_response_is_bounded_and_closed():
+    stream = TrackedChunkStream(
+        [b"x" * (64 * 1024) for _ in range(17)]
+    )
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelAdapterContractError, match="response exceeds the supported size"):
+                await adapter.generate(make_context())
+
+    asyncio.run(scenario())
+    assert stream.closed is True
+
+
+def test_chunked_provider_response_is_decoded_across_chunk_boundaries():
+    raw = json.dumps(
+        {"choices": [{"message": {"content": "Ответ из нескольких частей"}}]},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    stream = TrackedChunkStream([raw[:7], raw[7:19], raw[19:]])
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            return await adapter.generate(make_context())
+
+    response = asyncio.run(scenario())
+    assert response.text == "Ответ из нескольких частей"
+    assert stream.closed is True
