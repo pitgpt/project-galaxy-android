@@ -156,24 +156,32 @@ object GalaxyDatabaseFactory {
                 key.fill(0)
             }
         }
-        val database = Room.databaseBuilder(
-            context,
-            GalaxyDatabase::class.java,
-            DATABASE_NAME
-        )
-            .openHelperFactory(ZeroizingSqlCipherOpenHelperFactory(passphraseProvider))
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
-            .build()
-
-        try {
-            database.openHelper.writableDatabase
-            encryptor.complete(pendingMigration)
-            return database
+        return try {
+            openDatabaseWithMigrationRecovery(
+                buildDatabase = {
+                    Room.databaseBuilder(
+                        context,
+                        GalaxyDatabase::class.java,
+                        DATABASE_NAME
+                    )
+                        .openHelperFactory(ZeroizingSqlCipherOpenHelperFactory(passphraseProvider))
+                        .addMigrations(
+                            MIGRATION_1_2,
+                            MIGRATION_2_3,
+                            MIGRATION_3_4,
+                            MIGRATION_4_5,
+                            MIGRATION_5_6
+                        )
+                        .build()
+                },
+                openDatabase = { database ->
+                    database.openHelper.writableDatabase
+                },
+                completeMigration = { encryptor.complete(pendingMigration) },
+                closeDatabase = { database -> database.close() },
+                rollbackMigration = { encryptor.rollback(pendingMigration) }
+            )
         } catch (failure: Exception) {
-            runCatching { database.close() }.exceptionOrNull()?.let(failure::addSuppressed)
-            runCatching { encryptor.rollback(pendingMigration) }
-                .exceptionOrNull()
-                ?.let(failure::addSuppressed)
             throw IllegalStateException(
                 "Galaxy could not open its encrypted local database. The original data was retained where possible; inspect suppressed recovery errors before retrying.",
                 failure
