@@ -45,7 +45,7 @@ jobs:
           cp .env.example .env
           test_key="$(python -c 'import secrets; print(secrets.token_hex(32))')"
           echo "::add-mask::$test_key"
-          printf '%s\\n' "LILA_STORAGE_ENCRYPTION_KEY=$test_key" >> "$GITHUB_ENV"
+          echo "LILA_STORAGE_ENCRYPTION_KEY=$test_key" >> "$GITHUB_ENV"
           unset test_key
 
       - name: Run backend tests
