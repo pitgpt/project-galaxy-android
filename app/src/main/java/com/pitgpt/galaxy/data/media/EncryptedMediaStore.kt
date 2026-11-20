@@ -17,15 +17,72 @@ internal class ZeroizingByteArrayOutputStream(initialSize: Int) : ByteArrayOutpu
     internal val isWiped: Boolean
         get() = count == 0 && buf.all { it == 0.toByte() }
 
+    internal val backingBufferForTesting: ByteArray
+        get() = buf
+
+    @Synchronized
+    override fun write(value: Int) {
+        ensureCapacityFor(1)
+        buf[count++] = value.toByte()
+    }
+
+    @Synchronized
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        if (offset < 0 || length < 0 || offset > bytes.size - length) {
+            throw IndexOutOfBoundsException("Invalid byte-array range.")
+        }
+        if (length == 0) return
+
+        var source = bytes
+        var sourceOffset = offset
+        var aliasCopy: ByteArray? = null
+        try {
+            if (bytes === buf && count.toLong() + length > buf.size) {
+                aliasCopy = bytes.copyOfRange(offset, offset + length)
+                source = aliasCopy
+                sourceOffset = 0
+            }
+            ensureCapacityFor(length)
+            source.copyInto(buf, count, sourceOffset, sourceOffset + length)
+            count += length
+        } finally {
+            aliasCopy?.fill(0)
+        }
+    }
+
+    @Synchronized
     fun copyAndWipe(): ByteArray = try {
         toByteArray()
     } finally {
         wipe()
     }
 
+    @Synchronized
     fun wipe() {
         buf.fill(0)
-        reset()
+        count = 0
+    }
+
+    @Synchronized
+    override fun reset() {
+        wipe()
+    }
+
+    private fun ensureCapacityFor(additionalBytes: Int) {
+        val requiredCapacity = count.toLong() + additionalBytes
+        if (requiredCapacity > Int.MAX_VALUE) {
+            throw OutOfMemoryError("Encrypted media buffer is too large.")
+        }
+        if (requiredCapacity <= buf.size) return
+
+        val grownCapacity = maxOf(buf.size.toLong() * 2, requiredCapacity)
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
+        val replacement = buf.copyOf(grownCapacity)
+        // ByteArrayOutputStream normally abandons its previous backing array on growth.
+        // Wipe that old array after copying so no stale scratch copy remains in the heap.
+        buf.fill(0)
+        buf = replacement
     }
 }
 
