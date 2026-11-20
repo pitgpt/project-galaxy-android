@@ -2,6 +2,8 @@
 
 Sensitive message/memory content is stored as AES-GCM ciphertext and raw owner,
 conversation, and memory identifiers are replaced by HMAC-derived indexes.
+The retrieval index stores only per-owner HMAC token digests, never plaintext
+terms; it reveals term equality/frequency metadata within one owner's index.
 Roles, sequence numbers, timestamps, and schema metadata remain visible.
 The 32-byte master key is supplied by the application composition root and is
 never persisted by this adapter.
@@ -41,8 +43,12 @@ class SqliteLilaStore:
     This adapter does not make an ephemeral container filesystem durable.
     """
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
     _NONCE_BYTES = 12
+    _MEMORY_BACKFILL_BATCH = 128
+    _MAX_MEMORY_CANDIDATES = 256
+    _MAX_MEMORY_TERMS = 256
+    _MAX_QUERY_TERMS = 64
 
     def __init__(self, database_path: str | Path, encryption_key: bytes) -> None:
         path = Path(database_path)
@@ -143,8 +149,8 @@ class SqliteLilaStore:
                             PRIMARY KEY(owner_key, memory_key)
                         ) WITHOUT ROWID"""
                     )
-                    connection.execute(f"PRAGMA user_version={self._SCHEMA_VERSION}")
-                elif version != self._SCHEMA_VERSION:
+                    version = 1
+                elif version not in {1, self._SCHEMA_VERSION}:
                     raise RuntimeError("Unsupported Lila database schema version")
                 else:
                     row = connection.execute(
@@ -152,12 +158,79 @@ class SqliteLilaStore:
                     ).fetchone()
                     if row is None or not hmac.compare_digest(bytes(row[0]), self._key_check()):
                         raise LilaStoreIntegrityError("Lila storage key does not match the database")
+
+                # Version 2 adds an owner-bound HMAC term index. Existing
+                # encrypted memories are backfilled below in restartable batches.
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS lila_memory_terms (
+                        owner_key TEXT NOT NULL,
+                        memory_key TEXT NOT NULL,
+                        term_key TEXT NOT NULL,
+                        PRIMARY KEY(owner_key, term_key, memory_key),
+                        FOREIGN KEY(owner_key, memory_key)
+                            REFERENCES lila_memories(owner_key, memory_key)
+                            ON DELETE CASCADE
+                    ) WITHOUT ROWID"""
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_lila_memory_terms_owner_memory "
+                    "ON lila_memory_terms(owner_key, memory_key)"
+                )
+                connection.execute(f"PRAGMA user_version={self._SCHEMA_VERSION}")
                 connection.execute("COMMIT")
             except BaseException:
                 connection.execute("ROLLBACK")
                 raise
         finally:
             connection.close()
+
+        self._backfill_memory_terms_sync()
+
+    def _backfill_memory_terms_sync(self) -> None:
+        """Index legacy encrypted memories in small, restartable transactions."""
+        while True:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    rows = connection.execute(
+                        """SELECT m.owner_key, m.memory_key, m.nonce, m.ciphertext
+                        FROM lila_memories AS m
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM lila_memory_terms AS t
+                            WHERE t.owner_key=m.owner_key AND t.memory_key=m.memory_key
+                        )
+                        ORDER BY m.owner_key, m.memory_key
+                        LIMIT ?""",
+                        (self._MEMORY_BACKFILL_BATCH,),
+                    ).fetchall()
+                    if not rows:
+                        connection.execute("COMMIT")
+                        return
+
+                    for row in rows:
+                        owner_key = str(row["owner_key"])
+                        memory_key = str(row["memory_key"])
+                        memory = self._decode_memory(
+                            owner_key, memory_key, row["nonce"], row["ciphertext"]
+                        )
+                        term_keys = self._term_keys(owner_key, memory.content)
+                        indexed_terms = term_keys or ("",)
+                        connection.executemany(
+                            "INSERT OR IGNORE INTO lila_memory_terms(owner_key, memory_key, term_key) "
+                            "VALUES(?, ?, ?)",
+                            ((owner_key, memory_key, term_key) for term_key in indexed_terms),
+                        )
+                    connection.execute("COMMIT")
+                except BaseException:
+                    connection.execute("ROLLBACK")
+                    raise
+            finally:
+                connection.close()
+
+            if len(rows) < self._MEMORY_BACKFILL_BATCH:
+                return
+
 
     def _owner_key(self, principal_id: str) -> str:
         if not isinstance(principal_id, str) or not principal_id.strip() or len(principal_id) > 256:
@@ -185,6 +258,50 @@ class SqliteLilaStore:
             return self._cipher.decrypt(bytes(nonce), bytes(ciphertext), aad)
         except (InvalidTag, ValueError, TypeError):
             raise LilaStoreIntegrityError("Stored Lila data failed authentication") from None
+
+    def _decode_memory(
+        self, owner_key: str, memory_key: str, nonce: bytes, ciphertext: bytes
+    ) -> MemorySnippet:
+        plaintext = self._decrypt(
+            nonce, ciphertext, self._aad("memory", owner_key, memory_key)
+        )
+        try:
+            payload = json.loads(plaintext.decode("utf-8"))
+            return MemorySnippet.model_validate(payload)
+        except Exception:
+            raise LilaStoreIntegrityError("Stored Lila data failed validation") from None
+
+    @staticmethod
+    def _tokens(value: str, limit: int = 256) -> tuple[str, ...]:
+        """Return a stable, bounded set of Unicode word tokens."""
+        seen: set[str] = set()
+        tokens: list[str] = []
+        for match in re.finditer(r"[^\W_]+", value.casefold(), flags=re.UNICODE):
+            token = match.group(0)
+            if token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+            if len(tokens) >= limit:
+                break
+        return tuple(tokens)
+
+    def _term_keys(
+        self, owner_key: str, value: str, limit: int = 256
+    ) -> tuple[str, ...]:
+        """Hash normalized terms with a domain-separated, owner-bound HMAC."""
+        return tuple(sorted(
+            hmac.new(
+                self._index_key,
+                b"memory-term-v1\0"
+                + owner_key.encode("ascii")
+                + b"\0"
+                + token.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            for token in self._tokens(value, limit)
+        ))
+
 
     async def load_recent_messages(self, *, principal_id: str, conversation_id: str, limit: int) -> Sequence[ConversationMessage]:
         if not 0 <= limit <= 100:
@@ -290,12 +407,18 @@ class SqliteLilaStore:
         nonce, ciphertext = self._encrypt(
             payload, self._aad("memory", owner_key, memory_key)
         )
+        term_keys = self._term_keys(owner_key, validated.content)
         await asyncio.to_thread(
-            self._save_memory_sync, owner_key, memory_key, nonce, ciphertext
+            self._save_memory_sync, owner_key, memory_key, nonce, ciphertext, term_keys
         )
 
     def _save_memory_sync(
-        self, owner_key: str, memory_key: str, nonce: bytes, ciphertext: bytes
+        self,
+        owner_key: str,
+        memory_key: str,
+        nonce: bytes,
+        ciphertext: bytes,
+        term_keys: tuple[str, ...],
     ) -> None:
         now = int(time.time() * 1000)
         connection = self._connect()
@@ -308,6 +431,15 @@ class SqliteLilaStore:
                     ON CONFLICT(owner_key, memory_key) DO UPDATE SET
                       nonce=excluded.nonce, ciphertext=excluded.ciphertext, updated_at_ms=excluded.updated_at_ms""",
                     (owner_key, memory_key, nonce, ciphertext, now, now),
+                )
+                connection.execute(
+                    "DELETE FROM lila_memory_terms WHERE owner_key=? AND memory_key=?",
+                    (owner_key, memory_key),
+                )
+                indexed_terms = term_keys or ("",)
+                connection.executemany(
+                    "INSERT INTO lila_memory_terms(owner_key, memory_key, term_key) VALUES(?, ?, ?)",
+                    ((owner_key, memory_key, term_key) for term_key in indexed_terms),
                 )
                 connection.execute("COMMIT")
             except BaseException:
@@ -350,44 +482,90 @@ class SqliteLilaStore:
         owner_key = self._owner_key(principal_id)
         return await asyncio.to_thread(self._search_memories_sync, owner_key, query, limit)
 
-    @staticmethod
-    def _tokens(value: str) -> set[str]:
-        return set(re.findall(r"[^\W_]+", value.casefold(), flags=re.UNICODE))
-
     def _search_memories_sync(
         self, owner_key: str, query: str, limit: int
     ) -> tuple[MemorySnippet, ...]:
+        query_term_keys = self._term_keys(
+            owner_key, query, self._MAX_QUERY_TERMS
+        )
+        query_term_set = set(query_term_keys)
         connection = self._connect()
         try:
-            rows = connection.execute(
-                "SELECT memory_key, nonce, ciphertext, updated_at_ms "
-                "FROM lila_memories WHERE owner_key=?",
-                (owner_key,),
-            ).fetchall()
+            if not query_term_keys:
+                # Preserve empty-query behavior without scanning/decrypting all
+                # memories: only the newest bounded result window is needed.
+                rows = connection.execute(
+                    "SELECT memory_key, nonce, ciphertext, updated_at_ms "
+                    "FROM lila_memories WHERE owner_key=? "
+                    "ORDER BY updated_at_ms DESC, memory_key ASC LIMIT ?",
+                    (owner_key, limit),
+                ).fetchall()
+            else:
+                placeholders = ",".join("?" for _ in query_term_keys)
+                rows = connection.execute(
+                    f"""WITH matches AS (
+                        SELECT owner_key, memory_key, COUNT(*) AS overlap_count
+                        FROM lila_memory_terms
+                        WHERE owner_key=? AND term_key IN ({placeholders})
+                        GROUP BY owner_key, memory_key
+                    ),
+                    candidates AS (
+                        SELECT
+                            m.memory_key,
+                            m.nonce,
+                            m.ciphertext,
+                            m.updated_at_ms,
+                            matches.overlap_count,
+                            (
+                                SELECT COUNT(*)
+                                FROM lila_memory_terms AS all_terms
+                                WHERE all_terms.owner_key=m.owner_key
+                                  AND all_terms.memory_key=m.memory_key
+                                  AND all_terms.term_key <> ''
+                            ) AS term_count
+                        FROM matches
+                        JOIN lila_memories AS m
+                          ON m.owner_key=matches.owner_key
+                         AND m.memory_key=matches.memory_key
+                    )
+                    SELECT memory_key, nonce, ciphertext, updated_at_ms,
+                           overlap_count, term_count
+                    FROM candidates
+                    ORDER BY
+                        (1.0 * overlap_count) /
+                            (? + term_count - overlap_count) DESC,
+                        updated_at_ms DESC,
+                        memory_key ASC
+                    LIMIT ?""",
+                    (
+                        owner_key,
+                        *query_term_keys,
+                        len(query_term_keys),
+                        self._MAX_MEMORY_CANDIDATES,
+                    ),
+                ).fetchall()
         finally:
             connection.close()
-        query_tokens = self._tokens(query)
+
         ranked: list[tuple[float, int, MemorySnippet]] = []
         for row in rows:
             memory_key = str(row["memory_key"])
-            plaintext = self._decrypt(
-                row["nonce"],
-                row["ciphertext"],
-                self._aad("memory", owner_key, memory_key),
+            memory = self._decode_memory(
+                owner_key, memory_key, row["nonce"], row["ciphertext"]
             )
-            try:
-                payload = json.loads(plaintext.decode("utf-8"))
-                memory = MemorySnippet.model_validate(payload)
-            except Exception:
-                raise LilaStoreIntegrityError("Stored Lila data failed validation") from None
-            memory_tokens = self._tokens(memory.content)
-            if query_tokens:
-                overlap = len(query_tokens & memory_tokens)
+            if query_term_keys:
+                # Recompute against authenticated plaintext so a stale or
+                # modified auxiliary index cannot create false-positive matches.
+                memory_term_set = set(
+                    self._term_keys(owner_key, memory.content, self._MAX_MEMORY_TERMS)
+                )
+                overlap = len(query_term_set & memory_term_set)
                 if overlap == 0:
                     continue
-                score = overlap / len(query_tokens | memory_tokens)
+                score = overlap / len(query_term_set | memory_term_set)
             else:
                 score = 0.0
             ranked.append((score, int(row["updated_at_ms"]), memory))
+
         ranked.sort(key=lambda item: (-item[0], -item[1], item[2].memory_id))
         return tuple(item[2] for item in ranked[:limit])
