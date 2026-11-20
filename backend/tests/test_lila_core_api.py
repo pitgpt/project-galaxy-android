@@ -122,13 +122,14 @@ def build_service(*, adapter=None):
     return service, history, memories, model
 
 
-def make_client(service=None, turn_limiter=None):
+def make_client(service=None, turn_limiter=None, history_reader=None):
     app = create_app(
         settings=make_settings(),
         http_client=FakeHttpClient(),
         authenticator=FakeAuthenticator(),
         lila_core_service=service,
         lila_turn_rate_limiter=turn_limiter,
+        lila_history_reader=history_reader,
     )
     return TestClient(app)
 
@@ -487,3 +488,98 @@ def test_invalid_idempotency_header_is_rejected_before_model_execution():
         )
     assert response.status_code == 422
     assert adapter.contexts == []
+
+
+
+def test_lila_history_requires_bearer_token(tmp_path):
+    store = SqliteLilaStore(tmp_path / "lila.sqlite3", STORE_KEY)
+    asyncio.run(store.append_turn(
+        principal_id="user-a",
+        conversation_id="conversation-1",
+        user_message="private history",
+        assistant_message="private answer",
+    ))
+
+    with make_client(history_reader=store) as client:
+        response = client.get(
+            "/v1/lila/conversations/conversation-1/messages"
+        )
+
+    assert response.status_code == 401
+
+
+def test_lila_history_is_owner_scoped_and_paginates_without_gaps(tmp_path):
+    store = SqliteLilaStore(tmp_path / "lila.sqlite3", STORE_KEY)
+    for index in range(3):
+        asyncio.run(store.append_turn(
+            principal_id="user-a",
+            conversation_id="shared-conversation",
+            user_message=f"user-{index}",
+            assistant_message=f"assistant-{index}",
+        ))
+    asyncio.run(store.append_turn(
+        principal_id="user-b",
+        conversation_id="shared-conversation",
+        user_message="owner-b-private",
+        assistant_message="owner-b-answer",
+    ))
+
+    with make_client(history_reader=store) as client:
+        headers_a = {"Authorization": "Bearer user-a-token"}
+        headers_b = {"Authorization": "Bearer user-b-token"}
+        first = client.get(
+            "/v1/lila/conversations/shared-conversation/messages",
+            headers=headers_a,
+            params={"limit": 2},
+        )
+        second = client.get(
+            "/v1/lila/conversations/shared-conversation/messages",
+            headers=headers_a,
+            params={"limit": 2, "before_sequence": first.json()["next_before_sequence"]},
+        )
+        third = client.get(
+            "/v1/lila/conversations/shared-conversation/messages",
+            headers=headers_a,
+            params={"limit": 2, "before_sequence": second.json()["next_before_sequence"]},
+        )
+        other_owner = client.get(
+            "/v1/lila/conversations/shared-conversation/messages",
+            headers=headers_b,
+            params={"limit": 20},
+        )
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert [item["content"] for item in first.json()["messages"]] == [
+        "user-2", "assistant-2"
+    ]
+    assert first.json()["next_before_sequence"] == 5
+    assert [item["content"] for item in second.json()["messages"]] == [
+        "user-1", "assistant-1"
+    ]
+    assert second.json()["next_before_sequence"] == 3
+    assert [item["content"] for item in third.json()["messages"]] == [
+        "user-0", "assistant-0"
+    ]
+    assert third.json()["next_before_sequence"] is None
+    assert other_owner.json()["messages"] == []
+    assert all(
+        item["sequence"] > 0 and item["created_at_epoch_millis"] >= 0
+        for page in (first.json(), second.json(), third.json())
+        for item in page["messages"]
+    )
+
+
+def test_lila_history_fails_closed_without_history_reader_and_bounds_page_size():
+    with make_client() as client:
+        unavailable = client.get(
+            "/v1/lila/conversations/conversation-1/messages",
+            headers={"Authorization": "Bearer user-a-token"},
+        )
+        oversized = client.get(
+            "/v1/lila/conversations/conversation-1/messages",
+            headers={"Authorization": "Bearer user-a-token"},
+            params={"limit": 21},
+        )
+
+    assert unavailable.status_code == 503
+    assert oversized.status_code == 422
