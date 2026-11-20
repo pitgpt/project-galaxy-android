@@ -273,7 +273,7 @@ def create_app(
             ) from None
         return ConversationHistoryPage(
             conversation_id=conversation_id,
-            messages=messages,
+            messages=[message.model_dump() for message in messages],
             next_before_sequence=next_cursor,
         )
 
