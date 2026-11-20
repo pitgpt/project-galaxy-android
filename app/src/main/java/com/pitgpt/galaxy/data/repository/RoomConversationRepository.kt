@@ -21,6 +21,14 @@ class RoomConversationRepository(
         dao.insertTurn(userMessage.toEntity(), assistantMessage.toEntity())
     }
 
+    override suspend fun replaceForCharacter(
+        characterId: String,
+        messages: List<ConversationMessage>
+    ) {
+        require(messages.all { it.characterId == characterId })
+        dao.replaceForCharacter(characterId, messages.map { it.toEntity() })
+    }
+
     override suspend fun clearForCharacter(characterId: String) {
         dao.deleteForCharacter(characterId)
     }
