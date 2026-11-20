@@ -1148,7 +1148,7 @@ private fun mergeRemoteHistory(
         )
     }
     return (remoteMessages + unmatchedLocal)
-        .sortedWith(compareBy<ConversationMessage> { it.createdAtEpochMillis }.thenBy { it.id })
+        .sortedBy { it.createdAtEpochMillis }
 }
 
 
