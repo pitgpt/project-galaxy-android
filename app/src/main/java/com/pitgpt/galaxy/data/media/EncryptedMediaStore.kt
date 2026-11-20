@@ -1,18 +1,33 @@
 package com.pitgpt.galaxy.data.media
 
 import android.content.Context
-import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
-import java.io.DataInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
+
+internal class ZeroizingByteArrayOutputStream(initialSize: Int) : ByteArrayOutputStream(initialSize) {
+    internal val isWiped: Boolean
+        get() = count == 0 && buf.all { it == 0.toByte() }
+
+    fun copyAndWipe(): ByteArray = try {
+        toByteArray()
+    } finally {
+        wipe()
+    }
+
+    fun wipe() {
+        buf.fill(0)
+        reset()
+    }
+}
 
 data class EncryptedMediaAsset(
     val assetId: String,
@@ -79,25 +94,42 @@ class EncryptedMediaStore private constructor(
 
         // Never generate a replacement key when committed ciphertext already exists.
         val key = if (hasStoredAssets()) keyProvider.getExistingKey() else keyProvider.getOrCreateKey()
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, key)
-        require(cipher.iv.size == IV_BYTES) { "The media encryption provider returned an invalid IV." }
-        cipher.updateAAD(associatedData(assetId, mimeType))
-        val encrypted = cipher.doFinal(plaintext)
-
-        val temporary = File.createTempFile(TEMP_PREFIX, ".tmp", directory)
+        val aad = associatedData(assetId, mimeType)
+        var iv: ByteArray? = null
+        var encrypted: ByteArray? = null
+        var temporary: File? = null
         try {
-            FileOutputStream(temporary).use { output ->
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val generatedIv = cipher.iv
+            iv = generatedIv
+            require(generatedIv.size == IV_BYTES) {
+                "The media encryption provider returned an invalid IV."
+            }
+            cipher.updateAAD(aad)
+            val encryptedBytes = cipher.doFinal(plaintext)
+            encrypted = encryptedBytes
+
+            val temporaryFile = File.createTempFile(TEMP_PREFIX, ".tmp", directory)
+            temporary = temporaryFile
+            FileOutputStream(temporaryFile).use { output ->
                 output.write(MAGIC)
                 output.write(FORMAT_VERSION)
-                output.write(cipher.iv)
-                output.write(encrypted)
+                output.write(generatedIv)
+                output.write(encryptedBytes)
                 output.fd.sync()
             }
             check(!destination.exists()) { "A media asset with this ID already exists." }
-            atomicPromote(temporary, destination)
+            atomicPromote(temporaryFile, destination)
         } finally {
-            if (temporary.exists()) temporary.delete()
+            try {
+                temporary?.let { if (it.exists()) it.delete() }
+            } finally {
+                // These are owned temporary copies; the caller-owned plaintext is never wiped.
+                iv?.fill(0)
+                encrypted?.fill(0)
+                aad.fill(0)
+            }
         }
 
         return EncryptedMediaAsset(
@@ -123,29 +155,73 @@ class EncryptedMediaStore private constructor(
 
         // The length check above is only an early rejection. The file may change between
         // length() and open(), so the stream itself must enforce the same hard upper bound.
-        val encoded = FileInputStream(source).use { readBounded(it, maximumFileBytes) }
-        val input = DataInputStream(ByteArrayInputStream(encoded))
-        val magic = ByteArray(MAGIC.size)
-        input.readFully(magic)
-        require(magic.contentEquals(MAGIC)) { "Encrypted media header is invalid." }
-        require(input.readUnsignedByte() == FORMAT_VERSION) { "Encrypted media version is unsupported." }
-        val iv = ByteArray(IV_BYTES)
-        input.readFully(iv)
-        val ciphertext = ByteArray(input.available())
-        input.readFully(ciphertext)
-        require(ciphertext.size > GCM_TAG_BYTES) { "Encrypted media payload is truncated." }
-
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(
-            Cipher.DECRYPT_MODE,
-            keyProvider.getExistingKey(),
-            GCMParameterSpec(TAG_BITS, iv)
-        )
-        cipher.updateAAD(associatedData(assetId, mimeType))
-        return cipher.doFinal(ciphertext).also {
-            require(it.isNotEmpty() && it.size <= maxAssetBytes) {
-                "Decrypted media content has an invalid size."
+        // Keep ownership explicit so the encoded copy is wiped even if close() fails.
+        var encoded: ByteArray? = null
+        try {
+            FileInputStream(source).use { input ->
+                encoded = readBounded(input, maximumFileBytes)
             }
+            return decryptEncoded(assetId, mimeType, requireNotNull(encoded))
+        } finally {
+            encoded?.fill(0)
+        }
+    }
+
+    /**
+     * Decrypts an owned encoded-file buffer and wipes it, along with temporary IV/AAD copies,
+     * on both success and failure. The returned plaintext is transferred to the caller.
+     */
+    internal fun decryptEncoded(assetId: String, mimeType: String, encoded: ByteArray): ByteArray {
+        var iv: ByteArray? = null
+        var aad: ByteArray? = null
+        try {
+            validateAssetId(assetId)
+            validateMimeType(mimeType)
+            val maximumFileBytes = HEADER_BYTES + maxAssetBytes + GCM_TAG_BYTES
+            require(encoded.size in (HEADER_BYTES + GCM_TAG_BYTES + 1)..maximumFileBytes) {
+                "Encrypted media file has an invalid size."
+            }
+
+            val input = ByteBuffer.wrap(encoded)
+            MAGIC.forEach { expected ->
+                require(input.get() == expected) { "Encrypted media header is invalid." }
+            }
+            require((input.get().toInt() and 0xff) == FORMAT_VERSION) {
+                "Encrypted media version is unsupported."
+            }
+
+            val ivBytes = ByteArray(IV_BYTES)
+            iv = ivBytes
+            input.get(ivBytes)
+            val ciphertextOffset = input.position()
+            val ciphertextLength = input.remaining()
+            require(ciphertextLength > GCM_TAG_BYTES) {
+                "Encrypted media payload is truncated."
+            }
+
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                keyProvider.getExistingKey(),
+                GCMParameterSpec(TAG_BITS, ivBytes)
+            )
+            val associatedDataBytes = associatedData(assetId, mimeType)
+            aad = associatedDataBytes
+            cipher.updateAAD(associatedDataBytes)
+            return cipher.doFinal(encoded, ciphertextOffset, ciphertextLength).also { plaintext ->
+                try {
+                    require(plaintext.isNotEmpty() && plaintext.size <= maxAssetBytes) {
+                        "Decrypted media content has an invalid size."
+                    }
+                } catch (failure: Throwable) {
+                    plaintext.fill(0)
+                    throw failure
+                }
+            }
+        } finally {
+            encoded.fill(0)
+            iv?.fill(0)
+            aad?.fill(0)
         }
     }
 
@@ -215,33 +291,47 @@ class EncryptedMediaStore private constructor(
          */
         internal fun readBounded(input: InputStream, maxBytes: Int): ByteArray {
             require(maxBytes in 0 until Int.MAX_VALUE) { "The media read limit is invalid." }
-            val output = ByteArrayOutputStream(minOf(maxBytes, READ_BUFFER_BYTES))
+            val output = ZeroizingByteArrayOutputStream(minOf(maxBytes, READ_BUFFER_BYTES))
+            return readBounded(input, maxBytes, output)
+        }
+
+        internal fun readBounded(
+            input: InputStream,
+            maxBytes: Int,
+            output: ZeroizingByteArrayOutputStream
+        ): ByteArray {
+            require(maxBytes in 0 until Int.MAX_VALUE) { "The media read limit is invalid." }
             val buffer = ByteArray(READ_BUFFER_BYTES)
             var totalBytes = 0
 
-            while (true) {
-                val remaining = maxBytes - totalBytes
-                val count = input.read(buffer, 0, minOf(buffer.size, remaining + 1))
-                if (count < 0) break
-                if (count == 0) {
-                    val nextByte = input.read()
-                    if (nextByte < 0) break
-                    require(totalBytes < maxBytes) {
+            try {
+                while (true) {
+                    val remaining = maxBytes - totalBytes
+                    val count = input.read(buffer, 0, minOf(buffer.size, remaining + 1))
+                    if (count < 0) break
+                    if (count == 0) {
+                        val nextByte = input.read()
+                        if (nextByte < 0) break
+                        require(totalBytes < maxBytes) {
+                            "Encrypted media file exceeds the configured size limit."
+                        }
+                        output.write(nextByte)
+                        totalBytes++
+                        continue
+                    }
+
+                    require(count <= remaining) {
                         "Encrypted media file exceeds the configured size limit."
                     }
-                    output.write(nextByte)
-                    totalBytes++
-                    continue
+                    output.write(buffer, 0, count)
+                    totalBytes += count
                 }
 
-                require(count <= remaining) {
-                    "Encrypted media file exceeds the configured size limit."
-                }
-                output.write(buffer, 0, count)
-                totalBytes += count
+                return output.copyAndWipe()
+            } finally {
+                buffer.fill(0)
+                output.wipe()
             }
-
-            return output.toByteArray()
         }
 
         /** Uses filesDir/galaxy_media, which is explicitly excluded from Android backup. */
