@@ -17,7 +17,7 @@ import httpx
 
 from .context import AssembledContext
 from .contracts import CoreTurnResponse
-from .service import ModelAdapterContractError
+from .adapters import ModelAdapterContractError
 
 
 DEFAULT_LILA_SYSTEM_PROMPT = (
@@ -107,7 +107,7 @@ class OpenAICompatibleModelAdapter:
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}(provider_id={self._config.provider_id!r}, "
-            f"model_id={self._config.model_id!r}, endpoint={self._endpoint!r})"
+            f"model_id={self._config.model_id!r})"
         )
 
     def _messages(self, context: AssembledContext) -> list[dict[str, str]]:
