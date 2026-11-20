@@ -24,6 +24,13 @@ data class LilaTurnResult(
             .ifBlank { "модель не указана" }
 }
 
+data class LilaHistoryMessage(
+    val sequence: Long,
+    val role: String,
+    val content: String,
+    val createdAtEpochMillis: Long
+)
+
 /**
  * Authenticated Galaxy -> Lila Core text-turn client.
  *
@@ -154,6 +161,190 @@ class HttpLilaTurnProvider(
             }
         }
 
+    /**
+     * Downloads the complete owner-scoped history using bounded cursor pages.
+     * No local cache mutation happens here; callers commit only after all pages
+     * have been validated and assembled.
+     */
+    suspend fun loadAllHistory(conversationId: String): List<LilaHistoryMessage> =
+        withContext(Dispatchers.IO) {
+            if (runCatching { UUID.fromString(conversationId) }.isFailure) {
+                throw GalaxyApiException(null, "Идентификатор диалога Lila некорректен.")
+            }
+            configurationError?.let { error -> throw GalaxyApiException(null, error) }
+            if (!isConfigured) {
+                throw GalaxyApiException(null, "Сервер Lila не настроен в этой сборке Galaxy.")
+            }
+            val token = try {
+                accessTokenProvider?.accessToken()?.takeIf { it.isNotBlank() }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                throw GalaxyApiException(null, "Не удалось проверить авторизацию Galaxy.")
+            }
+            if (token == null) {
+                throw GalaxyApiException(401, "Войди в аккаунт Galaxy, чтобы загрузить историю Лилы.")
+            }
+
+            val messages = mutableListOf<LilaHistoryMessage>()
+            val seenSequences = mutableSetOf<Long>()
+            val seenCursors = mutableSetOf<Long>()
+            var cursor: Long? = null
+            var previousPageOldest: Long? = null
+            var totalBytes = 0L
+            var pageCount = 0
+
+            while (true) {
+                if (pageCount >= MAX_HISTORY_PAGES) {
+                    throw GalaxyApiException(null, "История диалога слишком велика для безопасной синхронизации.")
+                }
+                val page = loadHistoryPageBlocking(conversationId, token, cursor)
+                pageCount++
+                if (page.messages.isEmpty()) {
+                    if (page.nextBeforeSequence != null || cursor != null) {
+                        throw GalaxyApiException(null, "Сервис Lila вернул неполную историю диалога.")
+                    }
+                    break
+                }
+
+                val oldest = page.messages.first().sequence
+                val newest = page.messages.last().sequence
+                if (previousPageOldest != null && newest >= previousPageOldest) {
+                    throw GalaxyApiException(null, "Порядок страниц истории Lila некорректен.")
+                }
+                if (page.nextBeforeSequence != null && page.nextBeforeSequence != oldest) {
+                    throw GalaxyApiException(null, "Курсор истории Lila некорректен.")
+                }
+
+                for (message in page.messages) {
+                    if (!seenSequences.add(message.sequence)) {
+                        throw GalaxyApiException(null, "История Lila содержит повторяющиеся сообщения.")
+                    }
+                    val encoded = message.content.toByteArray(Charsets.UTF_8)
+                    try {
+                        totalBytes += encoded.size
+                    } finally {
+                        encoded.fill(0)
+                    }
+                    if (messages.size + page.messages.size > MAX_HISTORY_MESSAGES ||
+                        totalBytes > MAX_HISTORY_BYTES
+                    ) {
+                        throw GalaxyApiException(null, "История диалога слишком велика для безопасной синхронизации.")
+                    }
+                }
+
+                messages.addAll(page.messages)
+                previousPageOldest = oldest
+                val next = page.nextBeforeSequence ?: break
+                if (!seenCursors.add(next)) {
+                    throw GalaxyApiException(null, "Сервис Lila вернул повторяющийся курсор истории.")
+                }
+                cursor = next
+            }
+
+            messages.sortedBy { it.sequence }
+        }
+
+    private fun loadHistoryPageBlocking(
+        conversationId: String,
+        token: String,
+        beforeSequence: Long?
+    ): HistoryPage {
+        val query = buildString {
+            append("limit=")
+            append(HISTORY_PAGE_SIZE)
+            if (beforeSequence != null) {
+                append("&before_sequence=")
+                append(beforeSequence)
+            }
+        }
+        val connection = try {
+            connectionFactory(
+                URL("$normalizedBaseUrl/v1/lila/conversations/$conversationId/messages?$query")
+            )
+        } catch (exception: Exception) {
+            throw GalaxyApiException(null, "Не удалось подключиться к сервису Galaxy.")
+        }
+
+        try {
+            connection.requestMethod = "GET"
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = connectTimeoutMillis
+            connection.readTimeout = readTimeoutMillis
+            connection.useCaches = false
+            connection.doInput = true
+            connection.doOutput = false
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Authorization", "Bearer $token")
+
+            val status = connection.responseCode
+            if (status !in 200..299) {
+                throw GalaxyApiException(status, safeMessageFor(status))
+            }
+            val payload = try {
+                JSONObject(readBounded(connection.inputStream, MAX_HISTORY_PAGE_BYTES))
+            } catch (exception: GalaxyApiException) {
+                throw exception
+            } catch (exception: Exception) {
+                throw GalaxyApiException(null, "Сервис Lila вернул некорректную историю.")
+            }
+            if (payload.optString("conversation_id", "") != conversationId) {
+                throw GalaxyApiException(null, "Сервис Lila вернул историю другого диалога.")
+            }
+            val array = payload.optJSONArray("messages")
+                ?: throw GalaxyApiException(null, "Сервис Lila вернул некорректную историю.")
+            if (array.length() > HISTORY_PAGE_SIZE) {
+                throw GalaxyApiException(null, "Страница истории Lila превышает допустимый размер.")
+            }
+
+            val pageMessages = mutableListOf<LilaHistoryMessage>()
+            var previousSequence = 0L
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index)
+                    ?: throw GalaxyApiException(null, "Сервис Lila вернул некорректную историю.")
+                val sequence = item.optLong("sequence", -1L)
+                val role = item.optString("role", "")
+                val content = item.optString("content", "")
+                val createdAt = item.optLong("created_at_epoch_millis", -1L)
+                if (sequence <= previousSequence ||
+                    role !in setOf("user", "assistant") ||
+                    content.isBlank() || content.length > MAX_ASSISTANT_TEXT_CHARS ||
+                    createdAt < 0
+                ) {
+                    throw GalaxyApiException(null, "Сервис Lila вернул некорректную историю.")
+                }
+                pageMessages += LilaHistoryMessage(sequence, role, content, createdAt)
+                previousSequence = sequence
+            }
+
+            val nextCursor = if (payload.isNull("next_before_sequence")) {
+                null
+            } else {
+                payload.optLong("next_before_sequence", -1L).takeIf { it > 0 }
+                    ?: throw GalaxyApiException(null, "Сервис Lila вернул некорректный курсор истории.")
+            }
+            if (nextCursor != null &&
+                (pageMessages.isEmpty() || nextCursor != pageMessages.first().sequence)
+            ) {
+                throw GalaxyApiException(null, "Сервис Lila вернул некорректный курсор истории.")
+            }
+            return HistoryPage(pageMessages, nextCursor)
+        } catch (exception: GalaxyApiException) {
+            throw exception
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            throw GalaxyApiException(null, "Не удалось загрузить историю Lila Core.")
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private data class HistoryPage(
+        val messages: List<LilaHistoryMessage>,
+        val nextBeforeSequence: Long?
+    )
+
     private fun optionalString(payload: JSONObject, key: String, maxLength: Int): String? {
         if (payload.isNull(key)) return null
         val value = payload.optString(key).takeIf { it.isNotBlank() && it != "null" } ?: return null
@@ -163,7 +354,7 @@ class HttpLilaTurnProvider(
         return value
     }
 
-    private fun readBounded(input: InputStream): String {
+    private fun readBounded(input: InputStream, maxBytes: Int = MAX_RESPONSE_BYTES): String {
         val output = ZeroizingByteArrayOutputStream()
         val scratch = ByteArray(8 * 1024)
         try {
@@ -171,7 +362,7 @@ class HttpLilaTurnProvider(
                 while (true) {
                     val count = stream.read(scratch)
                     if (count < 0) break
-                    if (output.size() + count > MAX_RESPONSE_BYTES) {
+                    if (output.size() + count > maxBytes) {
                         throw GalaxyApiException(null, "Ответ Lila превышает допустимый размер.")
                     }
                     output.write(scratch, 0, count)
@@ -208,6 +399,11 @@ class HttpLilaTurnProvider(
 
     private companion object {
         const val MAX_RESPONSE_BYTES = 128 * 1024
+        const val MAX_HISTORY_PAGE_BYTES = 1024 * 1024
+        const val HISTORY_PAGE_SIZE = 20
+        const val MAX_HISTORY_PAGES = 25
+        const val MAX_HISTORY_MESSAGES = 500
+        const val MAX_HISTORY_BYTES = 4 * 1024 * 1024
         const val MAX_ASSISTANT_TEXT_CHARS = 12_000
     }
 }
