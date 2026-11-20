@@ -15,10 +15,23 @@ interface ConversationMessageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: ConversationMessageEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(entities: List<ConversationMessageEntity>)
+
     @Transaction
     suspend fun insertTurn(userMessage: ConversationMessageEntity, assistantMessage: ConversationMessageEntity) {
         insert(userMessage)
         insert(assistantMessage)
+    }
+
+    @Transaction
+    suspend fun replaceForCharacter(
+        characterId: String,
+        entities: List<ConversationMessageEntity>
+    ) {
+        require(entities.all { it.characterId == characterId })
+        deleteForCharacter(characterId)
+        if (entities.isNotEmpty()) insertAll(entities)
     }
 
     @Query("DELETE FROM conversation_messages WHERE characterId = :characterId")
