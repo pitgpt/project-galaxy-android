@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .lila_core.contracts import CoreTurnRequest, CoreTurnResponse
 from .lila_core.context import ContextAssembler
 from .lila_core.openai_compatible import (
+    ModelProviderConfigurationError,
     ModelProviderUnavailable,
     OpenAICompatibleConfig,
     OpenAICompatibleModelAdapter,
@@ -252,6 +253,11 @@ def create_app(
 
         try:
             return await service.handle(payload, principal_id=user_id)
+        except ModelProviderConfigurationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=exc.public_detail,
+            ) from None
         except ModelProviderUnavailable:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
