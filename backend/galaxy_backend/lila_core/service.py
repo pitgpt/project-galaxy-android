@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from .adapters import ModelAdapter
+from .adapters import ModelAdapter, ModelAdapterContractError
 from .context import ContextAssembler
 from .contracts import CoreTurnRequest, CoreTurnResponse
 from .memory import ConversationHistoryWriter
-
-
-class ModelAdapterContractError(RuntimeError):
-    """Raised when a provider returns a response for a different conversation."""
 
 
 class CoreTurnService:
