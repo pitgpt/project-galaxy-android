@@ -128,19 +128,28 @@ class HttpLilaTurnProviderTest {
     }
 
     @Test
-    fun rejectsRemoteCleartextAndMarksPlaceholderEndpointUnconfigured() {
-        try {
-            HttpLilaTurnProvider("http://api.example.test", GalaxyAccessTokenProvider { "token" })
-            throw AssertionError("Expected remote cleartext endpoint to be rejected")
-        } catch (expected: IllegalArgumentException) {
-            assertFalse(expected.message.orEmpty().contains("token"))
-        }
+    fun rejectsRemoteCleartextAndMarksPlaceholderEndpointUnconfigured() = runBlocking {
+        val insecure = HttpLilaTurnProvider(
+            "http://api.example.test",
+            GalaxyAccessTokenProvider { "token" }
+        )
+        assertFalse(insecure.isConfigured)
+        val insecureError = expectApiError { insecure.sendTurn("conversation-1", "hello") }
+        assertFalse(insecureError.message.orEmpty().contains("token"))
 
         val placeholder = HttpLilaTurnProvider(
             "https://api.galaxy.invalid",
             GalaxyAccessTokenProvider { "token" }
         )
         assertFalse(placeholder.isConfigured)
+
+        val malformed = HttpLilaTurnProvider(
+            "not-a-url",
+            GalaxyAccessTokenProvider { "token" }
+        )
+        assertFalse(malformed.isConfigured)
+        val malformedError = expectApiError { malformed.sendTurn("conversation-1", "hello") }
+        assertTrue(malformedError.message.orEmpty().contains("invalid"))
     }
 
     private suspend fun expectApiError(block: suspend () -> Unit): GalaxyApiException {

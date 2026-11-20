@@ -310,6 +310,7 @@ fun GalaxyHome() {
             avatarId = profile?.avatarId,
             avatarImageUri = profile?.avatarImageUri,
             isLoading = isLoading,
+            aiConfigured = app.lilaTurnProvider.isConfigured,
             loadError = loadError,
             onRetry = { reloadKey += 1 },
             onOpenChat = { showChat = true },
@@ -325,6 +326,7 @@ private fun HomeScreen(
     avatarId: String?,
     avatarImageUri: String?,
     isLoading: Boolean,
+    aiConfigured: Boolean,
     loadError: String?,
     onRetry: () -> Unit,
     onOpenChat: () -> Unit,
@@ -354,8 +356,13 @@ private fun HomeScreen(
                             .border(1.dp, Color(0x5546D9AC), RoundedCornerShape(50))
                             .padding(horizontal = 12.dp, vertical = 7.dp)
                     ) {
-                        Text("●  LOCAL PREVIEW", color = Color(0xFF75E2BD),
-                            fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Text(
+                            if (aiConfigured) "●  BACKEND CONFIGURED" else "●  LOCAL PREVIEW",
+                            color = Color(0xFF75E2BD),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
                     }
                     Spacer(Modifier.height(5.dp))
                     Text("v${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}",
@@ -399,7 +406,12 @@ private fun HomeScreen(
                     Text(loadError, color = Color(0xFFFF9B9B), fontSize = 11.sp)
                     TextButton(onClick = onRetry) { Text("ПОВТОРИТЬ", color = Ice) }
                 }
-                StatusLine("AI и голос", "Подключение на следующих этапах", Color(0xFFE9BD70))
+                StatusLine(
+                    "Lila Core",
+                    if (aiConfigured) "Backend настроен" else "Локальный режим; backend не настроен",
+                    if (aiConfigured) Color(0xFF65DDB2) else Color(0xFFE9BD70)
+                )
+                StatusLine("Голос", "После стабильного чата и изображений", Color(0xFFE9BD70))
             }
             Spacer(Modifier.height(18.dp))
             Button(
@@ -524,7 +536,11 @@ private fun ConversationScreen(
                         fontWeight = FontWeight.Light, textAlign = TextAlign.Center)
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "Здесь можно записывать сообщения. Они сохраняются на телефоне и останутся после перезапуска приложения. Ответы AI появятся после подключения модели.",
+                        if (aiConfigured) {
+                            "Отправь сообщение — Galaxy передаст его в Lila Core. Ответ модели сохранится вместе с локальной историей."
+                        } else {
+                            "Здесь можно записывать сообщения. Они сохраняются на телефоне и останутся после перезапуска приложения. Ответы AI появятся после настройки backend."
+                        },
                         color = Muted, fontSize = 14.sp, lineHeight = 21.sp,
                         textAlign = TextAlign.Center
                     )

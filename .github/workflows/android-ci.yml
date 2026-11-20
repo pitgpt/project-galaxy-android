@@ -40,8 +40,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Prepare non-secret Compose validation environment
+        run: |
+          cp .env.example .env
+          test_key="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+          echo "::add-mask::$test_key"
+          printf 'LILA_STORAGE_ENCRYPTION_KEY=%s\\n' "$test_key" >> "$GITHUB_ENV"
+          unset test_key
+
       - name: Run backend tests
         run: pytest -q
+
+      - name: Remove temporary Compose environment
+        if: always()
+        run: rm -f .env
 
   build:
     needs: [test, backend-test]

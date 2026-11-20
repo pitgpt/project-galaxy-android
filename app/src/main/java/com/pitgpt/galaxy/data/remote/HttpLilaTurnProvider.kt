@@ -39,32 +39,24 @@ class HttpLilaTurnProvider(
     }
 ) {
     private val normalizedBaseUrl = baseUrl.trim().trimEnd('/')
-    private val host: String
-    val isConfigured: Boolean
+    private val parsedUri: URI? = runCatching { URI(normalizedBaseUrl) }.getOrNull()
+    private val host = parsedUri?.host?.lowercase()
+    private val configurationError: String? = when {
+        parsedUri == null -> "Galaxy API base URL is invalid"
+        host.isNullOrBlank() -> "Galaxy API base URL must include a host"
+        parsedUri.userInfo != null || parsedUri.query != null || parsedUri.fragment != null ->
+            "Galaxy API base URL must not contain credentials, query parameters, or fragments"
+        parsedUri.port != -1 && parsedUri.port !in 1..65535 ->
+            "Galaxy API base URL port is invalid"
+        parsedUri.scheme == "https" -> null
+        parsedUri.scheme == "http" && host in setOf("127.0.0.1", "10.0.2.2", "localhost") -> null
+        else -> "Galaxy API base URL must use HTTPS except for exact local development hosts"
+    }
+    val isConfigured: Boolean =
+        configurationError == null && host?.endsWith(".invalid") == false
 
     init {
-        val uri = try {
-            URI(normalizedBaseUrl)
-        } catch (exception: Exception) {
-            throw IllegalArgumentException("Galaxy API base URL is invalid", exception)
-        }
-        host = uri.host?.lowercase()
-            ?: throw IllegalArgumentException("Galaxy API base URL must include a host")
-        val localHost = host in setOf("127.0.0.1", "10.0.2.2", "localhost")
-        require(
-            uri.isAbsolute &&
-                uri.userInfo == null &&
-                uri.query == null &&
-                uri.fragment == null &&
-                (uri.scheme == "https" || (uri.scheme == "http" && localHost))
-        ) {
-            "Galaxy API base URL must use HTTPS except for exact local development hosts"
-        }
-        require(uri.port == -1 || uri.port in 1..65535) {
-            "Galaxy API base URL port is invalid"
-        }
         require(connectTimeoutMillis > 0 && readTimeoutMillis > 0)
-        isConfigured = !host.endsWith(".invalid")
     }
 
     suspend fun sendTurn(conversationId: String, message: String): LilaTurnResult =
@@ -72,6 +64,9 @@ class HttpLilaTurnProvider(
             require(conversationId.isNotBlank() && conversationId.length <= 128)
             require(message.isNotBlank() && message.length <= 12_000)
 
+            configurationError?.let { error ->
+                throw GalaxyApiException(null, error)
+            }
             if (!isConfigured) {
                 throw GalaxyApiException(null, "Сервер Lila не настроен в этой сборке Galaxy.")
             }
