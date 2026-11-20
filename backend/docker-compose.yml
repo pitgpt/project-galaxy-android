@@ -22,6 +22,9 @@ services:
     environment:
       GALAXY_ENVIRONMENT: production
       REDIS_URL: redis://redis:6379/0
+      LILA_DATABASE_PATH: /var/lib/galaxy/lila/lila.sqlite3
+    volumes:
+      - galaxy-lila-data:/var/lib/galaxy/lila
     depends_on:
       redis:
         condition: service_healthy
@@ -33,6 +36,7 @@ services:
 
 volumes:
   galaxy-redis-data:
+  galaxy-lila-data:
 
 networks:
   galaxy-internal:

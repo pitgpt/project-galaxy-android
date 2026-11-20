@@ -19,7 +19,7 @@ jobs:
   backend-test:
     name: Lila Core backend tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: backend
@@ -39,5 +39,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Prepare non-secret Compose validation environment
+        run: cp .env.example .env
+
+      - name: Validate Compose configuration and build backend image
+        run: |
+          docker compose config --quiet
+          docker compose build backend
+
+      - name: Verify Lila named volume survives container recreation
+        run: |
+          docker compose run --rm --no-deps --entrypoint python backend -c "from pathlib import Path; p = Path('/var/lib/galaxy/lila/.volume-smoke'); p.write_text('lila-volume-ok')"
+          docker compose run --rm --no-deps --entrypoint python backend -c "from pathlib import Path; p = Path('/var/lib/galaxy/lila/.volume-smoke'); assert p.read_text() == 'lila-volume-ok'; p.unlink()"
+
       - name: Run complete backend regression suite
         run: python -m pytest -q
+
+      - name: Remove temporary Compose environment
+        if: always()
+        run: rm -f .env
