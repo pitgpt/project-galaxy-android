@@ -62,7 +62,7 @@ def test_database_does_not_contain_plaintext_owner_ids_or_content(tmp_path):
     ))
     run(store.save_memory(
         principal_id="private-owner-123",
-        memory=MemorySnippet(memory_id="private-memory-id", content="private memory phrase"),
+        memory=MemorySnippet(memory_id="private-memory-id", content="private memory phrase classified nebula token"),
     ))
     database_bytes = b"".join(
         candidate.read_bytes()
@@ -80,6 +80,9 @@ def test_database_does_not_contain_plaintext_owner_ids_or_content(tmp_path):
         b"private user phrase",
         b"private assistant phrase",
         b"private memory phrase",
+        b"classified",
+        b"nebula",
+        b"token",
     ):
         assert value not in database_bytes
 
@@ -158,6 +161,9 @@ def test_memory_upsert_and_delete_are_owner_scoped(tmp_path):
         principal_id="owner-a", query="updated", limit=5
     ))[0].content == "updated fact"
     assert run(store.search_relevant_memories(
+        principal_id="owner-a", query="first", limit=5
+    )) == ()
+    assert run(store.search_relevant_memories(
         principal_id="owner-b", query="second", limit=5
     ))[0].content == "second fact"
     assert run(store.delete_memory(principal_id="owner-a", memory_id="same-id")) is True
@@ -210,3 +216,174 @@ def test_rejects_relative_path_and_wrong_key_length(tmp_path):
         SqliteLilaStore("relative.sqlite3", KEY)
     with pytest.raises(ValueError):
         SqliteLilaStore(tmp_path / "lila.sqlite3", b"short")
+
+
+def test_schema_v1_migration_backfills_existing_encrypted_memories(tmp_path, monkeypatch):
+    path = tmp_path / "lila.sqlite3"
+    original = SqliteLilaStore(path, KEY)
+    run(original.append_turn(
+        principal_id="owner-a",
+        conversation_id="legacy-chat",
+        user_message="history survives schema migration",
+        assistant_message="confirmed",
+    ))
+    for index in range(3):
+        run(original.save_memory(
+            principal_id="owner-a",
+            memory=MemorySnippet(
+                memory_id=f"legacy-memory-{index}",
+                content=f"legacy nebula fact {index} remains searchable after migration",
+            ),
+        ))
+
+    database = sqlite3.connect(path)
+    database.execute("DROP TABLE lila_memory_terms")
+    database.execute("PRAGMA user_version=1")
+    database.commit()
+    database.close()
+
+    monkeypatch.setattr(SqliteLilaStore, "_MEMORY_BACKFILL_BATCH", 2)
+    migrated = SqliteLilaStore(path, KEY)
+    results = run(migrated.search_relevant_memories(
+        principal_id="owner-a", query="legacy nebula", limit=8
+    ))
+    assert {item.memory_id for item in results} == {
+        "legacy-memory-0", "legacy-memory-1", "legacy-memory-2"
+    }
+    history = run(migrated.load_recent_messages(
+        principal_id="owner-a", conversation_id="legacy-chat", limit=10
+    ))
+    assert [item.content for item in history] == [
+        "history survives schema migration", "confirmed"
+    ]
+    database = sqlite3.connect(path)
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert database.execute(
+        "SELECT COUNT(DISTINCT memory_key) FROM lila_memory_terms"
+    ).fetchone()[0] == 3
+    database.close()
+
+
+def test_memory_search_finds_old_relevant_item_and_caps_decryption(tmp_path, monkeypatch):
+    store = SqliteLilaStore(tmp_path / "lila.sqlite3", KEY)
+    run(store.save_memory(
+        principal_id="owner",
+        memory=MemorySnippet(memory_id="old-memory", content="ancient nebula fact"),
+    ))
+    for index in range(12):
+        run(store.save_memory(
+            principal_id="owner",
+            memory=MemorySnippet(
+                memory_id=f"recent-{index}",
+                content=f"shared common topic distractor {index}",
+            ),
+        ))
+
+    decrypt_calls = 0
+    original_decrypt = store._decrypt
+
+    def count_decrypts(nonce, ciphertext, aad):
+        nonlocal decrypt_calls
+        decrypt_calls += 1
+        return original_decrypt(nonce, ciphertext, aad)
+
+    monkeypatch.setattr(store, "_decrypt", count_decrypts)
+    old_result = run(store.search_relevant_memories(
+        principal_id="owner", query="ancient nebula", limit=8
+    ))
+    assert [item.memory_id for item in old_result] == ["old-memory"]
+    assert decrypt_calls == 1
+
+    decrypt_calls = 0
+    monkeypatch.setattr(SqliteLilaStore, "_MAX_MEMORY_CANDIDATES", 3)
+    common_results = run(store.search_relevant_memories(
+        principal_id="owner", query="shared", limit=8
+    ))
+    assert len(common_results) <= 3
+    assert decrypt_calls <= 3
+
+
+def test_memory_ciphertext_tampering_fails_closed(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    store = SqliteLilaStore(path, KEY)
+    run(store.save_memory(
+        principal_id="owner",
+        memory=MemorySnippet(memory_id="m1", content="sensitive nebula fact"),
+    ))
+
+    database = sqlite3.connect(path)
+    row = database.execute(
+        "SELECT ciphertext FROM lila_memories LIMIT 1"
+    ).fetchone()
+    damaged = bytearray(row[0])
+    damaged[-1] ^= 0x01
+    database.execute("UPDATE lila_memories SET ciphertext=?", (bytes(damaged),))
+    database.commit()
+    database.close()
+
+    with pytest.raises(LilaStoreIntegrityError):
+        run(store.search_relevant_memories(
+            principal_id="owner", query="nebula", limit=8
+        ))
+
+
+def test_memory_term_index_is_owner_bound_and_delete_cascades(tmp_path):
+    store = SqliteLilaStore(tmp_path / "lila.sqlite3", KEY)
+    run(store.save_memory(
+        principal_id="owner-a",
+        memory=MemorySnippet(memory_id="same", content="shared private term"),
+    ))
+    run(store.save_memory(
+        principal_id="owner-b",
+        memory=MemorySnippet(memory_id="same", content="shared private term"),
+    ))
+
+    owner_a_key = store._owner_key("owner-a")
+    owner_b_key = store._owner_key("owner-b")
+    assert store._term_keys(owner_a_key, "shared") != store._term_keys(
+        owner_b_key, "shared"
+    )
+    assert run(store.search_relevant_memories(
+        principal_id="owner-b", query="shared", limit=5
+    ))[0].memory_id == "same"
+
+    assert run(store.delete_memory(
+        principal_id="owner-a", memory_id="same"
+    )) is True
+    database = sqlite3.connect(store._path)
+    remaining = database.execute(
+        "SELECT COUNT(*) FROM lila_memory_terms WHERE owner_key=?",
+        (owner_a_key,),
+    ).fetchone()[0]
+    database.close()
+    assert remaining == 0
+    assert run(store.search_relevant_memories(
+        principal_id="owner-a", query="shared", limit=5
+    )) == ()
+
+
+def test_empty_memory_query_decrypts_only_requested_recent_window(tmp_path, monkeypatch):
+    store = SqliteLilaStore(tmp_path / "lila.sqlite3", KEY)
+    for index in range(7):
+        run(store.save_memory(
+            principal_id="owner",
+            memory=MemorySnippet(
+                memory_id=f"memory-{index}",
+                content=f"memory fact number {index}",
+            ),
+        ))
+
+    decrypt_calls = 0
+    original_decrypt = store._decrypt
+
+    def count_decrypts(nonce, ciphertext, aad):
+        nonlocal decrypt_calls
+        decrypt_calls += 1
+        return original_decrypt(nonce, ciphertext, aad)
+
+    monkeypatch.setattr(store, "_decrypt", count_decrypts)
+    results = run(store.search_relevant_memories(
+        principal_id="owner", query="!!!", limit=2
+    ))
+    assert len(results) == 2
+    assert decrypt_calls == 2
