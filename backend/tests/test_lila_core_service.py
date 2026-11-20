@@ -17,6 +17,7 @@ class FakeHistoryReader:
         self.append_error = append_error
         self.calls = []
         self.appended_turns = []
+        self.model_identities = []
         self.reservations = set()
 
     async def reserve_idempotent_turn(
@@ -38,6 +39,8 @@ class FakeHistoryReader:
             conversation_id=conversation_id,
             user_message=user_message,
             assistant_message=assistant_message,
+            provider_id=response.provider_id,
+            model_id=response.model_id,
         )
 
     async def release_idempotent_turn(
@@ -51,8 +54,12 @@ class FakeHistoryReader:
             raise self.error
         return self.messages
 
-    async def append_turn(self, *, principal_id, conversation_id, user_message, assistant_message):
+    async def append_turn(
+        self, *, principal_id, conversation_id, user_message, assistant_message,
+        provider_id=None, model_id=None
+    ):
         self.appended_turns.append((principal_id, conversation_id, user_message, assistant_message))
+        self.model_identities.append((provider_id, model_id))
         if self.append_error is not None:
             raise self.append_error
 
@@ -113,6 +120,7 @@ async def test_service_passes_authenticated_bounded_context_to_adapter():
         ("jwt-subject-1", "conversation-1", "Продолжим разговор?", "Ответ Лилы")
     ]
     assert history.calls == [("jwt-subject-1", "conversation-1", 20)]
+    assert history.model_identities == [(None, None)]
     assert memories.calls == [("jwt-subject-1", "Продолжим разговор?", 8)]
     assert len(adapter.contexts) == 1
     context = adapter.contexts[0]
@@ -124,6 +132,24 @@ async def test_service_passes_authenticated_bounded_context_to_adapter():
     assert [memory.content for memory in context.relevant_memories] == [
         "Важное воспоминание"
     ]
+
+
+@pytest.mark.asyncio
+async def test_service_persists_provider_and_model_identity_with_the_assistant_turn():
+    adapter = FakeModelAdapter(response=CoreTurnResponse(
+        conversation_id="conversation-1",
+        text="Ответ от выбранной модели",
+        provider_id="cloud-primary",
+        model_id="model-a",
+    ))
+    service, history, _, _ = build_service(adapter=adapter)
+
+    await service.handle(
+        CoreTurnRequest(conversation_id="conversation-1", message="Проверь модель"),
+        principal_id="jwt-subject-1",
+    )
+
+    assert history.model_identities == [("cloud-primary", "model-a")]
 
 
 @pytest.mark.asyncio

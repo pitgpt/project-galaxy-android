@@ -50,7 +50,7 @@ class SqliteLilaStore:
     This adapter does not make an ephemeral container filesystem durable.
     """
 
-    _SCHEMA_VERSION = 3
+    _SCHEMA_VERSION = 4
     _NONCE_BYTES = 12
     _MEMORY_BACKFILL_BATCH = 128
     _MAX_MEMORY_CANDIDATES = 256
@@ -157,7 +157,7 @@ class SqliteLilaStore:
                         ) WITHOUT ROWID"""
                     )
                     version = 1
-                elif version not in {1, 2, self._SCHEMA_VERSION}:
+                elif version not in {1, 2, 3, self._SCHEMA_VERSION}:
                     raise RuntimeError("Unsupported Lila database schema version")
                 else:
                     row = connection.execute(
@@ -203,6 +203,21 @@ class SqliteLilaStore:
                             (state='completed' AND response_nonce IS NOT NULL
                                 AND length(response_nonce)=12 AND response_ciphertext IS NOT NULL)
                         )
+                    ) WITHOUT ROWID"""
+                )
+                # Version 4 stores non-secret model identity separately from encrypted text.
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS lila_turn_metadata (
+                        owner_key TEXT NOT NULL,
+                        conversation_key TEXT NOT NULL,
+                        assistant_sequence INTEGER NOT NULL CHECK(assistant_sequence > 0),
+                        provider_id TEXT CHECK(provider_id IS NULL OR length(provider_id) BETWEEN 1 AND 64),
+                        model_id TEXT CHECK(model_id IS NULL OR length(model_id) BETWEEN 1 AND 256),
+                        PRIMARY KEY(owner_key, conversation_key, assistant_sequence),
+                        FOREIGN KEY(owner_key, conversation_key, assistant_sequence)
+                            REFERENCES lila_messages(owner_key, conversation_key, sequence)
+                            ON DELETE CASCADE,
+                        CHECK(provider_id IS NOT NULL OR model_id IS NOT NULL)
                     ) WITHOUT ROWID"""
                 )
                 connection.execute(f"PRAGMA user_version={self._SCHEMA_VERSION}")
@@ -407,16 +422,24 @@ class SqliteLilaStore:
         try:
             if before_sequence is None:
                 rows = connection.execute(
-                    "SELECT sequence, role, nonce, ciphertext, created_at_ms FROM lila_messages "
-                    "WHERE owner_key=? AND conversation_key=? "
-                    "ORDER BY sequence DESC LIMIT ?",
+                    "SELECT m.sequence, m.role, m.nonce, m.ciphertext, m.created_at_ms, "
+                    "t.provider_id, t.model_id FROM lila_messages AS m "
+                    "LEFT JOIN lila_turn_metadata AS t ON "
+                    "t.owner_key=m.owner_key AND t.conversation_key=m.conversation_key "
+                    "AND t.assistant_sequence=m.sequence "
+                    "WHERE m.owner_key=? AND m.conversation_key=? "
+                    "ORDER BY m.sequence DESC LIMIT ?",
                     (owner_key, conversation_key, limit + 1),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT sequence, role, nonce, ciphertext, created_at_ms FROM lila_messages "
-                    "WHERE owner_key=? AND conversation_key=? AND sequence < ? "
-                    "ORDER BY sequence DESC LIMIT ?",
+                    "SELECT m.sequence, m.role, m.nonce, m.ciphertext, m.created_at_ms, "
+                    "t.provider_id, t.model_id FROM lila_messages AS m "
+                    "LEFT JOIN lila_turn_metadata AS t ON "
+                    "t.owner_key=m.owner_key AND t.conversation_key=m.conversation_key "
+                    "AND t.assistant_sequence=m.sequence "
+                    "WHERE m.owner_key=? AND m.conversation_key=? AND m.sequence < ? "
+                    "ORDER BY m.sequence DESC LIMIT ?",
                     (owner_key, conversation_key, before_sequence, limit + 1),
                 ).fetchall()
         finally:
@@ -440,6 +463,8 @@ class SqliteLilaStore:
                         role=role,
                         content=plaintext.decode("utf-8"),
                         created_at_epoch_millis=int(row["created_at_ms"]),
+                        provider_id=row["provider_id"],
+                        model_id=row["model_id"],
                     )
                 )
             except Exception:
@@ -596,6 +621,8 @@ class SqliteLilaStore:
             assistant,
             nonce,
             ciphertext,
+            validated_response.provider_id,
+            validated_response.model_id,
         )
 
     def _complete_idempotent_turn_sync(
@@ -608,6 +635,8 @@ class SqliteLilaStore:
         assistant: ConversationMessage,
         response_nonce: bytes,
         response_ciphertext: bytes,
+        provider_id: str | None,
+        model_id: str | None,
     ) -> None:
         connection = self._connect()
         try:
@@ -646,6 +675,9 @@ class SqliteLilaStore:
                         "VALUES(?, ?, ?, ?, ?, ?, ?)",
                         (owner_key, conversation_key, sequence, role, message_nonce, message_ciphertext, now),
                     )
+                self._insert_turn_metadata(
+                    connection, owner_key, conversation_key, current + 2, provider_id, model_id
+                )
                 updated = connection.execute(
                     "UPDATE lila_turn_requests SET state='completed', response_nonce=?, "
                     "response_ciphertext=?, updated_at_ms=? WHERE owner_key=? AND request_key=? "
@@ -711,6 +743,31 @@ class SqliteLilaStore:
         finally:
             connection.close()
 
+    @staticmethod
+    def _insert_turn_metadata(
+        connection: sqlite3.Connection,
+        owner_key: str,
+        conversation_key: str,
+        assistant_sequence: int,
+        provider_id: str | None,
+        model_id: str | None,
+    ) -> None:
+        if provider_id is None and model_id is None:
+            return
+        if provider_id is not None and (
+            not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 64
+        ):
+            raise ValueError("provider_id must be a non-empty identifier within 64 characters")
+        if model_id is not None and (
+            not isinstance(model_id, str) or not model_id.strip() or len(model_id) > 256
+        ):
+            raise ValueError("model_id must be a non-empty identifier within 256 characters")
+        connection.execute(
+            "INSERT INTO lila_turn_metadata(owner_key, conversation_key, assistant_sequence, provider_id, model_id) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (owner_key, conversation_key, assistant_sequence, provider_id, model_id),
+        )
+
     async def append_turn(
         self,
         *,
@@ -718,6 +775,8 @@ class SqliteLilaStore:
         conversation_id: str,
         user_message: str,
         assistant_message: str,
+        provider_id: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         user = ConversationMessage(role="user", content=user_message)
         assistant = ConversationMessage(role="assistant", content=assistant_message)
@@ -725,7 +784,7 @@ class SqliteLilaStore:
         owner_key = self._owner_key(principal_id)
         conversation_key = self._resource_key("conversation", conversation_id, 128)
         await asyncio.to_thread(
-            self._append_turn_sync, owner_key, conversation_key, user, assistant
+            self._append_turn_sync, owner_key, conversation_key, user, assistant, provider_id, model_id
         )
 
     def _append_turn_sync(
@@ -734,6 +793,8 @@ class SqliteLilaStore:
         conversation_key: str,
         user: ConversationMessage,
         assistant: ConversationMessage,
+        provider_id: str | None,
+        model_id: str | None,
     ) -> None:
         connection = self._connect()
         try:
@@ -759,6 +820,9 @@ class SqliteLilaStore:
                         "VALUES(?, ?, ?, ?, ?, ?, ?)",
                         (owner_key, conversation_key, sequence, role, nonce, ciphertext, now),
                     )
+                self._insert_turn_metadata(
+                    connection, owner_key, conversation_key, current + 2, provider_id, model_id
+                )
                 connection.execute("COMMIT")
             except BaseException:
                 connection.execute("ROLLBACK")

@@ -44,6 +44,8 @@ class CoreTurnService:
                 conversation_id=request.conversation_id,
                 user_message=request.message,
                 assistant_message=response.text,
+                provider_id=response.provider_id,
+                model_id=response.model_id,
             )
             return response
 
