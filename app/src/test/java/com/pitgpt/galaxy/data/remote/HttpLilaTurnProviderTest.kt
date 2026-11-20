@@ -149,7 +149,7 @@ class HttpLilaTurnProviderTest {
         )
         assertFalse(malformed.isConfigured)
         val malformedError = expectApiError { malformed.sendTurn("conversation-1", "hello") }
-        assertTrue(malformedError.message.orEmpty().contains("invalid"))
+        assertTrue(malformedError.message.orEmpty().contains("host"))
     }
 
     private suspend fun expectApiError(block: suspend () -> Unit): GalaxyApiException {
