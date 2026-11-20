@@ -54,6 +54,8 @@ import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import com.pitgpt.galaxy.data.remote.GalaxyApiException
+import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.UUID
@@ -84,6 +86,7 @@ fun GalaxyHome() {
     var profile by remember { mutableStateOf<CharacterProfile?>(null) }
     var conversationOwnerKey by remember { mutableStateOf<String?>(null) }
     var activeModelLabel by remember { mutableStateOf<String?>(null) }
+    var historySyncWarning by remember { mutableStateOf<String?>(null) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
     val scope = rememberCoroutineScope()
 
@@ -114,6 +117,45 @@ fun GalaxyHome() {
             initialized = true
         } catch (error: Exception) {
             loadError = "Не удалось загрузить данные Galaxy. Проверь хранилище и попробуй ещё раз."
+        } finally {
+            isLoading = false
+        }
+    }
+
+    LaunchedEffect(showChat, activeCharacterId, conversationOwnerKey, loadError) {
+        if (!showChat || loadError != null || !app.lilaTurnProvider.isConfigured) {
+            historySyncWarning = null
+            return@LaunchedEffect
+        }
+        val ownerKey = conversationOwnerKey
+        if (ownerKey == null) {
+            historySyncWarning = "Войди в аккаунт Galaxy, чтобы синхронизировать историю Лилы."
+            return@LaunchedEffect
+        }
+
+        val conversationId = getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
+        val storageCharacterId = conversationStorageKey(conversationOwnerKey, activeCharacterId)
+        historySyncWarning = null
+        isLoading = true
+        try {
+            val remoteHistory = app.lilaTurnProvider.loadAllHistory(conversationId)
+            if (remoteHistory.isNotEmpty()) {
+                val localHistory = app.conversations.getForCharacter(storageCharacterId)
+                val mergedHistory = mergeRemoteHistory(
+                    characterId = storageCharacterId,
+                    conversationId = conversationId,
+                    local = localHistory,
+                    remote = remoteHistory
+                )
+                app.conversations.replaceForCharacter(storageCharacterId, mergedHistory)
+                messages.clear()
+                messages.addAll(mergedHistory)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            historySyncWarning =
+                "Не удалось синхронизировать историю с Lila Core. Локальная переписка сохранена."
         } finally {
             isLoading = false
         }
@@ -258,6 +300,7 @@ fun GalaxyHome() {
             aiConfigured = app.lilaTurnProvider.isConfigured,
             isLoading = isLoading,
             loadError = loadError,
+            historySyncWarning = historySyncWarning,
             onRetryLoad = { reloadKey += 1 },
             onBack = { showChat = false },
             onSend = { text ->
@@ -458,6 +501,7 @@ private fun ConversationScreen(
     aiConfigured: Boolean,
     isLoading: Boolean,
     loadError: String?,
+    historySyncWarning: String?,
     onRetryLoad: () -> Unit,
     onBack: () -> Unit,
     onSend: suspend (String) -> Unit
@@ -470,7 +514,7 @@ private fun ConversationScreen(
 
     fun submitDraft() {
         val value = draft.trim()
-        if (value.isEmpty() || isSending) return
+        if (value.isEmpty() || isSending || isLoading) return
         sendScope.launch {
             isSending = true
             sendError = null
@@ -511,6 +555,10 @@ private fun ConversationScreen(
                 }
             }
             Spacer(Modifier.height(12.dp))
+            historySyncWarning?.let {
+                Text(it, color = Color(0xFFE9BD70), fontSize = 11.sp, lineHeight = 16.sp)
+                Spacer(Modifier.height(8.dp))
+            }
             if (loadError != null) {
                 Column(
                     Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
@@ -1071,6 +1119,36 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
             Text(detail, color = Muted, fontSize = 11.sp)
         }
     }
+}
+
+
+private fun mergeRemoteHistory(
+    characterId: String,
+    conversationId: String,
+    local: List<ConversationMessage>,
+    remote: List<LilaHistoryMessage>
+): List<ConversationMessage> {
+    val unmatchedLocal = local.toMutableList()
+    val remoteMessages = remote.map { entry ->
+        val role = when (entry.role) {
+            "user" -> MessageRole.USER
+            "assistant" -> MessageRole.CHARACTER
+            else -> throw IllegalArgumentException("Unsupported Lila history role")
+        }
+        val matchIndex = unmatchedLocal.indexOfFirst {
+            it.role == role && it.content == entry.content
+        }
+        val previous = if (matchIndex >= 0) unmatchedLocal.removeAt(matchIndex) else null
+        ConversationMessage(
+            id = previous?.id ?: "lila-$conversationId-${entry.sequence}",
+            characterId = characterId,
+            role = role,
+            content = entry.content,
+            createdAtEpochMillis = entry.createdAtEpochMillis
+        )
+    }
+    return (remoteMessages + unmatchedLocal)
+        .sortedWith(compareBy<ConversationMessage> { it.createdAtEpochMillis }.thenBy { it.id })
 }
 
 
