@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - feature/lila-core-foundation
+      - feature/lila-core-openai-compatible-composition
     paths:
       - "backend/**"
       - ".github/workflows/lila-core-backend-ci.yml"
