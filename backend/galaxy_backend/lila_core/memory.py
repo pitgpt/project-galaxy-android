@@ -6,8 +6,18 @@ from typing import Literal, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .contracts import CoreTurnResponse
+
 
 ConversationRole = Literal["user", "assistant"]
+
+
+class IdempotencyKeyConflict(RuntimeError):
+    """An idempotency key was reused for a different authenticated request."""
+
+
+class IdempotentTurnInProgress(RuntimeError):
+    """The original request owns this key but has not reached a durable result."""
 
 
 class ConversationMessage(BaseModel):
@@ -77,6 +87,45 @@ class ConversationHistoryWriter(Protocol):
         assistant_message: str,
     ) -> None:
         """Persist the user and assistant messages as one indivisible turn."""
+        ...
+
+    async def reserve_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+    ) -> CoreTurnResponse | None:
+        """Claim a key or return its previously committed response.
+
+        A pending key is never executed twice. Completed responses must be
+        returned exactly as originally committed.
+        """
+        ...
+
+    async def complete_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+        assistant_message: str,
+        response: CoreTurnResponse,
+    ) -> None:
+        """Atomically append both messages and encrypt the replayable response."""
+        ...
+
+    async def release_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+    ) -> None:
+        """Release a reservation only when provider execution has not started."""
         ...
 
 

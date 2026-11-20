@@ -1,3 +1,6 @@
+import asyncio
+from uuid import uuid4
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -7,7 +10,11 @@ from galaxy_backend.lila_core.context import ContextAssembler
 from galaxy_backend.lila_core.contracts import CoreTurnResponse
 from galaxy_backend.lila_core.memory import ConversationMessage, MemorySnippet
 from galaxy_backend.lila_core.service import CoreTurnService
+from galaxy_backend.lila_core.sqlite_store import SqliteLilaStore
 from galaxy_backend.main import create_app
+
+
+STORE_KEY = bytes.fromhex("3031323334353637383961626364656630313233343536373839616263646566")
 
 
 class FakeAuthenticator:
@@ -360,3 +367,123 @@ def test_production_requires_shared_redis_for_lila_turn_limits():
     ):
         with TestClient(app):
             pass
+
+
+
+def build_persistent_service(database_path, *, adapter=None):
+    store = SqliteLilaStore(database_path, STORE_KEY)
+    model = adapter or RecordingModelAdapter()
+    service = CoreTurnService(ContextAssembler(store, store), model, store)
+    return service, store, model
+
+
+def test_idempotency_replays_the_committed_response_without_calling_model_twice(tmp_path):
+    service, store, adapter = build_persistent_service(tmp_path / "lila.sqlite3")
+    key = str(uuid4())
+    headers = {
+        "Authorization": "Bearer user-a-token",
+        "Idempotency-Key": key,
+    }
+
+    with make_client(service) as client:
+        first = client.post("/v1/lila/turns", headers=headers, json=turn_payload())
+        replay = client.post("/v1/lila/turns", headers=headers, json=turn_payload())
+
+    assert first.status_code == replay.status_code == 200
+    assert first.json() == replay.json()
+    assert len(adapter.contexts) == 1
+    history = asyncio.run(store.load_recent_messages(
+        principal_id="user-a", conversation_id="conversation-1", limit=10
+    ))
+    assert [(item.role, item.content) for item in history] == [
+        ("user", "Привет, Лила"),
+        ("assistant", "Ответ Лилы"),
+    ]
+
+
+def test_idempotency_key_cannot_be_reused_for_a_different_message(tmp_path):
+    service, store, adapter = build_persistent_service(tmp_path / "lila.sqlite3")
+    headers = {
+        "Authorization": "Bearer user-a-token",
+        "Idempotency-Key": str(uuid4()),
+    }
+
+    with make_client(service) as client:
+        first = client.post("/v1/lila/turns", headers=headers, json=turn_payload())
+        conflict = client.post(
+            "/v1/lila/turns",
+            headers=headers,
+            json=turn_payload(message="Совсем другое сообщение"),
+        )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "Idempotency-Key was already used for a different request"
+    assert len(adapter.contexts) == 1
+    history = asyncio.run(store.load_recent_messages(
+        principal_id="user-a", conversation_id="conversation-1", limit=10
+    ))
+    assert len(history) == 2
+
+
+def test_pending_idempotency_key_blocks_duplicate_provider_execution(tmp_path):
+    service, _, adapter = build_persistent_service(
+        tmp_path / "lila.sqlite3",
+        adapter=RecordingModelAdapter(error=RuntimeError("ambiguous provider outcome")),
+    )
+    headers = {
+        "Authorization": "Bearer user-a-token",
+        "Idempotency-Key": str(uuid4()),
+    }
+
+    with make_client(service) as client:
+        first = client.post("/v1/lila/turns", headers=headers, json=turn_payload())
+        retry = client.post("/v1/lila/turns", headers=headers, json=turn_payload())
+
+    assert first.status_code == 503
+    assert retry.status_code == 409
+    assert retry.headers["Retry-After"] == "2"
+    assert len(adapter.contexts) == 1
+    assert "ambiguous provider outcome" not in retry.text
+
+
+def test_idempotency_keys_are_scoped_by_authenticated_owner(tmp_path):
+    service, store, adapter = build_persistent_service(tmp_path / "lila.sqlite3")
+    key = str(uuid4())
+
+    with make_client(service) as client:
+        owner_a = client.post(
+            "/v1/lila/turns",
+            headers={"Authorization": "Bearer user-a-token", "Idempotency-Key": key},
+            json=turn_payload(),
+        )
+        owner_b = client.post(
+            "/v1/lila/turns",
+            headers={"Authorization": "Bearer user-b-token", "Idempotency-Key": key},
+            json=turn_payload(),
+        )
+
+    assert owner_a.status_code == owner_b.status_code == 200
+    assert len(adapter.contexts) == 2
+    history_a = asyncio.run(store.load_recent_messages(
+        principal_id="user-a", conversation_id="conversation-1", limit=10
+    ))
+    history_b = asyncio.run(store.load_recent_messages(
+        principal_id="user-b", conversation_id="conversation-1", limit=10
+    ))
+    assert len(history_a) == len(history_b) == 2
+
+
+def test_invalid_idempotency_header_is_rejected_before_model_execution():
+    service, _, _, adapter = build_service()
+    with make_client(service) as client:
+        response = client.post(
+            "/v1/lila/turns",
+            headers={
+                "Authorization": "Bearer user-a-token",
+                "Idempotency-Key": "not-a-uuid",
+            },
+            json=turn_payload(),
+        )
+    assert response.status_code == 422
+    assert adapter.contexts == []
