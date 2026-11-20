@@ -5,6 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,6 +16,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
 class HttpLilaTurnProviderTest {
@@ -128,6 +130,16 @@ class HttpLilaTurnProviderTest {
         }
         assertTrue(oversizedError.message.orEmpty().contains("допустимый размер"))
         assertTrue(oversized.disconnected)
+    }
+
+    @Test
+    fun conversationIdentityIsStableAcrossClientsAndSeparatedByOwnerAndCharacter() {
+        val first = stableLilaConversationId("owner-partition-a", "galaxy.default")
+
+        assertEquals(first, stableLilaConversationId("owner-partition-a", "galaxy.default"))
+        assertNotEquals(first, stableLilaConversationId("owner-partition-b", "galaxy.default"))
+        assertNotEquals(first, stableLilaConversationId("owner-partition-a", "another-character"))
+        assertEquals(first, UUID.fromString(first).toString())
     }
 
     @Test
