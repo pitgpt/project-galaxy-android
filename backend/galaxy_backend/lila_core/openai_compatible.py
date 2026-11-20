@@ -33,6 +33,40 @@ class ModelProviderUnavailable(RuntimeError):
     """The configured model endpoint could not complete a request safely."""
 
 
+class ModelProviderConfigurationError(RuntimeError):
+    """The provider rejected its configured endpoint, model, credentials, or request."""
+
+    _PUBLIC_DETAILS = {
+        "authentication_rejected": (
+            "Lila model provider rejected authentication; verify its credentials "
+            "and access permissions."
+        ),
+        "endpoint_or_model_not_found": (
+            "Lila model endpoint or model was not found; verify the configured "
+            "base URL and model ID."
+        ),
+        "redirect_refused": (
+            "Lila model endpoint redirected the request; configure its final "
+            "HTTPS endpoint directly."
+        ),
+        "request_rejected": (
+            "Lila model provider rejected the request; verify API compatibility "
+            "and model configuration."
+        ),
+    }
+
+    def __init__(self, reason_code: str) -> None:
+        if reason_code not in self._PUBLIC_DETAILS:
+            raise ValueError("Unsupported Lila provider rejection reason")
+        self.reason_code = reason_code
+        super().__init__("The configured Lila model provider rejected the request")
+
+    @property
+    def public_detail(self) -> str:
+        """Return a safe, stable explanation without provider response data."""
+        return self._PUBLIC_DETAILS[self.reason_code]
+
+
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
     """Non-secret provider settings plus an optional bearer credential."""
@@ -157,9 +191,34 @@ class OpenAICompatibleModelAdapter:
                 timeout=httpx.Timeout(float(self._config.timeout_seconds)),
             )
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Classify only the numeric status. Never expose provider response
+            # bodies, headers, URLs, or diagnostics to the Core/API caller.
+            status_code = exc.response.status_code
+            if status_code in {408, 425, 429} or 500 <= status_code <= 599:
+                raise ModelProviderUnavailable(
+                    "The configured Lila model provider is temporarily unavailable"
+                ) from None
+            if status_code in {401, 403}:
+                raise ModelProviderConfigurationError(
+                    "authentication_rejected"
+                ) from None
+            if status_code == 404:
+                raise ModelProviderConfigurationError(
+                    "endpoint_or_model_not_found"
+                ) from None
+            if 300 <= status_code <= 399:
+                # Redirects remain disabled so credentials are never forwarded
+                # to a different origin implicitly.
+                raise ModelProviderConfigurationError("redirect_refused") from None
+            if 400 <= status_code <= 499:
+                raise ModelProviderConfigurationError("request_rejected") from None
+            raise ModelProviderUnavailable(
+                "The configured Lila model provider is temporarily unavailable"
+            ) from None
         except httpx.HTTPError:
-            # Do not propagate URLs, request headers, response bodies or provider
-            # diagnostics: they may contain credentials or private endpoint data.
+            # Transport, timeout, and protocol failures are transient from the
+            # application's perspective. Keep their diagnostics private.
             raise ModelProviderUnavailable(
                 "The configured Lila model provider is temporarily unavailable"
             ) from None
