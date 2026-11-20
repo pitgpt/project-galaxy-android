@@ -381,11 +381,12 @@ class SqliteLilaStore:
         request_key = self._resource_key("turn", idempotency_key, 128)
         digest = hmac.new(
             self._index_key,
-            b"lila-idempotency-request-v1\\0"
+            b"lila-idempotency-request-v1"
+            + bytes((0,))
             + owner_key.encode("ascii")
-            + b"\\0"
+            + bytes((0,))
             + conversation_key.encode("ascii")
-            + b"\\0"
+            + bytes((0,))
             + user_message.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
@@ -503,7 +504,7 @@ class SqliteLilaStore:
                 self._aad("turn_response", owner_key, request_key),
             )
         finally:
-            response_payload[:] = b"\\0" * len(response_payload)
+            response_payload[:] = bytes(len(response_payload))
         await asyncio.to_thread(
             self._complete_idempotent_turn_sync,
             owner_key,
