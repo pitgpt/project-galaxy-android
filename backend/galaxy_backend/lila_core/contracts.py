@@ -74,11 +74,13 @@ AvatarEvent = Annotated[
 
 
 class CoreTurnResponse(BaseModel):
-    """Assistant output plus optional declarative UI/avatar events."""
+    """Assistant output plus non-secret model identity and declarative UI events."""
 
     model_config = ConfigDict(extra="forbid")
 
     conversation_id: str = Field(min_length=1, max_length=128)
-    text: str
+    text: str = Field(min_length=1, max_length=12_000)
     emotion: Emotion = "neutral"
     avatar_events: list[AvatarEvent] = Field(default_factory=list)
+    provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    model_id: str | None = Field(default=None, min_length=1, max_length=256)
