@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import pytest
 from fastapi import HTTPException
@@ -196,3 +197,16 @@ def test_settings_reject_production_without_lila_storage_and_provider(monkeypatc
 
     with pytest.raises(RuntimeError, match="Production requires a configured Lila model provider"):
         Settings.from_env()
+
+
+
+def test_app_startup_rejects_partial_manual_lila_settings(tmp_path):
+    settings = replace(
+        make_settings(tmp_path / "lila.sqlite3"),
+        lila_database_path=None,
+    )
+    app = make_app(settings, ScriptedHttpClient())
+
+    with pytest.raises(RuntimeError, match="Lila configuration is incomplete"):
+        with TestClient(app):
+            pass
