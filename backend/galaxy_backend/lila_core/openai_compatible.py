@@ -20,6 +20,9 @@ from .contracts import CoreTurnResponse
 from .adapters import ModelAdapterContractError
 
 
+MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
+
+
 DEFAULT_LILA_SYSTEM_PROMPT = (
     "You are Lila, a warm, thoughtful AI companion. "
     "Speak naturally in the user's language, preserve the conversation context, "
@@ -184,13 +187,21 @@ class OpenAICompatibleModelAdapter:
             "stream": False,
         }
         try:
-            response = await self._http_client.post(
+            async with self._http_client.stream(
+                "POST",
                 self._endpoint,
                 json=body,
                 headers=headers,
                 timeout=httpx.Timeout(float(self._config.timeout_seconds)),
-            )
-            response.raise_for_status()
+            ) as response:
+                response.raise_for_status()
+                response_body = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                    if len(response_body) + len(chunk) > MAX_PROVIDER_RESPONSE_BYTES:
+                        raise ModelAdapterContractError(
+                            "The configured Lila model provider response exceeds the supported size"
+                        )
+                    response_body.extend(chunk)
         except httpx.HTTPStatusError as exc:
             # Classify only the numeric status. Never expose provider response
             # bodies, headers, URLs, or diagnostics to the Core/API caller.
@@ -224,7 +235,7 @@ class OpenAICompatibleModelAdapter:
             ) from None
 
         try:
-            payload = response.json()
+            payload = json.loads(response_body)
             choices = payload["choices"]
             message = choices[0]["message"]
             content = message["content"]
@@ -236,6 +247,10 @@ class OpenAICompatibleModelAdapter:
         if not isinstance(content, str) or not content.strip():
             raise ModelAdapterContractError(
                 "The configured Lila model provider returned no assistant text"
+            )
+        if len(content) > 12_000:
+            raise ModelAdapterContractError(
+                "The configured Lila model provider response exceeds the supported text length"
             )
 
         return CoreTurnResponse(
