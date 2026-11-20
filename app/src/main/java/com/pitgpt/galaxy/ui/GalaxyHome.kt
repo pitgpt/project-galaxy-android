@@ -1112,7 +1112,7 @@ private fun getOrCreatePendingLilaTurnKey(
     message: String
 ): PendingLilaTurnKey {
     val fingerprint = MessageDigest.getInstance("SHA-256")
-        .digest("$ownerKey\\u0000$conversationId\\u0000$message".toByteArray(Charsets.UTF_8))
+        .digest("$ownerKey|$conversationId|$message".toByteArray(Charsets.UTF_8))
         .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
     val preferenceKey = "lila_pending_turn_$fingerprint"
     val preferences = context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
