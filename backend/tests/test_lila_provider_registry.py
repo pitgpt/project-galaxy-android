@@ -1187,6 +1187,57 @@ def test_provider_chat_test_does_not_mark_ambiguous_failure_retry_safe(tmp_path)
     assert "private diagnostic" not in tested.text
 
 
+def test_invalid_generated_response_marks_outcome_unknown_and_keeps_reservation(tmp_path):
+    outbound = []
+
+    async def handler(request):
+        outbound.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        return httpx.Response(
+            200,
+            json={"error": {"message": "provider-secret malformed-response-detail"}},
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, []),
+    )
+    headers = {
+        **auth(),
+        "Idempotency-Key": "d7a4a2d2-2df2-4c3a-8f61-83e5c02a2c2a",
+    }
+    payload = {
+        "conversation_id": "conversation-invalid-response",
+        "message": "Проверь некорректный ответ",
+    }
+    with client:
+        created = client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        selected = client.put(
+            "/v1/lila/conversations/conversation-invalid-response/model",
+            headers=auth(),
+            json={"provider_id": "cloud-main", "model_id": "model-a"},
+        )
+        failed = client.post("/v1/lila/turns", headers=headers, json=payload)
+        replay = client.post("/v1/lila/turns", headers=headers, json=payload)
+
+    assert created.status_code == selected.status_code == 200
+    assert failed.status_code == 502
+    assert failed.headers["X-Lila-Outcome-Unknown"] == "true"
+    assert "X-Lila-Retry-Safe" not in failed.headers
+    assert "provider-secret" not in failed.text
+    assert "malformed-response-detail" not in failed.text
+    assert replay.status_code == 409
+    assert outbound == [
+        ("GET", "/v1/models"),
+        ("POST", "/v1/chat/completions"),
+    ]
+
+
 def test_local_provider_runs_authenticated_api_to_core_history_over_real_pinned_socket(tmp_path):
     """Exercise the complete owner-managed local path over a real TCP socket.
 
