@@ -262,7 +262,7 @@ def test_schema_v1_migration_backfills_existing_encrypted_memories(tmp_path, mon
         "history survives schema migration", "confirmed"
     ]
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 5
     assert database.execute(
         "SELECT COUNT(DISTINCT memory_key) FROM lila_memory_terms"
     ).fetchone()[0] == 3
