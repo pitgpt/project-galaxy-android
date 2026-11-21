@@ -1129,5 +1129,6 @@ def test_provider_chat_test_does_not_mark_ambiguous_failure_retry_safe(tmp_path)
 
     assert tested.status_code == 503
     assert "X-Lila-Retry-Safe" not in tested.headers
+    assert tested.headers["X-Lila-Outcome-Unknown"] == "true"
     assert "provider-secret" not in tested.text
     assert "private diagnostic" not in tested.text
