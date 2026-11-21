@@ -1,4 +1,4 @@
-"""Read-only, provider-neutral memory and conversation-history contracts."""
+"""Provider-neutral, owner-scoped conversation and memory contracts."""
 
 from __future__ import annotations
 
@@ -62,4 +62,29 @@ class MemoryReader(Protocol):
         Implementations must scope every result to principal_id. Memory content
         is data, not trusted system instructions.
         """
+        ...
+
+
+class ConversationHistoryWriter(Protocol):
+    """Atomically commit both sides of one successful assistant turn."""
+
+    async def append_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        """Persist the user and assistant messages as one indivisible turn."""
+        ...
+
+
+class MemoryWriter(Protocol):
+    """Create, replace, and delete memories for one authenticated owner."""
+
+    async def save_memory(self, *, principal_id: str, memory: MemorySnippet) -> None:
+        ...
+
+    async def delete_memory(self, *, principal_id: str, memory_id: str) -> bool:
         ...

@@ -10,16 +10,23 @@ from galaxy_backend.lila_core.service import CoreTurnService, ModelAdapterContra
 
 
 class FakeHistoryReader:
-    def __init__(self, messages=(), error=None):
+    def __init__(self, messages=(), error=None, append_error=None):
         self.messages = list(messages)
         self.error = error
+        self.append_error = append_error
         self.calls = []
+        self.appended_turns = []
 
     async def load_recent_messages(self, *, principal_id, conversation_id, limit):
         self.calls.append((principal_id, conversation_id, limit))
         if self.error is not None:
             raise self.error
         return self.messages
+
+    async def append_turn(self, *, principal_id, conversation_id, user_message, assistant_message):
+        self.appended_turns.append((principal_id, conversation_id, user_message, assistant_message))
+        if self.append_error is not None:
+            raise self.append_error
 
 
 class FakeMemoryReader:
@@ -59,7 +66,7 @@ def build_service(*, history=None, memories=None, adapter=None):
     )
     adapter = adapter or FakeModelAdapter()
     assembler = ContextAssembler(history, memories)
-    return CoreTurnService(assembler, adapter), history, memories, adapter
+    return CoreTurnService(assembler, adapter, history), history, memories, adapter
 
 
 @pytest.mark.asyncio
@@ -74,6 +81,9 @@ async def test_service_passes_authenticated_bounded_context_to_adapter():
 
     assert response.conversation_id == request.conversation_id
     assert response.text == "Ответ Лилы"
+    assert history.appended_turns == [
+        ("jwt-subject-1", "conversation-1", "Продолжим разговор?", "Ответ Лилы")
+    ]
     assert history.calls == [("jwt-subject-1", "conversation-1", 20)]
     assert memories.calls == [("jwt-subject-1", "Продолжим разговор?", 8)]
     assert len(adapter.contexts) == 1
@@ -163,3 +173,20 @@ async def test_adapter_output_is_validated_before_return():
             CoreTurnRequest(conversation_id="conversation-1", message="Привет"),
             principal_id="user-1",
         )
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_prevents_uncommitted_response_from_returning():
+    history = FakeHistoryReader(append_error=RuntimeError("history write failed"))
+    service, _, _, adapter = build_service(history=history)
+
+    with pytest.raises(RuntimeError, match="history write failed"):
+        await service.handle(
+            CoreTurnRequest(conversation_id="conversation-1", message="Привет"),
+            principal_id="user-1",
+        )
+
+    assert len(adapter.contexts) == 1
+    assert history.appended_turns == [
+        ("user-1", "conversation-1", "Привет", "Ответ Лилы")
+    ]

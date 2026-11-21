@@ -5,6 +5,7 @@ from __future__ import annotations
 from .adapters import ModelAdapter
 from .context import ContextAssembler
 from .contracts import CoreTurnRequest, CoreTurnResponse
+from .memory import ConversationHistoryWriter
 
 
 class ModelAdapterContractError(RuntimeError):
@@ -12,19 +13,22 @@ class ModelAdapterContractError(RuntimeError):
 
 
 class CoreTurnService:
-    """Assemble owner-scoped context and delegate generation to a model adapter.
+    """Assemble context, generate a response, then durably commit the complete turn.
 
-    This service is deliberately stateless: persistence, authentication, and
-    execution of returned avatar events remain outside the model adapter.
+    A response is not returned to the client until both the user message and the
+    assistant response have been committed by the owner-scoped history writer.
+    Authentication and provider execution remain outside the persistence adapter.
     """
 
     def __init__(
         self,
         context_assembler: ContextAssembler,
         model_adapter: ModelAdapter,
+        history_writer: ConversationHistoryWriter,
     ) -> None:
         self._context_assembler = context_assembler
         self._model_adapter = model_adapter
+        self._history_writer = history_writer
 
     async def handle(
         self,
@@ -42,4 +46,10 @@ class CoreTurnService:
             raise ModelAdapterContractError(
                 "The model adapter returned a response for a different conversation."
             )
+        await self._history_writer.append_turn(
+            principal_id=principal_id,
+            conversation_id=request.conversation_id,
+            user_message=request.message,
+            assistant_message=response.text,
+        )
         return response
