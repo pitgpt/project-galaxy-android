@@ -7,7 +7,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /srv/galaxy
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && useradd --system --uid 10001 --create-home galaxy
+    && useradd --system --uid 10001 --create-home galaxy \
+    && install -d -o galaxy -g galaxy -m 0700 /var/lib/galaxy/lila
 COPY galaxy_backend ./galaxy_backend
 USER 10001:10001
 

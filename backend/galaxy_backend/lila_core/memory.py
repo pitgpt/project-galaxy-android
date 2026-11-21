@@ -6,8 +6,18 @@ from typing import Literal, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .contracts import CoreTurnResponse
+
 
 ConversationRole = Literal["user", "assistant"]
+
+
+class IdempotencyKeyConflict(RuntimeError):
+    """An idempotency key was reused for a different authenticated request."""
+
+
+class IdempotentTurnInProgress(RuntimeError):
+    """The original request owns this key but has not reached a durable result."""
 
 
 class ConversationMessage(BaseModel):
@@ -17,6 +27,19 @@ class ConversationMessage(BaseModel):
 
     role: ConversationRole
     content: str = Field(min_length=1, max_length=12_000)
+
+
+class StoredConversationMessage(BaseModel):
+    """One authenticated, committed message with a stable per-conversation sequence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1)
+    role: ConversationRole
+    content: str = Field(min_length=1, max_length=12_000)
+    created_at_epoch_millis: int = Field(ge=0)
+    provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    model_id: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class MemorySnippet(BaseModel):
@@ -75,8 +98,49 @@ class ConversationHistoryWriter(Protocol):
         conversation_id: str,
         user_message: str,
         assistant_message: str,
+        provider_id: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         """Persist the user and assistant messages as one indivisible turn."""
+        ...
+
+    async def reserve_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+    ) -> CoreTurnResponse | None:
+        """Claim a key or return its previously committed response.
+
+        A pending key is never executed twice. Completed responses must be
+        returned exactly as originally committed.
+        """
+        ...
+
+    async def complete_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+        assistant_message: str,
+        response: CoreTurnResponse,
+    ) -> None:
+        """Atomically append both messages and encrypt the replayable response."""
+        ...
+
+    async def release_idempotent_turn(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+        user_message: str,
+    ) -> None:
+        """Release a reservation only when provider execution has not started."""
         ...
 
 

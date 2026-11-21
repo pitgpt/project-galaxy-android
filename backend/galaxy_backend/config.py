@@ -1,14 +1,19 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
+from pathlib import Path
+
+from .lila_core.openai_compatible import DEFAULT_LILA_SYSTEM_PROMPT
 
 
 @dataclass(frozen=True)
 class Settings:
-    openai_api_key: str
+    # Realtime/voice credentials are optional so a local-only Lila deployment
+    # does not need an unrelated cloud voice provider configured.
+    openai_api_key: str | None = field(repr=False)
     auth_jwks_url: str
     auth_issuer: str
     auth_audience: str
-    safety_identifier_hmac_key: str
+    safety_identifier_hmac_key: str | None = field(repr=False)
     allowed_voices: frozenset[str]
     allowed_character_ids: frozenset[str]
     realtime_model: str = "gpt-realtime"
@@ -18,18 +23,43 @@ class Settings:
     max_active_sessions: int = 2
     session_lease_seconds: int = 90
     environment: str = "development"
-    redis_url: str | None = None
+    redis_url: str | None = field(default=None, repr=False)
     lila_turns_per_minute: int = 20
     lila_turns_per_day: int = 500
+    lila_provider_id: str = "default"
+    lila_provider_base_url: str | None = None
+    lila_provider_model_id: str | None = None
+    lila_provider_api_key: str | None = field(default=None, repr=False)
+    lila_provider_timeout_seconds: float = 30.0
+    lila_database_path: str | None = None
+    lila_storage_encryption_key: bytes | None = field(default=None, repr=False)
+    lila_system_prompt: str = DEFAULT_LILA_SYSTEM_PROMPT
+
+    @property
+    def lila_is_configured(self) -> bool:
+        return all((
+            self.lila_provider_base_url,
+            self.lila_provider_model_id,
+            self.lila_database_path,
+            self.lila_storage_encryption_key is not None,
+        ))
+
+    @property
+    def lila_configuration_requested(self) -> bool:
+        return any((
+            self.lila_provider_base_url,
+            self.lila_provider_model_id,
+            self.lila_provider_api_key,
+            self.lila_database_path,
+            self.lila_storage_encryption_key is not None,
+        ))
 
     @classmethod
     def from_env(cls) -> "Settings":
         required = (
-            "OPENAI_API_KEY",
             "AUTH_JWKS_URL",
             "AUTH_ISSUER",
             "AUTH_AUDIENCE",
-            "SAFETY_IDENTIFIER_HMAC_KEY",
         )
         missing = [name for name in required if not os.getenv(name)]
         if missing:
@@ -69,6 +99,61 @@ class Settings:
         if environment == "production" and not redis_url:
             raise RuntimeError("REDIS_URL is required when GALAXY_ENVIRONMENT=production")
 
+        lila_provider_base_url = os.getenv("LILA_PROVIDER_BASE_URL") or None
+        lila_provider_model_id = os.getenv("LILA_MODEL_ID") or None
+        lila_provider_api_key = os.getenv("LILA_PROVIDER_API_KEY") or None
+        lila_database_path = os.getenv("LILA_DATABASE_PATH") or None
+        storage_key_text = os.getenv("LILA_STORAGE_ENCRYPTION_KEY") or None
+
+        lila_storage_encryption_key = None
+        if storage_key_text is not None:
+            if len(storage_key_text) != 64:
+                raise RuntimeError("LILA_STORAGE_ENCRYPTION_KEY must be a 64-character hexadecimal value")
+            try:
+                lila_storage_encryption_key = bytes.fromhex(storage_key_text)
+            except ValueError:
+                raise RuntimeError("LILA_STORAGE_ENCRYPTION_KEY must be a 64-character hexadecimal value") from None
+            if len(lila_storage_encryption_key) != 32:
+                raise RuntimeError("LILA_STORAGE_ENCRYPTION_KEY must decode to exactly 32 bytes")
+
+        if lila_database_path is not None and not Path(lila_database_path).is_absolute():
+            raise RuntimeError("LILA_DATABASE_PATH must be an absolute path on persistent local storage")
+
+        try:
+            lila_provider_timeout_seconds = float(os.getenv("LILA_PROVIDER_TIMEOUT_SECONDS", "30"))
+        except ValueError:
+            raise RuntimeError("LILA_PROVIDER_TIMEOUT_SECONDS must be a number") from None
+        if not 1 <= lila_provider_timeout_seconds <= 120:
+            raise RuntimeError("LILA_PROVIDER_TIMEOUT_SECONDS must be between 1 and 120")
+
+        lila_provider_id = os.getenv("LILA_PROVIDER_ID", "default").strip()
+        lila_system_prompt = os.getenv("LILA_SYSTEM_PROMPT", DEFAULT_LILA_SYSTEM_PROMPT)
+        if not lila_system_prompt.strip() or len(lila_system_prompt) > 8000:
+            raise RuntimeError("LILA_SYSTEM_PROMPT must contain between 1 and 8000 characters")
+
+        lila_values_requested = any((
+            lila_provider_base_url,
+            lila_provider_model_id,
+            lila_provider_api_key,
+            lila_database_path,
+            storage_key_text,
+        ))
+        lila_values_complete = all((
+            lila_provider_base_url,
+            lila_provider_model_id,
+            lila_database_path,
+            lila_storage_encryption_key is not None,
+        ))
+        if lila_values_requested and not lila_values_complete:
+            raise RuntimeError(
+                "Lila configuration is incomplete; set LILA_PROVIDER_BASE_URL, "
+                "LILA_MODEL_ID, LILA_DATABASE_PATH and LILA_STORAGE_ENCRYPTION_KEY together"
+            )
+        if environment == "production" and not lila_values_complete:
+            raise RuntimeError(
+                "Production requires a configured Lila model provider and encrypted persistent storage"
+            )
+
         voices = frozenset(
             item.strip()
             for item in os.getenv("GALAXY_ALLOWED_VOICES", "alloy,ash,ballad,coral,echo,sage,shimmer,verse").split(",")
@@ -86,11 +171,11 @@ class Settings:
             raise RuntimeError("GALAXY_ALLOWED_CHARACTER_IDS must contain at least one character")
 
         return cls(
-            openai_api_key=os.environ["OPENAI_API_KEY"],
+            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             auth_jwks_url=os.environ["AUTH_JWKS_URL"],
             auth_issuer=os.environ["AUTH_ISSUER"],
             auth_audience=os.environ["AUTH_AUDIENCE"],
-            safety_identifier_hmac_key=os.environ["SAFETY_IDENTIFIER_HMAC_KEY"],
+            safety_identifier_hmac_key=os.getenv("SAFETY_IDENTIFIER_HMAC_KEY") or None,
             allowed_voices=voices,
             allowed_character_ids=characters,
             realtime_model=os.getenv("REALTIME_MODEL", "gpt-realtime"),
@@ -103,4 +188,12 @@ class Settings:
             redis_url=redis_url,
             lila_turns_per_minute=lila_turns_per_minute,
             lila_turns_per_day=lila_turns_per_day,
+            lila_provider_id=lila_provider_id,
+            lila_provider_base_url=lila_provider_base_url,
+            lila_provider_model_id=lila_provider_model_id,
+            lila_provider_api_key=lila_provider_api_key,
+            lila_provider_timeout_seconds=lila_provider_timeout_seconds,
+            lila_database_path=lila_database_path,
+            lila_storage_encryption_key=lila_storage_encryption_key,
+            lila_system_prompt=lila_system_prompt,
         )

@@ -1,15 +1,25 @@
 import logging
 import time
 import uuid
+from uuid import UUID
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, ValidationError
 
-from .lila_core.contracts import CoreTurnRequest, CoreTurnResponse
+from .lila_core.contracts import ConversationHistoryPage, CoreTurnRequest, CoreTurnResponse
+from .lila_core.context import ContextAssembler
+from .lila_core.openai_compatible import (
+    ModelProviderConfigurationError,
+    ModelProviderUnavailable,
+    OpenAICompatibleConfig,
+    OpenAICompatibleModelAdapter,
+)
+from .lila_core.memory import IdempotencyKeyConflict, IdempotentTurnInProgress
 from .lila_core.service import CoreTurnService, ModelAdapterContractError
+from .lila_core.sqlite_store import SqliteLilaStore
 from redis.asyncio import Redis
 
 from .config import Settings
@@ -57,6 +67,7 @@ def create_app(
     session_registry: Any | None = None,
     lila_core_service: CoreTurnService | None = None,
     lila_turn_rate_limiter: Any | None = None,
+    lila_history_reader: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -125,6 +136,49 @@ def create_app(
                 app.state.settings.lila_turns_per_day,
             )
 
+        app.state.lila_store = None
+        app.state.lila_history_reader = lila_history_reader
+        if (
+            lila_core_service is None
+            and app.state.settings.lila_configuration_requested
+            and not app.state.settings.lila_is_configured
+        ):
+            raise RuntimeError("Lila configuration is incomplete")
+        if lila_core_service is not None:
+            app.state.lila_core_service = lila_core_service
+        elif app.state.settings.lila_is_configured:
+            store = SqliteLilaStore(
+                app.state.settings.lila_database_path,
+                app.state.settings.lila_storage_encryption_key,
+            )
+            await store.initialize()
+            provider_config = OpenAICompatibleConfig(
+                provider_id=app.state.settings.lila_provider_id,
+                base_url=app.state.settings.lila_provider_base_url,
+                model_id=app.state.settings.lila_provider_model_id,
+                api_key=app.state.settings.lila_provider_api_key,
+                timeout_seconds=app.state.settings.lila_provider_timeout_seconds,
+                system_prompt=app.state.settings.lila_system_prompt,
+            )
+            adapter = OpenAICompatibleModelAdapter(
+                app.state.http_client,
+                provider_config,
+            )
+            assembler = ContextAssembler(store, store)
+            app.state.lila_core_service = CoreTurnService(
+                assembler,
+                adapter,
+                store,
+            )
+            app.state.lila_store = store
+            app.state.lila_history_reader = store
+        elif app.state.settings.environment == "production":
+            raise RuntimeError(
+                "Production requires a configured Lila model provider and encrypted persistent storage"
+            )
+        else:
+            app.state.lila_core_service = None
+
         yield
         if app.state.redis is not None:
             await app.state.redis.aclose()
@@ -133,6 +187,7 @@ def create_app(
 
     app = FastAPI(title="Galaxy Backend", version="0.2.0", lifespan=lifespan)
     app.state.lila_core_service = lila_core_service
+    app.state.lila_history_reader = lila_history_reader
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -179,11 +234,55 @@ def create_app(
                 raise HTTPException(status_code=503, detail="Redis readiness check failed") from exc
         return {"status": "ready"}
 
+    @app.get(
+        "/v1/lila/conversations/{conversation_id}/messages",
+        response_model=ConversationHistoryPage,
+    )
+    async def get_lila_conversation_history(
+        conversation_id: str,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+        limit: int = Query(default=20, ge=1, le=20),
+        before_sequence: int | None = Query(default=None, ge=1),
+    ):
+        if not conversation_id.strip() or len(conversation_id) > 128:
+            raise HTTPException(status_code=422, detail="Conversation ID is invalid")
+        reader = request.app.state.lila_history_reader
+        if reader is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila conversation history is not configured",
+            )
+        try:
+            messages, next_cursor = await reader.load_conversation_page(
+                principal_id=user_id,
+                conversation_id=conversation_id,
+                limit=limit,
+                before_sequence=before_sequence,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Conversation history request is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila conversation history is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        return ConversationHistoryPage(
+            conversation_id=conversation_id,
+            messages=[message.model_dump() for message in messages],
+            next_before_sequence=next_cursor,
+        )
+
     @app.post("/v1/lila/turns", response_model=CoreTurnResponse)
     async def create_lila_turn(
         payload: CoreTurnRequest,
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
+        idempotency_key: Annotated[UUID | None, Header(alias="Idempotency-Key")] = None,
     ):
         service: CoreTurnService | None = request.app.state.lila_core_service
         if service is None:
@@ -203,7 +302,35 @@ def create_app(
             ) from exc
 
         try:
-            return await service.handle(payload, principal_id=user_id)
+            if idempotency_key is None:
+                return await service.handle(payload, principal_id=user_id)
+            return await service.handle(
+                payload,
+                principal_id=user_id,
+                idempotency_key=str(idempotency_key),
+            )
+        except IdempotencyKeyConflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Idempotency-Key was already used for a different request",
+            ) from None
+        except IdempotentTurnInProgress:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A turn with this Idempotency-Key is still processing; retry the same request.",
+                headers={"Retry-After": "2"},
+            ) from None
+        except ModelProviderConfigurationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=exc.public_detail,
+            ) from None
+        except ModelProviderUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila model provider is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
         except (ModelAdapterContractError, ValidationError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -224,6 +351,11 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         config: Settings = request.app.state.settings
+        if not config.openai_api_key or not config.safety_identifier_hmac_key:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Realtime provider is not configured",
+            )
         if payload.character_id not in config.allowed_character_ids:
             raise HTTPException(status_code=422, detail="Requested character is not available")
         provider_voice_id = VOICE_ID_ALIASES.get(payload.voice_id, payload.voice_id)
