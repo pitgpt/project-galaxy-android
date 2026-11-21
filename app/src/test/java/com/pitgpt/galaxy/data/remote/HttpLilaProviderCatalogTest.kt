@@ -209,6 +209,68 @@ class HttpLilaProviderCatalogTest {
         assertTrue(oversized.disconnected)
     }
 
+    @Test
+    fun verifiesChatCompletionWithoutReturningOrPersistingGeneratedText() = runBlocking {
+        val connection = FakeConnection(
+            URL("https://api.example.test/v1/lila/providers/cloud-main/test-chat"),
+            200,
+            JSONObject()
+                .put("provider_id", "cloud-main")
+                .put("model_id", "model-a")
+                .put("chat_completion_verified", true)
+                .put("response_characters", 7)
+                .toString()
+        )
+        val catalog = HttpLilaProviderCatalog(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "token" },
+            connectionFactory = { connection }
+        )
+
+        val result = catalog.testProviderChat("cloud-main")
+
+        assertTrue(result.chatCompletionVerified)
+        assertEquals("cloud-main", result.providerId)
+        assertEquals("model-a", result.modelId)
+        assertEquals(7, result.responseCharacters)
+        assertEquals("POST", connection.requestMethod)
+        assertFalse(result.toString().contains("LILA_OK"))
+        assertTrue(connection.disconnected)
+    }
+
+    @Test
+    fun distinguishesSafeAndAmbiguousProviderTestFailures() = runBlocking {
+        val safe = FakeConnection(
+            URL("https://api.example.test/v1/lila/providers/cloud-main/test-chat"),
+            503,
+            "provider-secret",
+            mapOf("X-Lila-Retry-Safe" to "true")
+        )
+        val safeCatalog = HttpLilaProviderCatalog(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "token" },
+            connectionFactory = { safe }
+        )
+        val safeError = expectApiError { safeCatalog.testProviderChat("cloud-main") }
+        assertTrue(safeError.message.orEmpty().contains("Повтор безопасен"))
+        assertFalse(safeError.message.orEmpty().contains("provider-secret"))
+
+        val ambiguous = FakeConnection(
+            URL("https://api.example.test/v1/lila/providers/cloud-main/test-chat"),
+            503,
+            "provider-secret",
+            mapOf("X-Lila-Outcome-Unknown" to "true")
+        )
+        val ambiguousCatalog = HttpLilaProviderCatalog(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "token" },
+            connectionFactory = { ambiguous }
+        )
+        val ambiguousError = expectApiError { ambiguousCatalog.testProviderChat("cloud-main") }
+        assertTrue(ambiguousError.message.orEmpty().contains("мог получить"))
+        assertFalse(ambiguousError.message.orEmpty().contains("provider-secret"))
+    }
+
     private suspend fun expectApiError(block: suspend () -> Unit): GalaxyApiException {
         try {
             block()
@@ -231,7 +293,8 @@ class HttpLilaProviderCatalogTest {
     private class FakeConnection(
         url: URL,
         private val status: Int,
-        private val response: String
+        private val response: String,
+        private val responseHeaders: Map<String, String> = emptyMap()
     ) : HttpURLConnection(url) {
         val requestBody = ByteArrayOutputStream()
         val requestHeaders = mutableMapOf<String, String>()
@@ -244,6 +307,7 @@ class HttpLilaProviderCatalogTest {
         override fun getInputStream(): InputStream =
             ByteArrayInputStream(response.toByteArray(Charsets.UTF_8))
         override fun getResponseCode(): Int = status
+        override fun getHeaderField(name: String): String? = responseHeaders[name]
         override fun setRequestProperty(key: String, value: String) {
             requestHeaders[key] = value
         }
