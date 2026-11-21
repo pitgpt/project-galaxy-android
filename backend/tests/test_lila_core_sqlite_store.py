@@ -548,7 +548,7 @@ def test_schema_v3_migration_adds_turn_metadata_without_data_loss(tmp_path):
     assert page[1].provider_id is None and page[1].model_id is None
 
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 5
     assert database.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lila_turn_metadata'"
     ).fetchone()[0] == 1
@@ -590,5 +590,5 @@ def test_schema_v2_migration_adds_idempotency_ledger_without_data_loss(tmp_path)
         user_message="new turn",
     )) is None
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 5
     database.close()
