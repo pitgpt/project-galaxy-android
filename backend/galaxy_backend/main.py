@@ -160,43 +160,57 @@ def create_app(
         if (
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
-            and not app.state.settings.lila_is_configured
+            and not app.state.settings.lila_storage_is_configured
         ):
-            raise RuntimeError("Lila configuration is incomplete")
+            raise RuntimeError("Lila encrypted storage configuration is incomplete")
+        if (
+            lila_core_service is None
+            and app.state.settings.lila_provider_configuration_requested
+            and not app.state.settings.lila_provider_is_configured
+        ):
+            raise RuntimeError("Operator Lila provider configuration is incomplete")
         if lila_core_service is not None:
             app.state.lila_core_service = lila_core_service
-        elif app.state.settings.lila_is_configured:
+        elif app.state.settings.lila_storage_is_configured:
             store = SqliteLilaStore(
                 app.state.settings.lila_database_path,
                 app.state.settings.lila_storage_encryption_key,
             )
             await store.initialize()
-            provider_config = OpenAICompatibleConfig(
-                provider_id=app.state.settings.lila_provider_id,
-                base_url=app.state.settings.lila_provider_base_url,
-                model_id=app.state.settings.lila_provider_model_id,
-                api_key=app.state.settings.lila_provider_api_key,
-                timeout_seconds=app.state.settings.lila_provider_timeout_seconds,
-                system_prompt=app.state.settings.lila_system_prompt,
-            )
-            adapter = OpenAICompatibleModelAdapter(
-                app.state.http_client,
-                provider_config,
-            )
-            app.state.lila_provider_adapter = adapter
-            assembler = ContextAssembler(store, store)
-            app.state.lila_core_service = CoreTurnService(
-                assembler,
-                adapter,
-                store,
-            )
             app.state.lila_store = store
-            app.state.lila_history_reader = store
+            app.state.lila_history_reader = lila_history_reader or store
             if app.state.lila_provider_registry is None:
                 app.state.lila_provider_registry = store
+
+            if app.state.settings.lila_provider_is_configured:
+                provider_config = OpenAICompatibleConfig(
+                    provider_id=app.state.settings.lila_provider_id,
+                    base_url=app.state.settings.lila_provider_base_url,
+                    model_id=app.state.settings.lila_provider_model_id,
+                    api_key=app.state.settings.lila_provider_api_key,
+                    timeout_seconds=app.state.settings.lila_provider_timeout_seconds,
+                    system_prompt=app.state.settings.lila_system_prompt,
+                )
+                adapter = OpenAICompatibleModelAdapter(
+                    app.state.http_client,
+                    provider_config,
+                )
+                app.state.lila_provider_adapter = adapter
+                assembler = ContextAssembler(store, store)
+                app.state.lila_core_service = CoreTurnService(
+                    assembler,
+                    adapter,
+                    store,
+                )
+            else:
+                # The encrypted catalog can be initialized before the owner
+                # adds the first provider. Turns remain unavailable until a
+                # provider is explicitly selected and composed.
+                app.state.lila_core_service = None
+                app.state.lila_provider_adapter = lila_provider_adapter
         elif app.state.settings.environment == "production":
             raise RuntimeError(
-                "Production requires a configured Lila model provider and encrypted persistent storage"
+                "Production requires encrypted persistent Lila storage"
             )
         else:
             app.state.lila_core_service = None
