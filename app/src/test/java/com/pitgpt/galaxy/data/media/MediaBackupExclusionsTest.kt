@@ -131,7 +131,7 @@ class MediaBackupExclusionsTest {
             "sharedpref" to "galaxy_provider_vault.xml",
             "sharedpref" to "galaxy_database_key.xml",
             "database" to ".",
-            "file" to "${EncryptedMediaStore.MEDIA_DIRECTORY}/"
+            "file" to "galaxy_media/"
         )
     }
 }

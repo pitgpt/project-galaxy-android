@@ -21,6 +21,20 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class EncryptedDatabaseKeyStoreAndroidInstrumentedTest {
     @Test
+    fun productionFactoryOpensEncryptedRoomDatabaseWithWal() {
+        System.loadLibrary("sqlcipher")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val database = GalaxyDatabaseFactory.get(context)
+        val opened = database.openHelper.writableDatabase
+
+        assertFalse(
+            "The production Galaxy database must not retain the plaintext SQLite header",
+            PlaintextDatabaseEncryptor().isPlaintextDatabase(context.getDatabasePath("galaxy.db"))
+        )
+        assertHealthyWalDatabase(opened)
+    }
+
+    @Test
     fun productionKeyStoreUnwrapFeedsSqlCipherAndSurvivesHelperReopen() {
         System.loadLibrary("sqlcipher")
         val context = InstrumentationRegistry.getInstrumentation().targetContext
