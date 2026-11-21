@@ -239,6 +239,31 @@ class HttpLilaTurnProviderTest {
         assertTrue(malformedError.message.orEmpty().contains("host"))
     }
 
+    @Test
+    fun explainsWhenProviderConnectionFailedBeforeRequestWasSent() = runBlocking {
+        val connection = FakeConnection(
+            URL("https://api.example.test/v1/lila/turns"),
+            503,
+            """{"detail":"provider-secret private-provider-detail"}""",
+            mapOf("X-Lila-Retry-Safe" to "true")
+        )
+        val provider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "supabase-access-token" },
+            connectionFactory = { connection }
+        )
+
+        val error = expectApiError {
+            provider.sendTurn("conversation-1", "Привет", idempotencyKey)
+        }
+
+        assertEquals(503, error.httpStatus)
+        assertTrue(error.message.orEmpty().contains("повтор безопасен", ignoreCase = true))
+        assertFalse(error.message.orEmpty().contains("provider-secret"))
+        assertFalse(error.message.orEmpty().contains("private-provider-detail"))
+        assertTrue(connection.disconnected)
+    }
+
     private suspend fun expectApiError(block: suspend () -> Unit): GalaxyApiException {
         try {
             block()
@@ -251,7 +276,8 @@ class HttpLilaTurnProviderTest {
     private class FakeConnection(
         url: URL,
         private val status: Int,
-        private val response: String
+        private val response: String,
+        private val responseHeaders: Map<String, String> = emptyMap()
     ) : HttpURLConnection(url) {
         val requestBody = ByteArrayOutputStream()
         val requestHeaders = mutableMapOf<String, String>()
@@ -271,6 +297,8 @@ class HttpLilaTurnProviderTest {
             ByteArrayInputStream(response.toByteArray(Charsets.UTF_8))
 
         override fun getResponseCode(): Int = status
+
+        override fun getHeaderField(name: String): String? = responseHeaders[name]
 
         override fun setRequestProperty(key: String, value: String) {
             requestHeaders[key] = value

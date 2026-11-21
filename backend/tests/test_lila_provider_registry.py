@@ -864,6 +864,67 @@ def test_turn_uses_selected_owner_provider_model_and_replays_without_second_gene
     ))) == 2
 
 
+def test_pre_send_connection_failure_is_retry_safe_and_reuses_idempotency_key(tmp_path):
+    outbound = []
+    factory_calls = []
+    fail_first_generation = True
+    generation_count = 0
+
+    async def handler(request):
+        nonlocal fail_first_generation, generation_count
+        outbound.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        if fail_first_generation:
+            fail_first_generation = False
+            raise httpx.ConnectError(
+                "provider-secret private-provider-detail",
+                request=request,
+            )
+        generation_count += 1
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Ответ после восстановления"}}]},
+        )
+
+    client, store = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    headers = {
+        **auth(),
+        "Idempotency-Key": "c5d64c80-4a7b-4f64-91e9-52f8dff4c412",
+    }
+    payload = {"conversation_id": "conversation-retry", "message": "Привет"}
+    with client:
+        created = client.post("/v1/lila/providers", headers=auth(), json=create_payload())
+        selected = client.put(
+            "/v1/lila/conversations/conversation-retry/model",
+            headers=auth(),
+            json={"provider_id": "cloud-main", "model_id": "model-a"},
+        )
+        first = client.post("/v1/lila/turns", headers=headers, json=payload)
+        retry = client.post("/v1/lila/turns", headers=headers, json=payload)
+
+    assert created.status_code == selected.status_code == 200
+    assert first.status_code == 503
+    assert first.headers["X-Lila-Retry-Safe"] == "true"
+    assert "provider-secret" not in first.text
+    assert "private-provider-detail" not in first.text
+    assert retry.status_code == 200
+    assert retry.json()["text"] == "Ответ после восстановления"
+    assert retry.json()["provider_id"] == "cloud-main"
+    assert retry.json()["model_id"] == "model-a"
+    assert generation_count == 1
+    assert [method for method, _ in outbound].count("POST") == 2
+    history = run(store.load_recent_messages(
+        principal_id="owner-a",
+        conversation_id="conversation-retry",
+        limit=10,
+    ))
+    assert [message.content for message in history] == ["Привет", "Ответ после восстановления"]
+
+
 def test_turn_requires_explicit_selection_when_owner_has_registered_providers(tmp_path):
     outbound = []
     factory_calls = []

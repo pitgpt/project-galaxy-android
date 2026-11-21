@@ -150,7 +150,14 @@ class HttpLilaTurnProvider(
 
                 val status = connection.responseCode
                 if (status !in 200..299) {
-                    throw GalaxyApiException(status, safeMessageFor(status))
+                    val retrySafe = connection.getHeaderField("X-Lila-Retry-Safe")
+                        ?.lowercase() == "true"
+                    val message = if (retrySafe) {
+                        "Не удалось установить соединение с выбранной моделью до отправки запроса. Повтор безопасен."
+                    } else {
+                        safeMessageFor(status)
+                    }
+                    throw GalaxyApiException(status, message)
                 }
 
                 val responseText = readBounded(connection.inputStream)
