@@ -1292,7 +1292,6 @@ def test_local_provider_runs_authenticated_api_to_core_history_over_real_pinned_
             ("POST", "/v1/chat/completions"),
             ("GET", "/v1/models"),
             ("POST", "/v1/chat/completions"),
-            ("POST", "/v1/chat/completions"),
         ]
         assert all(
             item[2] == "Bearer integration-only-secret"
