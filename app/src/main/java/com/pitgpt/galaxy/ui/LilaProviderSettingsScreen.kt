@@ -364,7 +364,7 @@ fun LilaProviderSettingsScreen(
                         Text("Удалить сохранённый API key")
                     }
                     Text(
-                        "Для локального runtime используй localhost (backend на той же машине) или host.docker.internal (Docker). По умолчанию разрешены порты 1234, 8080 и 11434; другие порты требуют настройки оператора. Сервер должен быть доступен из backend container.",
+                        "Для локального runtime используй localhost (backend на той же машине) или host.docker.internal (Docker). Сейчас разрешены только порты 1234 (LM Studio), 8080 (llama.cpp) и 11434 (Ollama); другие порты пока не поддерживаются. Сервер должен быть доступен из backend container.",
                         color = ProviderScreenMuted,
                         fontSize = 11.sp
                     )
