@@ -26,6 +26,8 @@ services:
       # Secret values are injected by the host secret manager, never stored in .env.
       LILA_STORAGE_ENCRYPTION_KEY: ${LILA_STORAGE_ENCRYPTION_KEY:?Inject LILA_STORAGE_ENCRYPTION_KEY from a secret manager}
       LILA_PROVIDER_API_KEY: ${LILA_PROVIDER_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - galaxy-lila-data:/var/lib/galaxy/lila
     depends_on:

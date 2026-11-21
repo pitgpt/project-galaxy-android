@@ -10,6 +10,9 @@ import ipaddress
 from urllib.parse import urlsplit
 
 
+DEFAULT_LOCAL_PROVIDER_PORTS = frozenset({1234, 8080, 11434})
+
+
 _BLOCKED_CLOUD_SUFFIXES = (
     ".localhost",
     ".local",
@@ -36,7 +39,12 @@ _BLOCKED_CLOUD_HOSTS = {
 }
 
 
-def validate_provider_endpoint(provider_type: str, base_url: str) -> None:
+def validate_provider_endpoint(
+    provider_type: str,
+    base_url: str,
+    *,
+    local_allowed_ports: frozenset[int] = DEFAULT_LOCAL_PROVIDER_PORTS,
+) -> None:
     """Validate endpoint class and URL syntax without making a network request.
 
     Local providers are restricted to loopback so an authenticated user cannot
@@ -78,12 +86,15 @@ def validate_provider_endpoint(provider_type: str, base_url: str) -> None:
         address = None
 
     if provider_type == "local":
-        is_loopback = (
+        allowed_local_host = (
             address.is_loopback if address is not None
-            else normalized_host == "localhost"
+            else normalized_host in {"localhost", "host.docker.internal"}
         )
-        if not is_loopback:
-            raise ValueError("Local providers must use localhost or a literal loopback IP")
+        if not allowed_local_host:
+            raise ValueError("Local providers must use loopback or the explicit Docker host gateway")
+        effective_port = port or (443 if parsed.scheme == "https" else 80)
+        if effective_port not in local_allowed_ports:
+            raise ValueError("Local provider port is not in the operator allowlist")
         return
 
     if parsed.scheme != "https":

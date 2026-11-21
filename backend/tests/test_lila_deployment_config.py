@@ -45,6 +45,7 @@ def test_compose_mounts_lila_database_on_a_named_persistent_volume():
         for mount in mounts
     )
     assert "galaxy-lila-data" in config["volumes"]
+    assert "host.docker.internal:host-gateway" in backend.get("extra_hosts", [])
 
 
 def test_compose_injects_storage_and_provider_secrets_from_runtime_environment():

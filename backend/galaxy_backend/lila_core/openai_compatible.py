@@ -130,7 +130,7 @@ class OpenAICompatibleConfig:
                     )
                 )
             except ValueError:
-                allowed_cleartext = hostname.lower() == "localhost"
+                allowed_cleartext = hostname.lower() in {"localhost", "host.docker.internal"}
             if not allowed_cleartext:
                 raise ValueError("Cleartext Lila endpoints must use localhost or a literal private IP; use HTTPS otherwise")
 
