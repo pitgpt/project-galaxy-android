@@ -38,6 +38,7 @@ import com.pitgpt.galaxy.data.remote.GalaxyApiException
 import com.pitgpt.galaxy.data.remote.HttpLilaProviderCatalog
 import com.pitgpt.galaxy.data.remote.LilaConversationModelSelection
 import com.pitgpt.galaxy.data.remote.LilaProviderProbeResult
+import com.pitgpt.galaxy.data.remote.LilaProviderChatTestResult
 import com.pitgpt.galaxy.data.remote.LilaProviderSummary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -58,6 +59,7 @@ fun LilaProviderSettingsScreen(
         mutableStateOf(LilaConversationModelSelection(conversationId.orEmpty(), false, null, null))
     }
     var probes by remember { mutableStateOf<Map<String, LilaProviderProbeResult>>(emptyMap()) }
+    var chatTests by remember { mutableStateOf<Map<String, LilaProviderChatTestResult>>(emptyMap()) }
     var selectedProviderId by remember { mutableStateOf<String?>(null) }
     var selectedModelId by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(true) }
@@ -122,7 +124,7 @@ fun LilaProviderSettingsScreen(
         }
         Text("ПРОВАЙДЕРЫ И МОДЕЛИ", color = ProviderScreenText, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(
-            "API keys отправляются только в защищённый backend. Galaxy не сохраняет их в Room или SharedPreferences.",
+            "API keys отправляются только в защищённый backend. Galaxy не сохраняет их в Room или SharedPreferences. Тест генерации отправляет короткий запрос и может расходовать токены.",
             color = ProviderScreenMuted,
             fontSize = 12.sp
         )
@@ -170,6 +172,7 @@ fun LilaProviderSettingsScreen(
             }
             providers.forEach { provider ->
                 val probe = probes[provider.providerId]
+                val chatTest = chatTests[provider.providerId]
                 Card(shape = RoundedCornerShape(16.dp)) {
                     Column(
                         Modifier.fillMaxWidth().padding(14.dp),
@@ -231,6 +234,37 @@ fun LilaProviderSettingsScreen(
                             TextButton(enabled = !isSaving, onClick = { pendingDelete = provider }) {
                                 Text("УДАЛИТЬ")
                             }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(
+                                enabled = !isSaving && provider.enabled,
+                                onClick = {
+                                    scope.launch {
+                                        isSaving = true
+                                        error = null
+                                        notice = null
+                                        try {
+                                            val result = catalog.testProviderChat(provider.providerId)
+                                            chatTests = chatTests + (provider.providerId to result)
+                                            notice = "Chat completion подтверждён: ${result.modelId}. Тестовый ответ не сохранён в истории."
+                                        } catch (exception: CancellationException) {
+                                            throw exception
+                                        } catch (exception: Exception) {
+                                            error = (exception as? GalaxyApiException)?.message
+                                                ?: "Не удалось проверить генерацию."
+                                        } finally {
+                                            isSaving = false
+                                        }
+                                    }
+                                }
+                            ) { Text("ТЕСТ ГЕНЕРАЦИИ") }
+                        }
+                        if (chatTest != null) {
+                            Text(
+                                "Генерация подтверждена · ${chatTest.modelId} · ${chatTest.responseCharacters} символов",
+                                color = ProviderScreenMuted,
+                                fontSize = 11.sp
+                            )
                         }
                         if (probe != null) {
                             Text(
@@ -395,6 +429,7 @@ fun LilaProviderSettingsScreen(
                                     }
                                     apiKey = ""
                                     clearApiKey = false
+                                    chatTests = chatTests - (editingProviderId ?: providerId)
                                     notice = "Провайдер сохранён. Ключ не хранится на устройстве."
                                     resetEditor()
                                     reload()
@@ -416,7 +451,7 @@ fun LilaProviderSettingsScreen(
             }
         }
         Text(
-            "Проверка /models не подтверждает генерацию. Совместимость с runtime подтверждается только реальным тестовым ходом.",
+            "ПРОВЕРИТЬ выполняет только GET /models. ТЕСТ ГЕНЕРАЦИИ отправляет короткий запрос и может расходовать токены. При неоднозначном таймауте не повторяй тест сразу: провайдер мог уже принять запрос.",
             color = ProviderScreenMuted,
             fontSize = 11.sp
         )
@@ -439,6 +474,7 @@ fun LilaProviderSettingsScreen(
                         try {
                             catalog.deleteProvider(target.providerId)
                             probes = probes - target.providerId
+                            chatTests = chatTests - target.providerId
                             notice = "Провайдер удалён. Автоматической подмены модели не будет."
                             pendingDelete = null
                             reload()
