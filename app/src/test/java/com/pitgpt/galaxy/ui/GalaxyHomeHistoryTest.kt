@@ -9,7 +9,7 @@ import org.junit.Test
 
 class GalaxyHomeHistoryTest {
     @Test
-    fun mergeReplacesPendingLocalMessageWithCanonicalRemoteIdentityWhenTurnCommitted() {
+    fun mergeDoesNotInferPendingTurnCompletionFromMatchingHistoryText() {
         val characterId = "owner:partition:galaxy.default"
         val conversationId = "00000000-0000-4000-8000-000000000402"
         val pending = ConversationMessage(
@@ -28,12 +28,13 @@ class GalaxyHomeHistoryTest {
 
         assertEquals(
             listOf(
+                pending.id,
                 "lila-$conversationId-00000000000000000001",
                 "lila-$conversationId-00000000000000000002"
             ),
             merged.map { it.id }
         )
-        assertTrue(merged.none { it.id.startsWith(PENDING_LILA_MESSAGE_PREFIX) })
+        assertTrue(merged.any { it.id == pending.id })
     }
 
     @Test
