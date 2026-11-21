@@ -1042,7 +1042,7 @@ def test_provider_chat_test_runs_one_completion_without_persisting_history(tmp_p
         conversation_id="lila-provider-chat-test",
         limit=10,
     ))
-    assert history == []
+    assert not history
 
 
 def test_provider_chat_test_refuses_disabled_provider_without_egress(tmp_path):
