@@ -162,7 +162,7 @@ def create_app(
             and app.state.settings.lila_configuration_requested
             and not app.state.settings.lila_storage_is_configured
         ):
-            raise RuntimeError("Lila encrypted storage configuration is incomplete")
+            raise RuntimeError("Lila configuration is incomplete: encrypted storage is not configured")
         if (
             lila_core_service is None
             and app.state.settings.lila_provider_configuration_requested
