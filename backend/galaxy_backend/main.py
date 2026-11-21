@@ -160,9 +160,6 @@ def create_app(
         app.state.lila_history_reader = lila_history_reader
         app.state.lila_provider_adapter = lila_provider_adapter
         app.state.lila_provider_registry = lila_provider_registry
-    app.state.lila_provider_http_client_factory = (
-        lila_provider_http_client_factory or create_provider_http_client
-    )
         if (
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
@@ -233,6 +230,9 @@ def create_app(
     app.state.lila_history_reader = lila_history_reader
     app.state.lila_provider_adapter = lila_provider_adapter
     app.state.lila_provider_registry = lila_provider_registry
+    app.state.lila_provider_http_client_factory = (
+        lila_provider_http_client_factory or create_provider_http_client
+    )
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
