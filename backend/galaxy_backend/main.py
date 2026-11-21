@@ -928,7 +928,7 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Lila model provider could not be reached before generation; retry is safe.",
-                headers={"Retry-After": "5"},
+                headers={"Retry-After": "5", "X-Lila-Retry-Safe": "true"},
             ) from None
         except ModelProviderConfigurationError as exc:
             raise HTTPException(
