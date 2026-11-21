@@ -166,12 +166,12 @@ class Settings:
             lila_provider_complete and lila_storage_complete
         ):
             raise RuntimeError(
-                "Operator Lila provider configuration requires LILA_PROVIDER_BASE_URL, "
+                "Lila configuration is incomplete: operator provider settings require LILA_PROVIDER_BASE_URL, "
                 "LILA_MODEL_ID, LILA_DATABASE_PATH and LILA_STORAGE_ENCRYPTION_KEY"
             )
         if environment == "production" and not lila_storage_complete:
             raise RuntimeError(
-                "Production requires encrypted persistent Lila storage"
+                "Production requires a configured Lila model provider or owner-managed catalog and encrypted persistent storage"
             )
 
         voices = frozenset(
