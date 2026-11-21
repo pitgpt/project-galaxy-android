@@ -19,6 +19,8 @@ class Settings:
     session_lease_seconds: int = 90
     environment: str = "development"
     redis_url: str | None = None
+    lila_turns_per_minute: int = 20
+    lila_turns_per_day: int = 500
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -44,6 +46,13 @@ class Settings:
         daily_limit = int(os.getenv("REALTIME_SESSIONS_PER_DAY", "100"))
         if daily_limit < 1:
             raise RuntimeError("REALTIME_SESSIONS_PER_DAY must be at least 1")
+
+        lila_turns_per_minute = int(os.getenv("LILA_TURNS_PER_MINUTE", "20"))
+        if not 1 <= lila_turns_per_minute <= 1000:
+            raise RuntimeError("LILA_TURNS_PER_MINUTE must be between 1 and 1000")
+        lila_turns_per_day = int(os.getenv("LILA_TURNS_PER_DAY", "500"))
+        if not 1 <= lila_turns_per_day <= 100000:
+            raise RuntimeError("LILA_TURNS_PER_DAY must be between 1 and 100000")
 
         max_active = int(os.getenv("REALTIME_MAX_ACTIVE_SESSIONS", "2"))
         if max_active < 1:
@@ -92,4 +101,6 @@ class Settings:
             session_lease_seconds=lease_seconds,
             environment=environment,
             redis_url=redis_url,
+            lila_turns_per_minute=lila_turns_per_minute,
+            lila_turns_per_day=lila_turns_per_day,
         )
