@@ -55,8 +55,47 @@ jobs:
         if: always()
         run: rm -f .env
 
+  instrumented-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Enable KVM group permissions
+        if: hashFiles('app/src/androidTest/**/*') != ''
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=/dev/kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run Android instrumentation tests on emulator
+        if: hashFiles('app/src/androidTest/**/*') != ''
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: gradle connectedDebugAndroidTest
+      - name: Upload emulator diagnostics
+        if: always() && hashFiles('app/src/androidTest/**/*') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: galaxy-emulator-diagnostics
+          path: emulator-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
+
   build:
-    needs: [test, backend-test]
+    needs: [test, backend-test, instrumented-test]
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
