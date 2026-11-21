@@ -758,7 +758,10 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Lila provider test outcome is unavailable; the provider may have received the request.",
-                headers={"Retry-After": "5"},
+                headers={
+                    "Retry-After": "5",
+                    "X-Lila-Outcome-Unknown": "true",
+                },
             ) from None
         except ModelAdapterContractError:
             raise HTTPException(
