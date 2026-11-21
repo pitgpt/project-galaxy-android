@@ -133,6 +133,82 @@ class HttpLilaTurnProviderTest {
     }
 
     @Test
+    fun readsCompletedTurnStatusWithoutPostingAnotherGeneration() = runBlocking {
+        val status = FakeConnection(
+            URL("https://api.example.test/v1/lila/conversations/conversation-1/turns/$idempotencyKey"),
+            200,
+            JSONObject()
+                .put("conversation_id", "conversation-1")
+                .put("status", "completed")
+                .put(
+                    "response",
+                    JSONObject()
+                        .put("conversation_id", "conversation-1")
+                        .put("text", "Ответ восстановлен")
+                        .put("provider_id", "cloud-primary")
+                        .put("model_id", "model-a")
+                )
+                .toString()
+        )
+        val provider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "test-access-token" },
+            connectionFactory = { status }
+        )
+
+        val result = provider.getTurnStatus("conversation-1", idempotencyKey)
+
+        assertEquals(LilaTurnStatus.COMPLETED, result?.status)
+        assertEquals("Ответ восстановлен", result?.result?.text)
+        assertEquals("cloud-primary", result?.result?.providerId)
+        assertEquals("GET", status.requestMethod)
+        assertTrue(status.requestBody.size() == 0)
+        assertEquals("Bearer test-access-token", status.requestHeaders["Authorization"])
+        assertTrue(status.disconnected)
+    }
+
+    @Test
+    fun pendingAndNotFoundTurnStatusesDoNotStartGeneration() = runBlocking {
+        val pending = FakeConnection(
+            URL("https://api.example.test/v1/lila/conversations/conversation-1/turns/$idempotencyKey"),
+            200,
+            JSONObject()
+                .put("conversation_id", "conversation-1")
+                .put("status", "pending")
+                .put("response", JSONObject.NULL)
+                .toString()
+        )
+        val pendingProvider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "test-access-token" },
+            connectionFactory = { pending }
+        )
+        assertEquals(
+            LilaTurnStatus.PENDING,
+            pendingProvider.getTurnStatus("conversation-1", idempotencyKey)?.status
+        )
+        assertEquals("GET", pending.requestMethod)
+        assertTrue(pending.requestBody.size() == 0)
+
+        val notFound = FakeConnection(
+            URL("https://api.example.test/v1/lila/conversations/conversation-1/turns/$idempotencyKey"),
+            404,
+            "not found"
+        )
+        val notFoundProvider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "test-access-token" },
+            connectionFactory = { notFound }
+        )
+        assertEquals(
+            LilaTurnStatus.NOT_FOUND,
+            notFoundProvider.getTurnStatus("conversation-1", idempotencyKey)?.status
+        )
+        assertEquals("GET", notFound.requestMethod)
+        assertTrue(notFound.requestBody.size() == 0)
+    }
+
+    @Test
     fun conversationIdentityIsStableAcrossClientsAndSeparatedByOwnerAndCharacter() {
         val first = stableLilaConversationId("owner-partition-a", "galaxy.default")
 

@@ -54,6 +54,29 @@ class GalaxyHomeHistoryTest {
     }
 
     @Test
+    fun mergeDoesNotConsumePendingMessageForAnOlderRemoteMessageWithTheSameText() {
+        val characterId = "owner:partition:galaxy.default"
+        val conversationId = "00000000-0000-4000-8000-000000000404"
+        val pending = ConversationMessage(
+            id = pendingLilaMessageId("00000000-0000-4000-8000-000000000497"),
+            characterId = characterId,
+            role = MessageRole.USER,
+            content = "same text",
+            createdAtEpochMillis = 20_000
+        )
+        val remote = listOf(
+            LilaHistoryMessage(1, "user", "same text", 10_000),
+            LilaHistoryMessage(2, "assistant", "older answer", 10_001)
+        )
+
+        val merged = mergeRemoteHistory(characterId, conversationId, listOf(pending), remote)
+
+        assertEquals(3, merged.size)
+        assertTrue(merged.any { it.id == pending.id })
+        assertTrue(merged.any { it.content == "older answer" })
+    }
+
+    @Test
     fun mergePreservesLocalRowsAndOrdersRemoteMessagesWithEqualTimestamps() {
         val characterId = "owner:partition:galaxy.default"
         val conversationId = "00000000-0000-4000-8000-000000000401"

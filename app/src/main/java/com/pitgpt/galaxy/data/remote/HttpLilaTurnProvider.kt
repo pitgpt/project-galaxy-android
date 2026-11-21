@@ -41,6 +41,17 @@ data class LilaHistoryMessage(
             .takeIf { it.isNotBlank() }
 }
 
+enum class LilaTurnStatus {
+    PENDING,
+    COMPLETED,
+    NOT_FOUND
+}
+
+data class LilaTurnReconciliation(
+    val status: LilaTurnStatus,
+    val result: LilaTurnResult? = null
+)
+
 /**
  * Stable across Galaxy and Desktop for the same authenticated owner partition
  * and character. This is an identifier, not an authentication credential.
@@ -175,10 +186,10 @@ class HttpLilaTurnProvider(
                         val reconciliation = reconcileTurnResultBlocking(
                             conversationId, idempotencyKey, token
                         )
-                        if (reconciliation?.status == "completed") {
+                        if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                             return@withContext reconciliation.result!!
                         }
-                        if (reconciliation?.status == "pending") {
+                        if (reconciliation?.status == LilaTurnStatus.PENDING) {
                             throw GalaxyApiException(status, OUTCOME_UNKNOWN_MESSAGE)
                         }
                     }
@@ -212,10 +223,10 @@ class HttpLilaTurnProvider(
                     val reconciliation = reconcileTurnResultBlocking(
                         conversationId, idempotencyKey, token
                     )
-                    if (reconciliation?.status == "completed") {
+                    if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                         return@withContext reconciliation.result!!
                     }
-                    if (reconciliation?.status == "pending") {
+                    if (reconciliation?.status == LilaTurnStatus.PENDING) {
                         throw GalaxyApiException(null, OUTCOME_UNKNOWN_MESSAGE)
                     }
                 }
@@ -227,10 +238,10 @@ class HttpLilaTurnProvider(
                     val reconciliation = reconcileTurnResultBlocking(
                         conversationId, idempotencyKey, token
                     )
-                    if (reconciliation?.status == "completed") {
+                    if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                         return@withContext reconciliation.result!!
                     }
-                    if (reconciliation?.status == "pending") {
+                    if (reconciliation?.status == LilaTurnStatus.PENDING) {
                         throw GalaxyApiException(null, OUTCOME_UNKNOWN_MESSAGE)
                     }
                 }
@@ -241,10 +252,35 @@ class HttpLilaTurnProvider(
             }
         }
 
-    private data class TurnReconciliation(
-        val status: String,
-        val result: LilaTurnResult? = null
-    )
+    /**
+     * Reads the durable result of an earlier turn without issuing another model request.
+     * Used after process recreation to reconcile locally persisted pending messages.
+     */
+    suspend fun getTurnStatus(
+        conversationId: String,
+        idempotencyKey: String
+    ): LilaTurnReconciliation? = withContext(Dispatchers.IO) {
+        if (runCatching { UUID.fromString(conversationId) }.isFailure ||
+            runCatching { UUID.fromString(idempotencyKey) }.isFailure
+        ) {
+            throw GalaxyApiException(422, "Идентификатор запроса Lila некорректен.")
+        }
+        configurationError?.let { error -> throw GalaxyApiException(null, error) }
+        if (!isConfigured) {
+            throw GalaxyApiException(null, "Сервер Lila не настроен в этой сборке Galaxy.")
+        }
+        val token = try {
+            accessTokenProvider?.accessToken()?.takeIf { it.isNotBlank() }
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            throw GalaxyApiException(null, "Не удалось проверить авторизацию Galaxy.")
+        }
+        if (token == null) {
+            throw GalaxyApiException(401, "Войди в аккаунт Galaxy, чтобы восстановить ответ Лилы.")
+        }
+        reconcileTurnResultBlocking(conversationId, idempotencyKey, token)
+    }
 
     /**
      * Fetch a previously committed response by its idempotency key. This never
@@ -254,7 +290,7 @@ class HttpLilaTurnProvider(
         conversationId: String,
         idempotencyKey: String,
         token: String
-    ): TurnReconciliation? {
+    ): LilaTurnReconciliation? {
         val connection = try {
             connectionFactory(
                 URL("$normalizedBaseUrl/v1/lila/conversations/$conversationId/turns/$idempotencyKey")
@@ -277,13 +313,13 @@ class HttpLilaTurnProvider(
             connection.setRequestProperty("Authorization", "Bearer $token")
 
             val status = connection.responseCode
-            if (status == 404) return TurnReconciliation("not_found")
+            if (status == 404) return LilaTurnReconciliation(LilaTurnStatus.NOT_FOUND)
             if (status !in 200..299) return null
 
             val payload = JSONObject(readBounded(connection.inputStream, MAX_RESPONSE_BYTES))
             if (payload.optString("conversation_id", "") != conversationId) return null
             return when (payload.optString("status", "")) {
-                "pending" -> TurnReconciliation("pending")
+                "pending" -> LilaTurnReconciliation(LilaTurnStatus.PENDING)
                 "completed" -> {
                     val response = payload.optJSONObject("response") ?: return null
                     val responseConversationId = response.optString("conversation_id", "")
@@ -294,8 +330,8 @@ class HttpLilaTurnProvider(
                     ) {
                         return null
                     }
-                    TurnReconciliation(
-                        "completed",
+                    LilaTurnReconciliation(
+                        LilaTurnStatus.COMPLETED,
                         LilaTurnResult(
                             conversationId = responseConversationId,
                             text = assistantText,

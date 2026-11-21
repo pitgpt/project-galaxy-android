@@ -55,6 +55,7 @@ import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import com.pitgpt.galaxy.data.remote.GalaxyApiException
 import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
+import com.pitgpt.galaxy.data.remote.LilaTurnStatus
 import com.pitgpt.galaxy.data.remote.stableLilaConversationId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -145,6 +146,51 @@ fun GalaxyHome() {
         historySyncWarning = null
         isLoading = true
         try {
+            val pendingLocalMessages = app.conversations.getForCharacter(storageCharacterId)
+                .filter { it.id.startsWith(PENDING_LILA_MESSAGE_PREFIX) }
+                .takeLast(5)
+            pendingLocalMessages.forEach { pendingMessage ->
+                val idempotencyKey = pendingMessage.id.removePrefix(PENDING_LILA_MESSAGE_PREFIX)
+                val reconciliation = try {
+                    app.lilaTurnProvider.getTurnStatus(conversationId, idempotencyKey)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
+                    val recovered = reconciliation.result ?: return@forEach
+                    val userMessage = pendingMessage.copy(id = UUID.randomUUID().toString())
+                    val assistantMessage = ConversationMessage(
+                        id = UUID.randomUUID().toString(),
+                        characterId = storageCharacterId,
+                        role = MessageRole.CHARACTER,
+                        content = recovered.text,
+                        createdAtEpochMillis = pendingMessage.createdAtEpochMillis + 1
+                    )
+                    try {
+                        app.conversations.commitPendingTurn(
+                            pendingMessage.id,
+                            userMessage,
+                            assistantMessage
+                        )
+                        clearPendingLilaTurnKey(
+                            context,
+                            pendingLilaTurnPreferenceKey(
+                                ownerKey,
+                                conversationId,
+                                pendingMessage.content
+                            )
+                        )
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        historySyncWarning =
+                            "Ответ Лилы восстановлен на сервере, но локальная копия пока не обновлена."
+                    }
+                }
+            }
+
             val remoteHistory = app.lilaTurnProvider.loadAllHistory(conversationId)
             val latestRemoteModel = remoteHistory.lastOrNull { it.role == "assistant" }?.displayModelLabel
             // The current conversation selection can change on another client before
@@ -1235,7 +1281,8 @@ internal fun mergeRemoteHistory(
             else -> throw IllegalArgumentException("Unsupported Lila history role")
         }
         val matchIndex = unmatchedLocal.indexOfFirst {
-            it.role == role && it.content == entry.content
+            !it.id.startsWith(PENDING_LILA_MESSAGE_PREFIX) &&
+                it.role == role && it.content == entry.content
         }
         val previous = if (matchIndex >= 0) unmatchedLocal.removeAt(matchIndex) else null
         ConversationMessage(
@@ -1288,16 +1335,24 @@ private data class PendingLilaTurnKey(
     val preferenceKey: String
 )
 
+private fun pendingLilaTurnPreferenceKey(
+    ownerKey: String,
+    conversationId: String,
+    message: String
+): String {
+    val fingerprint = MessageDigest.getInstance("SHA-256")
+        .digest("$ownerKey|$conversationId|$message".toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+    return "lila_pending_turn_$fingerprint"
+}
+
 private fun getOrCreatePendingLilaTurnKey(
     context: Context,
     ownerKey: String,
     conversationId: String,
     message: String
 ): PendingLilaTurnKey {
-    val fingerprint = MessageDigest.getInstance("SHA-256")
-        .digest("$ownerKey|$conversationId|$message".toByteArray(Charsets.UTF_8))
-        .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
-    val preferenceKey = "lila_pending_turn_$fingerprint"
+    val preferenceKey = pendingLilaTurnPreferenceKey(ownerKey, conversationId, message)
     val preferences = context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
     val existing = preferences.getString(preferenceKey, null)
         ?.takeIf { runCatching { UUID.fromString(it) }.isSuccess }
