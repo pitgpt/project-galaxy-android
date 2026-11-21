@@ -151,11 +151,17 @@ class HttpLilaTurnProvider(
                 val status = connection.responseCode
                 if (status !in 200..299) {
                     val retrySafe = connection.getHeaderField("X-Lila-Retry-Safe")
-                        ?.lowercase() == "true"
-                    val message = if (retrySafe) {
-                        "Не удалось установить соединение с выбранной моделью до отправки запроса. Повтор безопасен."
-                    } else {
-                        safeMessageFor(status)
+                        ?.trim()
+                        ?.equals("true", ignoreCase = true) == true
+                    val outcomeUnknown = connection.getHeaderField("X-Lila-Outcome-Unknown")
+                        ?.trim()
+                        ?.equals("true", ignoreCase = true) == true
+                    val message = when {
+                        retrySafe ->
+                            "Не удалось установить соединение с выбранной моделью до отправки запроса. Повтор безопасен."
+                        outcomeUnknown ->
+                            "Модель могла получить сообщение, но ответ не подтверждён. Не отправляй его повторно: это может запустить вторую генерацию."
+                        else -> safeMessageFor(status)
                     }
                     throw GalaxyApiException(status, message)
                 }
