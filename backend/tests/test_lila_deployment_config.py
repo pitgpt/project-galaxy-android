@@ -115,5 +115,5 @@ def test_operator_provider_requires_encrypted_storage(monkeypatch):
     monkeypatch.delenv("LILA_DATABASE_PATH", raising=False)
     monkeypatch.delenv("LILA_STORAGE_ENCRYPTION_KEY", raising=False)
 
-    with pytest.raises(RuntimeError, match="requires LILA_PROVIDER_BASE_URL"):
+    with pytest.raises(RuntimeError, match="Lila configuration is incomplete"):
         Settings.from_env()
