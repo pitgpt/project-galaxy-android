@@ -146,9 +146,11 @@ class HttpLilaTurnProvider(
                 requestBytes = body.toByteArray(Charsets.UTF_8)
                 connection.setFixedLengthStreamingMode(requestBytes.size)
                 connection.outputStream.use { output ->
+                    // Once the request stream is acquired, a partial write may already
+                    // have reached Core; reconcile by idempotency key if the write fails.
+                    requestMayHaveReachedCore = true
                     output.write(requestBytes)
                 }
-                requestMayHaveReachedCore = true
 
                 val status = connection.responseCode
                 if (status !in 200..299) {
