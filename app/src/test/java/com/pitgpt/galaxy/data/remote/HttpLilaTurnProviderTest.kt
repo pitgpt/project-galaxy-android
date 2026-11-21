@@ -332,3 +332,86 @@ class HttpLilaTurnProviderTest {
         }
     }
 }
+
+
+    @Test
+    fun recoversCommittedTurnFromStatusAfterTheOriginalResponseIsLost() = runBlocking {
+        val turn = FakeConnection(
+            URL("https://api.example.test/v1/lila/turns"),
+            503,
+            """{"detail":"provider outcome unknown"}""",
+            mapOf("X-Lila-Outcome-Unknown" to "true")
+        )
+        val status = FakeConnection(
+            URL("https://api.example.test/v1/lila/conversations/conversation-1/turns/$idempotencyKey"),
+            200,
+            JSONObject()
+                .put("conversation_id", "conversation-1")
+                .put("status", "completed")
+                .put(
+                    "response",
+                    JSONObject()
+                        .put("conversation_id", "conversation-1")
+                        .put("text", "Ответ уже сохранён")
+                        .put("provider_id", "cloud-primary")
+                        .put("model_id", "model-a")
+                )
+                .toString()
+        )
+        val provider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "supabase-access-token" },
+            connectionFactory = { url ->
+                if (url.path.endsWith("/$idempotencyKey")) status else turn
+            }
+        )
+
+        val result = provider.sendTurn("conversation-1", "Привет", idempotencyKey)
+
+        assertEquals("Ответ уже сохранён", result.text)
+        assertEquals("cloud-primary", result.providerId)
+        assertEquals("model-a", result.modelId)
+        assertEquals("POST", turn.requestMethod)
+        assertEquals("GET", status.requestMethod)
+        assertEquals("Bearer supabase-access-token", status.requestHeaders["Authorization"])
+        assertTrue(turn.disconnected)
+        assertTrue(status.disconnected)
+    }
+
+    @Test
+    fun keepsAmbiguousWarningWhenTurnStatusIsStillPending() = runBlocking {
+        val turn = FakeConnection(
+            URL("https://api.example.test/v1/lila/turns"),
+            503,
+            """{"detail":"provider outcome unknown"}""",
+            mapOf("X-Lila-Outcome-Unknown" to "true")
+        )
+        val status = FakeConnection(
+            URL("https://api.example.test/v1/lila/conversations/conversation-1/turns/$idempotencyKey"),
+            200,
+            JSONObject()
+                .put("conversation_id", "conversation-1")
+                .put("status", "pending")
+                .put("response", JSONObject.NULL)
+                .toString()
+        )
+        val provider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "supabase-access-token" },
+            connectionFactory = { url ->
+                if (url.path.endsWith("/$idempotencyKey")) status else turn
+            }
+        )
+
+        val error = expectApiError {
+            provider.sendTurn("conversation-1", "Привет", idempotencyKey)
+        }
+
+        assertEquals(503, error.httpStatus)
+        assertTrue(error.message.orEmpty().contains("могла получить", ignoreCase = true))
+        assertTrue(error.message.orEmpty().contains("не отправляй", ignoreCase = true))
+        assertEquals("POST", turn.requestMethod)
+        assertEquals("GET", status.requestMethod)
+        assertTrue(turn.disconnected)
+        assertTrue(status.disconnected)
+    }

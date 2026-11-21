@@ -126,6 +126,7 @@ class HttpLilaTurnProvider(
             }
 
             var requestBytes: ByteArray? = null
+            var requestMayHaveReachedCore = false
             try {
                 connection.requestMethod = "POST"
                 connection.instanceFollowRedirects = false
@@ -147,6 +148,7 @@ class HttpLilaTurnProvider(
                 connection.outputStream.use { output ->
                     output.write(requestBytes)
                 }
+                requestMayHaveReachedCore = true
 
                 val status = connection.responseCode
                 if (status !in 200..299) {
@@ -160,10 +162,25 @@ class HttpLilaTurnProvider(
                         retrySafe ->
                             "Не удалось установить соединение с выбранной моделью до отправки запроса. Повтор безопасен."
                         outcomeUnknown ->
-                            "Модель могла получить сообщение, но ответ не подтверждён. Не отправляй его повторно: это может запустить вторую генерацию."
+                            OUTCOME_UNKNOWN_MESSAGE
                         else -> safeMessageFor(status)
                     }
-                    throw GalaxyApiException(status, message)
+                    val originalError = GalaxyApiException(status, message)
+                    if (requestMayHaveReachedCore && !retrySafe &&
+                        (outcomeUnknown || status in 500..599)
+                    ) {
+                        connection.disconnect()
+                        val reconciliation = reconcileTurnResultBlocking(
+                            conversationId, idempotencyKey, token
+                        )
+                        if (reconciliation?.status == "completed") {
+                            return@withContext reconciliation.result!!
+                        }
+                        if (reconciliation?.status == "pending") {
+                            throw GalaxyApiException(status, OUTCOME_UNKNOWN_MESSAGE)
+                        }
+                    }
+                    throw originalError
                 }
 
                 val responseText = readBounded(connection.inputStream)
@@ -189,16 +206,112 @@ class HttpLilaTurnProvider(
                     modelId = optionalString(payload, "model_id", 256)
                 )
             } catch (exception: GalaxyApiException) {
+                if (requestMayHaveReachedCore && exception.httpStatus == null) {
+                    val reconciliation = reconcileTurnResultBlocking(
+                        conversationId, idempotencyKey, token
+                    )
+                    if (reconciliation?.status == "completed") {
+                        return@withContext reconciliation.result!!
+                    }
+                    if (reconciliation?.status == "pending") {
+                        throw GalaxyApiException(null, OUTCOME_UNKNOWN_MESSAGE)
+                    }
+                }
                 throw exception
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
+                if (requestMayHaveReachedCore) {
+                    val reconciliation = reconcileTurnResultBlocking(
+                        conversationId, idempotencyKey, token
+                    )
+                    if (reconciliation?.status == "completed") {
+                        return@withContext reconciliation.result!!
+                    }
+                    if (reconciliation?.status == "pending") {
+                        throw GalaxyApiException(null, OUTCOME_UNKNOWN_MESSAGE)
+                    }
+                }
                 throw GalaxyApiException(null, "Не удалось получить ответ от Lila Core.")
             } finally {
                 requestBytes?.fill(0)
                 connection.disconnect()
             }
         }
+
+    private data class TurnReconciliation(
+        val status: String,
+        val result: LilaTurnResult? = null
+    )
+
+    /**
+     * Fetch a previously committed response by its idempotency key. This never
+     * sends a new model request. A pending reservation remains non-retryable.
+     */
+    private fun reconcileTurnResultBlocking(
+        conversationId: String,
+        idempotencyKey: String,
+        token: String
+    ): TurnReconciliation? {
+        val connection = try {
+            connectionFactory(
+                URL("$normalizedBaseUrl/v1/lila/conversations/$conversationId/turns/$idempotencyKey")
+            )
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            return null
+        }
+
+        try {
+            connection.requestMethod = "GET"
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = connectTimeoutMillis
+            connection.readTimeout = readTimeoutMillis
+            connection.useCaches = false
+            connection.doInput = true
+            connection.doOutput = false
+            connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("Authorization", "Bearer $token")
+
+            val status = connection.responseCode
+            if (status == 404) return TurnReconciliation("not_found")
+            if (status !in 200..299) return null
+
+            val payload = JSONObject(readBounded(connection.inputStream, MAX_RESPONSE_BYTES))
+            if (payload.optString("conversation_id", "") != conversationId) return null
+            return when (payload.optString("status", "")) {
+                "pending" -> TurnReconciliation("pending")
+                "completed" -> {
+                    val response = payload.optJSONObject("response") ?: return null
+                    val responseConversationId = response.optString("conversation_id", "")
+                    val assistantText = response.optString("text", "")
+                    if (responseConversationId != conversationId ||
+                        assistantText.isBlank() ||
+                        assistantText.length > MAX_ASSISTANT_TEXT_CHARS
+                    ) {
+                        return null
+                    }
+                    TurnReconciliation(
+                        "completed",
+                        LilaTurnResult(
+                            conversationId = responseConversationId,
+                            text = assistantText,
+                            providerId = optionalString(response, "provider_id", 64),
+                            modelId = optionalString(response, "model_id", 256)
+                        )
+                    )
+                }
+                else -> null
+            }
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            return null
+        } finally {
+            connection.disconnect()
+        }
+    }
 
     /**
      * Downloads the complete owner-scoped history using bounded cursor pages.
@@ -443,6 +556,7 @@ class HttpLilaTurnProvider(
 
     private companion object {
         const val MAX_RESPONSE_BYTES = 128 * 1024
+        const val OUTCOME_UNKNOWN_MESSAGE = "Модель могла получить сообщение, но ответ не подтверждён. Не отправляй его повторно: это может запустить вторую генерацию."
         const val MAX_HISTORY_PAGE_BYTES = 1024 * 1024
         const val HISTORY_PAGE_SIZE = 20
         const val MAX_HISTORY_PAGES = 25
