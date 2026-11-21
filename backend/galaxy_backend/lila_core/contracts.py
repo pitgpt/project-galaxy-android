@@ -125,6 +125,20 @@ class ProviderModelDiscoveryResponse(BaseModel):
 
 
 
+class ProviderConnectionTestResponse(BaseModel):
+    """Safe result of a non-generative owner-managed provider connection test."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    configured_model_id: str = Field(min_length=1, max_length=256)
+    connection_reachable: bool
+    model_discovery_supported: bool
+    configured_model_available: bool | None = None
+    model_ids: list[str] = Field(default_factory=list, max_length=100)
+    chat_completion_verified: Literal[False] = False
+
+
 class ProviderCreateRequest(BaseModel):
     """Create an owner-scoped provider without returning its endpoint or secret."""
 

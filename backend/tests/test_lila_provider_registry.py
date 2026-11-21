@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -248,7 +249,7 @@ def make_settings():
     )
 
 
-def make_client(tmp_path, limiter=None):
+def make_client(tmp_path, limiter=None, provider_http_client_factory=None):
     store = SqliteLilaStore(tmp_path / "lila.sqlite3", KEY)
     app = create_app(
         settings=make_settings(),
@@ -256,6 +257,7 @@ def make_client(tmp_path, limiter=None):
         authenticator=FakeAuthenticator(),
         lila_turn_rate_limiter=limiter or RecordingLimiter(),
         lila_provider_registry=store,
+        lila_provider_http_client_factory=provider_http_client_factory,
     )
     return TestClient(app), store
 
@@ -433,3 +435,180 @@ def test_provider_api_validation_never_echoes_secret(tmp_path):
         )
     assert response.status_code == 422
     assert secret not in response.text
+
+
+def make_provider_http_client_factory(handler, calls):
+    def factory(provider_type, timeout_seconds):
+        calls.append((provider_type, timeout_seconds))
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
+        )
+    return factory
+
+
+def test_owner_managed_provider_probe_uses_dns_pinned_factory_and_never_leaks_secret(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append(request)
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "model-a"}, {"id": "model-b"}]},
+        )
+
+    factory = make_provider_http_client_factory(handler, factory_calls)
+    client, _ = make_client(tmp_path, provider_http_client_factory=factory)
+    with client:
+        created = client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        probed = client.post(
+            "/v1/lila/providers/cloud-main/probe",
+            headers=auth(),
+        )
+
+    assert created.status_code == 200
+    assert probed.status_code == 200
+    assert probed.json() == {
+        "provider_id": "cloud-main",
+        "configured_model_id": "model-a",
+        "connection_reachable": True,
+        "model_discovery_supported": True,
+        "configured_model_available": True,
+        "model_ids": ["model-a", "model-b"],
+        "chat_completion_verified": False,
+    }
+    assert factory_calls == [("cloud", 30.0)]
+    assert len(outbound) == 1
+    assert outbound[0].method == "GET"
+    assert outbound[0].url.path == "/v1/models"
+    assert outbound[0].headers["authorization"] == "Bearer provider-secret-value"
+    assert "provider-secret-value" not in probed.text
+    assert "api.vendor.com" not in probed.text
+    assert "/chat/completions" not in str(outbound[0].url)
+
+
+def test_owner_managed_provider_probe_reports_unsupported_models_without_claiming_chat_test(tmp_path):
+    factory_calls = []
+
+    async def handler(request):
+        return httpx.Response(404, json={"error": "not found"})
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        client.post("/v1/lila/providers", headers=auth(), json=create_payload())
+        response = client.post(
+            "/v1/lila/providers/cloud-main/probe",
+            headers=auth(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["connection_reachable"] is True
+    assert response.json()["model_discovery_supported"] is False
+    assert response.json()["configured_model_available"] is None
+    assert response.json()["chat_completion_verified"] is False
+    assert factory_calls == [("cloud", 30.0)]
+
+
+def test_owner_managed_provider_probe_is_owner_scoped_and_skips_disabled_records(tmp_path):
+    factory_calls = []
+
+    async def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        created = client.post("/v1/lila/providers", headers=auth("a"), json=create_payload())
+        other_owner = client.post(
+            "/v1/lila/providers/cloud-main/probe",
+            headers=auth("b"),
+        )
+        disabled = client.put(
+            "/v1/lila/providers/cloud-main",
+            headers=auth("a"),
+            json={
+                "provider_type": "cloud",
+                "base_url": "https://api.vendor.com/v1",
+                "model_id": "model-a",
+                "enabled": False,
+            },
+        )
+        disabled_probe = client.post(
+            "/v1/lila/providers/cloud-main/probe",
+            headers=auth("a"),
+        )
+
+    assert created.status_code == 200
+    assert other_owner.status_code == 404
+    assert disabled.status_code == 200
+    assert disabled_probe.status_code == 409
+    assert factory_calls == []
+
+
+def test_owner_managed_provider_probe_requires_auth_and_rate_limit_before_outbound(tmp_path):
+    factory_calls = []
+    limiter = RecordingLimiter(
+        error=HTTPException(
+            status_code=429,
+            detail="rate limit",
+            headers={"Retry-After": "60"},
+        )
+    )
+
+    async def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+
+    client, _ = make_client(
+        tmp_path,
+        limiter=limiter,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        unauthenticated = client.post("/v1/lila/providers/cloud-main/probe")
+        limited = client.post(
+            "/v1/lila/providers/cloud-main/probe",
+            headers=auth(),
+        )
+
+    assert unauthenticated.status_code == 401
+    assert limited.status_code == 429
+    assert factory_calls == []
+    assert limiter.calls == ["owner-a"]
+
+
+def test_owner_managed_provider_probe_sanitizes_auth_failure(tmp_path):
+    factory_calls = []
+    secret = "provider-secret-value"
+
+    async def handler(request):
+        return httpx.Response(401, text=f"invalid credential {secret}")
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        client.post("/v1/lila/providers", headers=auth(), json=create_payload())
+        response = client.post(
+            "/v1/lila/providers/cloud-main/probe",
+            headers=auth(),
+        )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "Lila model provider rejected authentication; verify its credentials and access permissions."
+    )
+    assert secret not in response.text
+    assert factory_calls == [("cloud", 30.0)]

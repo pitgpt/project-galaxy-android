@@ -19,6 +19,7 @@ from .lila_core.contracts import (
     ProviderSummary,
     ProviderListResponse,
     ProviderDeleteResponse,
+    ProviderConnectionTestResponse,
 )
 from .lila_core.context import ContextAssembler
 from .lila_core.openai_compatible import (
@@ -29,6 +30,7 @@ from .lila_core.openai_compatible import (
 )
 from .lila_core.memory import IdempotencyKeyConflict, IdempotentTurnInProgress
 from .lila_core.provider_registry import validate_provider_endpoint
+from .lila_core.provider_egress import create_provider_http_client
 from .lila_core.service import CoreTurnService, ModelAdapterContractError
 from .lila_core.sqlite_store import (
     ProviderAlreadyExists,
@@ -85,6 +87,7 @@ def create_app(
     lila_history_reader: Any | None = None,
     lila_provider_adapter: OpenAICompatibleModelAdapter | None = None,
     lila_provider_registry: Any | None = None,
+    lila_provider_http_client_factory: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -157,6 +160,9 @@ def create_app(
         app.state.lila_history_reader = lila_history_reader
         app.state.lila_provider_adapter = lila_provider_adapter
         app.state.lila_provider_registry = lila_provider_registry
+    app.state.lila_provider_http_client_factory = (
+        lila_provider_http_client_factory or create_provider_http_client
+    )
         if (
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
@@ -529,6 +535,111 @@ def create_app(
                 detail="Lila provider not found",
             )
         return ProviderDeleteResponse(deleted=True)
+
+
+    @app.post(
+        "/v1/lila/providers/{provider_id}/probe",
+        response_model=ProviderConnectionTestResponse,
+    )
+    async def probe_lila_registered_provider(
+        provider_id: str,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        """Test one owner-managed provider through the DNS-pinned egress path.
+
+        This is a non-generative GET /models probe. It never calls
+        /chat/completions, so it does not claim that generation works or spend
+        model tokens.
+        """
+        registry = await require_lila_provider_registry(request, user_id)
+        try:
+            record = await registry.get_provider(
+                principal_id=user_id,
+                provider_id=provider_id,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Provider identifier is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider catalog is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lila provider not found",
+            )
+        if not record.get("enabled"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Lila provider is disabled",
+            )
+
+        try:
+            provider_type = str(record["provider_type"])
+            validate_provider_endpoint(provider_type, str(record["base_url"]))
+            config = OpenAICompatibleConfig(
+                provider_id=str(record["provider_id"]),
+                base_url=str(record["base_url"]),
+                model_id=str(record["model_id"]),
+                api_key=record.get("api_key"),
+                timeout_seconds=float(record["timeout_seconds"]),
+                system_prompt=request.app.state.settings.lila_system_prompt,
+            )
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Stored Lila provider configuration is invalid",
+            ) from None
+
+        try:
+            client = request.app.state.lila_provider_http_client_factory(
+                provider_type,
+                float(record["timeout_seconds"]),
+            )
+            async with client:
+                adapter = OpenAICompatibleModelAdapter(client, config)
+                model_ids = await adapter.discover_models()
+        except ModelProviderConfigurationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=exc.public_detail,
+            ) from None
+        except ModelProviderUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila model endpoint is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        except ModelAdapterContractError:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Lila model provider returned an invalid model catalog",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider connection test is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        return ProviderConnectionTestResponse(
+            provider_id=config.provider_id,
+            configured_model_id=config.model_id,
+            connection_reachable=True,
+            model_discovery_supported=model_ids is not None,
+            configured_model_available=(
+                config.model_id in model_ids if model_ids is not None else None
+            ),
+            model_ids=list(model_ids or ()),
+            chat_completion_verified=False,
+        )
 
     @app.post(
         "/v1/lila/provider/probe",
