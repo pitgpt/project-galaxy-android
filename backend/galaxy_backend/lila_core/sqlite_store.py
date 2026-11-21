@@ -1095,6 +1095,7 @@ class SqliteLilaStore:
         """Encrypt and save one provider. Return True when a new record was created."""
         if not isinstance(provider, dict):
             raise ValueError("provider configuration must be an object")
+        await self.initialize()
         provider_id = provider.get("provider_id")
         provider_key = self._resource_key("provider", provider_id, 64)
         owner_key = self._owner_key(principal_id)
