@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 
 import httpx
@@ -987,3 +988,146 @@ def test_turn_does_not_silently_fallback_when_selected_provider_is_deleted(tmp_p
     assert response.status_code == 409
     assert "unavailable or disabled" in response.json()["detail"]
     assert [request.method for request in outbound] == ["GET"]
+
+
+def test_provider_chat_test_runs_one_completion_without_persisting_history(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append(request)
+        assert request.method == "POST"
+        assert request.url.path == "/v1/chat/completions"
+        payload = json.loads(request.content)
+        assert payload["model"] == "model-a"
+        assert payload["stream"] is False
+        assert payload["messages"][-1] == {
+            "role": "user",
+            "content": "Reply with exactly: LILA_OK",
+        }
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "LILA_OK"}}]},
+        )
+
+    client, store = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        created = client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        tested = client.post(
+            "/v1/lila/providers/cloud-main/test-chat",
+            headers=auth(),
+        )
+
+    assert created.status_code == 200
+    assert tested.status_code == 200
+    assert tested.json() == {
+        "provider_id": "cloud-main",
+        "model_id": "model-a",
+        "chat_completion_verified": True,
+        "response_characters": 7,
+    }
+    assert "provider-secret-value" not in tested.text
+    assert "api.vendor.com" not in tested.text
+    assert len(outbound) == 1
+    assert len(factory_calls) == 1
+    history = run(store.load_recent_messages(
+        principal_id="owner-a",
+        conversation_id="lila-provider-chat-test",
+        limit=10,
+    ))
+    assert history == []
+
+
+def test_provider_chat_test_refuses_disabled_provider_without_egress(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append(request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "unexpected"}}]},
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        created = client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(enabled=False),
+        )
+        tested = client.post(
+            "/v1/lila/providers/cloud-main/test-chat",
+            headers=auth(),
+        )
+
+    assert created.status_code == 200
+    assert tested.status_code == 409
+    assert outbound == []
+    assert factory_calls == []
+
+
+def test_provider_chat_test_marks_only_pre_send_failure_retry_safe(tmp_path):
+    async def handler(request):
+        raise httpx.ConnectError(
+            "provider-secret private diagnostic",
+            request=request,
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, []),
+    )
+    with client:
+        client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        tested = client.post(
+            "/v1/lila/providers/cloud-main/test-chat",
+            headers=auth(),
+        )
+
+    assert tested.status_code == 503
+    assert tested.headers["X-Lila-Retry-Safe"] == "true"
+    assert "provider-secret" not in tested.text
+    assert "private diagnostic" not in tested.text
+
+
+def test_provider_chat_test_does_not_mark_ambiguous_failure_retry_safe(tmp_path):
+    async def handler(request):
+        raise httpx.ReadTimeout(
+            "provider-secret private diagnostic",
+            request=request,
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, []),
+    )
+    with client:
+        client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        tested = client.post(
+            "/v1/lila/providers/cloud-main/test-chat",
+            headers=auth(),
+        )
+
+    assert tested.status_code == 503
+    assert "X-Lila-Retry-Safe" not in tested.headers
+    assert "provider-secret" not in tested.text
+    assert "private diagnostic" not in tested.text
