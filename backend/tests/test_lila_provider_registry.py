@@ -926,6 +926,59 @@ def test_pre_send_connection_failure_is_retry_safe_and_reuses_idempotency_key(tm
     assert [message.content for message in history] == ["Привет", "Ответ после восстановления"]
 
 
+def test_ambiguous_turn_failure_is_marked_and_never_generates_again(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        raise httpx.ReadTimeout(
+            "provider-secret private-provider-detail",
+            request=request,
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    headers = {
+        **auth(),
+        "Idempotency-Key": "7b1d8b3d-ff8f-4cc8-9d9b-0a3d2f8b4a61",
+    }
+    payload = {
+        "conversation_id": "conversation-ambiguous",
+        "message": "Сообщение с неопределённым результатом",
+    }
+    with client:
+        created = client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        selected = client.put(
+            "/v1/lila/conversations/conversation-ambiguous/model",
+            headers=auth(),
+            json={"provider_id": "cloud-main", "model_id": "model-a"},
+        )
+        failed = client.post("/v1/lila/turns", headers=headers, json=payload)
+        replay = client.post("/v1/lila/turns", headers=headers, json=payload)
+
+    assert created.status_code == selected.status_code == 200
+    assert failed.status_code == 503
+    assert failed.headers["X-Lila-Outcome-Unknown"] == "true"
+    assert "X-Lila-Retry-Safe" not in failed.headers
+    assert "provider-secret" not in failed.text
+    assert "private-provider-detail" not in failed.text
+    assert replay.status_code == 409
+    assert "still processing" in replay.json()["detail"]
+    assert outbound == [
+        ("GET", "/v1/models"),
+        ("POST", "/v1/chat/completions"),
+    ]
+
+
 def test_turn_requires_explicit_selection_when_owner_has_registered_providers(tmp_path):
     outbound = []
     factory_calls = []
