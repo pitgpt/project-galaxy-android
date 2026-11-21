@@ -79,3 +79,41 @@ def test_env_example_does_not_store_lila_secrets():
     assert "LILA_STORAGE_ENCRYPTION_KEY" not in values
     assert values["LILA_DATABASE_PATH"] == LILA_DATABASE_PATH
     assert "host secret manager" in env_text
+
+
+
+def test_encrypted_storage_can_start_provider_catalog_without_operator_model(monkeypatch, tmp_path):
+    from galaxy_backend.config import Settings
+
+    monkeypatch.setenv("AUTH_JWKS_URL", "https://issuer.example/.well-known/jwks.json")
+    monkeypatch.setenv("AUTH_ISSUER", "https://issuer.example/")
+    monkeypatch.setenv("AUTH_AUDIENCE", "galaxy-android")
+    monkeypatch.setenv("GALAXY_ENVIRONMENT", "development")
+    monkeypatch.setenv("LILA_DATABASE_PATH", str(tmp_path / "lila.sqlite3"))
+    monkeypatch.setenv("LILA_STORAGE_ENCRYPTION_KEY", "01" * 32)
+    monkeypatch.delenv("LILA_PROVIDER_BASE_URL", raising=False)
+    monkeypatch.delenv("LILA_MODEL_ID", raising=False)
+    monkeypatch.delenv("LILA_PROVIDER_API_KEY", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.lila_storage_is_configured is True
+    assert settings.lila_provider_is_configured is False
+    assert settings.lila_is_configured is False
+    assert settings.lila_configuration_requested is True
+
+
+def test_operator_provider_requires_encrypted_storage(monkeypatch):
+    from galaxy_backend.config import Settings
+
+    monkeypatch.setenv("AUTH_JWKS_URL", "https://issuer.example/.well-known/jwks.json")
+    monkeypatch.setenv("AUTH_ISSUER", "https://issuer.example/")
+    monkeypatch.setenv("AUTH_AUDIENCE", "galaxy-android")
+    monkeypatch.setenv("GALAXY_ENVIRONMENT", "development")
+    monkeypatch.setenv("LILA_PROVIDER_BASE_URL", "https://api.vendor.com/v1")
+    monkeypatch.setenv("LILA_MODEL_ID", "model-a")
+    monkeypatch.delenv("LILA_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("LILA_STORAGE_ENCRYPTION_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="requires LILA_PROVIDER_BASE_URL"):
+        Settings.from_env()
