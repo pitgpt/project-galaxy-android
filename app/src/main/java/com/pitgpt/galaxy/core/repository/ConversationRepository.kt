@@ -6,6 +6,11 @@ import com.pitgpt.galaxy.core.model.ConversationMessage
 interface ConversationRepository {
     suspend fun getForCharacter(characterId: String): List<ConversationMessage>
     suspend fun append(message: ConversationMessage)
+    suspend fun commitPendingTurn(
+        pendingMessageId: String,
+        userMessage: ConversationMessage,
+        assistantMessage: ConversationMessage
+    )
     suspend fun appendTurn(userMessage: ConversationMessage, assistantMessage: ConversationMessage) {
         require(userMessage.characterId == assistantMessage.characterId)
         append(userMessage)

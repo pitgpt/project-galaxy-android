@@ -45,7 +45,16 @@ class SendMessageTest {
         override suspend fun getForCharacter(characterId: String) =
             messages.filter { it.characterId == characterId }
         override suspend fun append(message: ConversationMessage) {
+            messages.removeAll { it.id == message.id }
             messages += message
+        }
+        override suspend fun commitPendingTurn(
+            pendingMessageId: String,
+            userMessage: ConversationMessage,
+            assistantMessage: ConversationMessage
+        ) {
+            messages.removeAll { it.id == pendingMessageId }
+            appendTurn(userMessage, assistantMessage)
         }
         override suspend fun clearForCharacter(characterId: String) {
             messages.removeAll { it.characterId == characterId }

@@ -21,6 +21,19 @@ class RoomConversationRepository(
         dao.insertTurn(userMessage.toEntity(), assistantMessage.toEntity())
     }
 
+    override suspend fun commitPendingTurn(
+        pendingMessageId: String,
+        userMessage: ConversationMessage,
+        assistantMessage: ConversationMessage
+    ) {
+        require(userMessage.characterId == assistantMessage.characterId)
+        dao.commitPendingTurn(
+            pendingMessageId,
+            userMessage.toEntity(),
+            assistantMessage.toEntity()
+        )
+    }
+
     override suspend fun replaceForCharacter(
         characterId: String,
         messages: List<ConversationMessage>

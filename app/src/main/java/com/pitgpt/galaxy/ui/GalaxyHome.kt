@@ -65,6 +65,7 @@ private val Night = Color(0xFF080B18)
 private val Muted = Color(0xFF9AA8C5)
 private val Ice = Color(0xFFB8D9FF)
 private const val CHARACTER_ID = "galaxy.default"
+internal const val PENDING_LILA_MESSAGE_PREFIX = "lila-pending-"
 
 @Composable
 fun GalaxyHome() {
@@ -353,8 +354,25 @@ fun GalaxyHome() {
                         activeCharacterId
                     )
                     val pendingTurnKey = getOrCreatePendingLilaTurnKey(context, ownerKey, conversationId, text)
+                    val pendingMessageId = pendingLilaMessageId(pendingTurnKey.value)
+                    val existingPending = messages.firstOrNull { it.id == pendingMessageId }
+                    val createdAt = existingPending?.createdAtEpochMillis ?: System.currentTimeMillis()
+                    val pendingUserMessage = ConversationMessage(
+                        id = pendingMessageId,
+                        characterId = storageCharacterId,
+                        role = MessageRole.USER,
+                        content = text.trim(),
+                        createdAtEpochMillis = createdAt
+                    )
+                    // Persist the user's text before any network I/O. If the process dies
+                    // while the provider request is in flight, the local conversation still
+                    // contains the exact message and the same idempotency key can be reused.
+                    app.conversations.append(pendingUserMessage)
+                    val pendingIndex = messages.indexOfFirst { it.id == pendingMessageId }
+                    if (pendingIndex >= 0) messages[pendingIndex] = pendingUserMessage
+                    else messages.add(pendingUserMessage)
+
                     val response = app.lilaTurnProvider.sendTurn(conversationId, text, pendingTurnKey.value)
-                    val createdAt = System.currentTimeMillis()
                     val userMessage = ConversationMessage(
                         id = UUID.randomUUID().toString(),
                         characterId = storageCharacterId,
@@ -370,14 +388,19 @@ fun GalaxyHome() {
                         createdAtEpochMillis = createdAt + 1
                     )
                     try {
-                        app.conversations.appendTurn(userMessage, assistantMessage)
+                        app.conversations.commitPendingTurn(
+                            pendingMessageId,
+                            userMessage,
+                            assistantMessage
+                        )
                     } catch (error: Exception) {
                         throw GalaxyApiException(
                             null,
-                            "Ответ Лилы получен, но локальная копия не сохранилась. Повтори отправку того же сообщения: сервер вернёт сохранённый ответ без повторного вызова модели."
+                            "Ответ Лилы получен, но локальная копия не завершена. Повтори отправку того же сообщения: Core вернёт сохранённый ответ без повторного вызова модели."
                         )
                     }
                     clearPendingLilaTurnKey(context, pendingTurnKey.preferenceKey)
+                    messages.removeAll { it.id == pendingMessageId }
                     messages.add(userMessage)
                     messages.add(assistantMessage)
                     activeModelLabel = response.displayModel.takeIf {
@@ -671,9 +694,28 @@ private fun ConversationScreen(
                                     .background(if (isUser) Color(0xFF354779) else Color(0xFF202A46))
                                     .padding(horizontal = 14.dp, vertical = 11.dp)
                             ) {
-                                Text(if (isUser) "ТЫ" else characterName.uppercase(),
-                                    color = Ice, fontSize = 9.sp, fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp)
+                                val pendingDelivery = isUser &&
+                                    message.id.startsWith(PENDING_LILA_MESSAGE_PREFIX)
+                                Text(
+                                    when {
+                                        pendingDelivery -> "ТЫ · ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ"
+                                        isUser -> "ТЫ"
+                                        else -> characterName.uppercase()
+                                    },
+                                    color = if (pendingDelivery) Color(0xFFE9BD70) else Ice,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp
+                                )
+                                if (pendingDelivery) {
+                                    Spacer(Modifier.height(3.dp))
+                                    Text(
+                                        "Сообщение сохранено на устройстве. Результат отправки ещё не подтверждён.",
+                                        color = Color(0xFFE9BD70),
+                                        fontSize = 10.sp,
+                                        lineHeight = 14.sp
+                                    )
+                                }
                                 Spacer(Modifier.height(5.dp))
                                 Text(message.content, color = Color.White, fontSize = 15.sp,
                                     lineHeight = 21.sp)
@@ -1197,7 +1239,9 @@ internal fun mergeRemoteHistory(
         }
         val previous = if (matchIndex >= 0) unmatchedLocal.removeAt(matchIndex) else null
         ConversationMessage(
-            id = previous?.id ?: "lila-$conversationId-${entry.sequence.toString().padStart(20, '0')}",
+            id = previous?.id
+                ?.takeUnless { it.startsWith(PENDING_LILA_MESSAGE_PREFIX) }
+                ?: "lila-$conversationId-${entry.sequence.toString().padStart(20, '0')}",
             characterId = characterId,
             role = role,
             content = entry.content,
@@ -1235,6 +1279,9 @@ private fun getOrCreateLilaConversationId(
 }
 
 
+
+internal fun pendingLilaMessageId(idempotencyKey: String): String =
+    "$PENDING_LILA_MESSAGE_PREFIX$idempotencyKey"
 
 private data class PendingLilaTurnKey(
     val value: String,

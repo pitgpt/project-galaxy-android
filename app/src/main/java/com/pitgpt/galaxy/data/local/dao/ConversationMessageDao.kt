@@ -25,6 +25,19 @@ interface ConversationMessageDao {
     }
 
     @Transaction
+    suspend fun commitPendingTurn(
+        pendingMessageId: String,
+        userMessage: ConversationMessageEntity,
+        assistantMessage: ConversationMessageEntity
+    ) {
+        deleteById(pendingMessageId)
+        insertTurn(userMessage, assistantMessage)
+    }
+
+    @Query("DELETE FROM conversation_messages WHERE id = :messageId")
+    suspend fun deleteById(messageId: String)
+
+    @Transaction
     suspend fun replaceForCharacter(
         characterId: String,
         entities: List<ConversationMessageEntity>
