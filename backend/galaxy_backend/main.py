@@ -186,7 +186,7 @@ def create_app(
             )
         else:
             app.state.lila_core_service = None
-            app.state.lila_provider_adapter = None
+            app.state.lila_provider_adapter = lila_provider_adapter
 
         yield
         if app.state.redis is not None:
