@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from galaxy_backend.config import Settings
+from galaxy_backend.lila_core.contracts import CoreTurnResponse
 from galaxy_backend.lila_core.memory import MemorySnippet
 from galaxy_backend.lila_core.sqlite_store import (
     LilaStoreIntegrityError,
@@ -1419,3 +1420,101 @@ def test_local_provider_runs_authenticated_api_to_core_history_over_real_pinned_
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+
+def test_turn_result_status_is_owner_and_conversation_scoped_and_replays_completed_response(tmp_path):
+    client, store = make_client(tmp_path)
+    key = "7b1d8b3d-ff8f-4cc8-9d9b-0a3d2f8b4a61"
+    values = {
+        "principal_id": "owner-a",
+        "conversation_id": "conversation-status",
+        "idempotency_key": key,
+        "user_message": "private status request",
+    }
+    with client:
+        assert run(store.reserve_idempotent_turn(**values)) is None
+        pending = client.get(
+            f"/v1/lila/conversations/conversation-status/turns/{key}",
+            headers=auth("a"),
+        )
+        wrong_owner = client.get(
+            f"/v1/lila/conversations/conversation-status/turns/{key}",
+            headers=auth("b"),
+        )
+        wrong_conversation = client.get(
+            f"/v1/lila/conversations/another-conversation/turns/{key}",
+            headers=auth("a"),
+        )
+        response = CoreTurnResponse(
+            conversation_id="conversation-status",
+            text="Ответ, сохранённый до потери HTTP-соединения",
+            provider_id="cloud-primary",
+            model_id="model-a",
+        )
+        run(store.complete_idempotent_turn(
+            **values,
+            assistant_message=response.text,
+            response=response,
+        ))
+        completed = client.get(
+            f"/v1/lila/conversations/conversation-status/turns/{key}",
+            headers=auth("a"),
+        )
+
+    assert pending.status_code == 200
+    assert pending.json() == {
+        "conversation_id": "conversation-status",
+        "status": "pending",
+        "response": None,
+    }
+    assert wrong_owner.status_code == 404
+    assert wrong_conversation.status_code == 404
+    assert completed.status_code == 200
+    assert completed.json() == {
+        "conversation_id": "conversation-status",
+        "status": "completed",
+        "response": {
+            "conversation_id": "conversation-status",
+            "text": "Ответ, сохранённый до потери HTTP-соединения",
+            "emotion": "neutral",
+            "avatar_events": [],
+            "provider_id": "cloud-primary",
+            "model_id": "model-a",
+        },
+    }
+    assert "private status request" not in completed.text
+    assert "provider-secret" not in completed.text
+
+
+def test_turn_result_status_survives_store_recreation(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    first = SqliteLilaStore(path, KEY)
+    values = {
+        "principal_id": "owner-a",
+        "conversation_id": "conversation-restart",
+        "idempotency_key": "9f2f6d65-8a2e-4d5f-b1b1-8bde6d98f001",
+        "user_message": "survive backend restart",
+    }
+    assert run(first.reserve_idempotent_turn(**values)) is None
+    response = CoreTurnResponse(
+        conversation_id="conversation-restart",
+        text="durable response",
+        provider_id="local-ollama",
+        model_id="qwen-local",
+    )
+    run(first.complete_idempotent_turn(
+        **values,
+        assistant_message=response.text,
+        response=response,
+    ))
+
+    reopened = SqliteLilaStore(path, KEY)
+    status, recovered = run(reopened.get_idempotent_turn_result(
+        principal_id="owner-a",
+        conversation_id="conversation-restart",
+        idempotency_key=values["idempotency_key"],
+    ))
+
+    assert status == "completed"
+    assert recovered == response

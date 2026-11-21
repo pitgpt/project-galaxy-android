@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .lila_core.contracts import (
     ConversationHistoryPage,
+    IdempotentTurnStatusResponse,
     CoreTurnRequest,
     CoreTurnResponse,
     ProviderModelDiscoveryResponse,
@@ -995,6 +996,57 @@ def create_app(
             model_discovery_supported=model_ids is not None,
             model_ids=list(model_ids or ()),
             chat_completion_verified=False,
+        )
+
+    @app.get(
+        "/v1/lila/conversations/{conversation_id}/turns/{idempotency_key}",
+        response_model=IdempotentTurnStatusResponse,
+    )
+    async def get_lila_turn_result(
+        conversation_id: str,
+        idempotency_key: UUID,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        """Reconcile a possibly lost turn response without invoking the model again."""
+        store = request.app.state.lila_store
+        if store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila turn result storage is not configured",
+            )
+        if not conversation_id.strip() or len(conversation_id) > 128:
+            raise HTTPException(status_code=422, detail="Conversation ID is invalid")
+        try:
+            await request.app.state.lila_turn_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila turn status is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        try:
+            turn_status, response = await store.get_idempotent_turn_result(
+                principal_id=user_id,
+                conversation_id=conversation_id,
+                idempotency_key=str(idempotency_key),
+            )
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Lila turn identifier is invalid") from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila turn status is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        if turn_status == "not_found":
+            raise HTTPException(status_code=404, detail="Lila turn result not found")
+        return IdempotentTurnStatusResponse(
+            conversation_id=conversation_id,
+            status=turn_status,
+            response=response,
         )
 
     @app.post("/v1/lila/turns", response_model=CoreTurnResponse)

@@ -87,6 +87,24 @@ class CoreTurnResponse(BaseModel):
 
 
 
+class IdempotentTurnStatusResponse(BaseModel):
+    """Owner-scoped status and optional replay of one committed idempotent turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: str = Field(min_length=1, max_length=128)
+    status: Literal["pending", "completed"]
+    response: CoreTurnResponse | None = None
+
+    @model_validator(mode="after")
+    def validate_response_matches_status(self):
+        if (self.status == "completed") != (self.response is not None):
+            raise ValueError("completed turn status must include exactly one response")
+        if self.response is not None and self.response.conversation_id != self.conversation_id:
+            raise ValueError("turn response belongs to another conversation")
+        return self
+
+
 class ConversationHistoryItem(BaseModel):
     """One decrypted message returned by the authenticated history endpoint."""
 

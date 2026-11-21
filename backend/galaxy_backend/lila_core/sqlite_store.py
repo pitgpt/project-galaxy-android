@@ -564,6 +564,70 @@ class SqliteLilaStore:
             conversation_id,
         )
 
+    async def get_idempotent_turn_result(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        idempotency_key: str,
+    ) -> tuple[str, CoreTurnResponse | None]:
+        """Read one owner's turn status without re-running provider generation."""
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("idempotency_key must be a non-empty string")
+        await self.initialize()
+        owner_key = self._owner_key(principal_id)
+        conversation_key = self._resource_key("conversation", conversation_id, 128)
+        request_key = self._resource_key("turn", idempotency_key, 128)
+        return await asyncio.to_thread(
+            self._get_idempotent_turn_result_sync,
+            owner_key,
+            conversation_key,
+            request_key,
+            conversation_id,
+        )
+
+    def _get_idempotent_turn_result_sync(
+        self,
+        owner_key: str,
+        conversation_key: str,
+        request_key: str,
+        conversation_id: str,
+    ) -> tuple[str, CoreTurnResponse | None]:
+        cached: tuple[bytes, bytes] | None = None
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT conversation_key, state, response_nonce, response_ciphertext "
+                "FROM lila_turn_requests WHERE owner_key=? AND request_key=?",
+                (owner_key, request_key),
+            ).fetchone()
+            if row is None or row["conversation_key"] != conversation_key:
+                return "not_found", None
+            if row["state"] == "pending":
+                return "pending", None
+            if (
+                row["state"] != "completed"
+                or row["response_nonce"] is None
+                or row["response_ciphertext"] is None
+            ):
+                raise LilaStoreIntegrityError("Stored Lila idempotency result is invalid")
+            cached = (bytes(row["response_nonce"]), bytes(row["response_ciphertext"]))
+        finally:
+            connection.close()
+
+        plaintext = self._decrypt(
+            cached[0],
+            cached[1],
+            self._aad("turn_response", owner_key, request_key),
+        )
+        try:
+            response = CoreTurnResponse.model_validate_json(plaintext)
+        except Exception:
+            raise LilaStoreIntegrityError("Stored Lila idempotency result failed validation") from None
+        if response.conversation_id != conversation_id:
+            raise LilaStoreIntegrityError("Stored Lila idempotency result belongs to another conversation")
+        return "completed", response
+
     def _reserve_idempotent_turn_sync(
         self,
         owner_key: str,
