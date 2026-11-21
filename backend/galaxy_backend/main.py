@@ -23,6 +23,7 @@ from .lila_core.contracts import (
     ConversationModelSelectionRequest,
     ConversationModelSelectionResponse,
 )
+from .lila_core.adapters import ModelProviderConnectionUnavailable
 from .lila_core.context import ContextAssembler
 from .lila_core.openai_compatible import (
     ModelProviderConfigurationError,
@@ -922,6 +923,12 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="The selected provider is unavailable or disabled; choose another provider.",
+            ) from None
+        except ModelProviderConnectionUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila model provider could not be reached before generation; retry is safe.",
+                headers={"Retry-After": "5"},
             ) from None
         except ModelProviderConfigurationError as exc:
             raise HTTPException(
