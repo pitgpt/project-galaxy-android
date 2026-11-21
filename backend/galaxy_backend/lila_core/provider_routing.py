@@ -1,8 +1,7 @@
-"""Owner-scoped model routing for Lila Core.
+"""Owner-scoped model adapter resolution for Lila Core.
 
-The router resolves a conversation's explicit model selection only when the
-Core service actually needs to generate. This keeps completed idempotent turns
-replayable even if a provider is later edited, disabled, or removed.
+Selection is resolved after CoreTurnService has checked the idempotency cache.
+A selected provider is never silently replaced by another provider.
 """
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .adapters import ModelAdapter, ModelAdapterContractError, ModelProviderRejected
+from .adapters import ModelAdapter, ModelProviderRejected
 from .context import AssembledContext
 from .openai_compatible import (
     ModelProviderConfigurationError,
@@ -21,19 +20,45 @@ from .provider_registry import validate_provider_endpoint
 
 
 class ProviderSelectionRequired(ModelProviderRejected):
-    """The conversation has no explicit model selection while owner providers exist."""
+    """The conversation needs an explicit provider/model selection."""
 
 
 class SelectedProviderUnavailable(ModelProviderRejected):
     """The selected owner provider was removed, disabled, or no longer supports chat."""
 
 
-class OwnerScopedModelRouter:
-    """Resolve one authenticated owner's saved provider/model for each new generation.
+class ManagedOpenAICompatibleModelAdapter:
+    """Open one short-lived pinned client for exactly one model generation."""
 
-    A selected provider failure is surfaced to the user. This router never
-    silently switches to another model. The legacy operator provider is used
-    only when the owner has no catalog entries and has not selected a model.
+    def __init__(
+        self,
+        *,
+        provider_type: str,
+        timeout_seconds: float,
+        config: OpenAICompatibleConfig,
+        http_client_factory: Callable[[str, float], httpx.AsyncClient],
+    ) -> None:
+        self._provider_type = provider_type
+        self._timeout_seconds = timeout_seconds
+        self._config = config
+        self._http_client_factory = http_client_factory
+
+    async def generate(self, context: AssembledContext):
+        client = self._http_client_factory(
+            self._provider_type,
+            self._timeout_seconds,
+        )
+        async with client:
+            adapter = OpenAICompatibleModelAdapter(client, self._config)
+            return await adapter.generate(context)
+
+
+class OwnerScopedModelAdapterResolver:
+    """Resolve the authenticated owner's conversation selection to a model adapter.
+
+    The resolver is called only after idempotency replay lookup. The operator
+    provider is retained solely as the legacy default when the owner has no
+    managed providers and no explicit conversation selection.
     """
 
     def __init__(
@@ -51,10 +76,10 @@ class OwnerScopedModelRouter:
         self._system_prompt = system_prompt
         self._http_client_factory = http_client_factory
 
-    async def generate(self, context: AssembledContext, *, principal_id: str):
+    async def __call__(self, principal_id: str, conversation_id: str) -> ModelAdapter:
         selection = await self._selection_store.get_conversation_model(
             principal_id=principal_id,
-            conversation_id=context.conversation_id,
+            conversation_id=conversation_id,
         )
         if selection is None:
             providers = await self._registry.list_providers(principal_id=principal_id)
@@ -66,7 +91,7 @@ class OwnerScopedModelRouter:
                 raise ProviderSelectionRequired(
                     "No model provider is configured for this conversation"
                 )
-            return await self._default_adapter.generate(context)
+            return self._default_adapter
 
         provider_id = selection["provider_id"]
         model_id = selection["model_id"]
@@ -74,7 +99,11 @@ class OwnerScopedModelRouter:
             principal_id=principal_id,
             provider_id=provider_id,
         )
-        if record is None or not record.get("enabled") or "chat" not in record.get("capabilities", []):
+        if (
+            record is None
+            or not record.get("enabled")
+            or "chat" not in record.get("capabilities", [])
+        ):
             raise SelectedProviderUnavailable(
                 "The selected model provider is unavailable"
             )
@@ -82,28 +111,22 @@ class OwnerScopedModelRouter:
         try:
             provider_type = str(record["provider_type"])
             base_url = str(record["base_url"])
+            timeout_seconds = float(record["timeout_seconds"])
             validate_provider_endpoint(provider_type, base_url)
             config = OpenAICompatibleConfig(
                 provider_id=provider_id,
                 base_url=base_url,
                 model_id=model_id,
                 api_key=record.get("api_key"),
-                timeout_seconds=float(record["timeout_seconds"]),
+                timeout_seconds=timeout_seconds,
                 system_prompt=self._system_prompt,
             )
         except (KeyError, TypeError, ValueError):
             raise ModelProviderConfigurationError("request_rejected") from None
 
-        client = self._http_client_factory(
-            provider_type,
-            float(record["timeout_seconds"]),
+        return ManagedOpenAICompatibleModelAdapter(
+            provider_type=provider_type,
+            timeout_seconds=timeout_seconds,
+            config=config,
+            http_client_factory=self._http_client_factory,
         )
-        async with client:
-            adapter = OpenAICompatibleModelAdapter(client, config)
-            response = await adapter.generate(context)
-
-        if response.provider_id != provider_id or response.model_id != model_id:
-            raise ModelAdapterContractError(
-                "The selected model adapter returned an unexpected provider identity"
-            )
-        return response

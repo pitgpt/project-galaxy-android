@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from .adapters import ModelAdapter, ModelAdapterContractError, ModelProviderRejected
 from .context import ContextAssembler
 from .contracts import CoreTurnRequest, CoreTurnResponse
@@ -19,11 +21,16 @@ class CoreTurnService:
     def __init__(
         self,
         context_assembler: ContextAssembler,
-        model_adapter: ModelAdapter,
+        model_adapter: ModelAdapter | None,
         history_writer: ConversationHistoryWriter,
+        *,
+        model_adapter_resolver: Callable[[str, str], Awaitable[ModelAdapter]] | None = None,
     ) -> None:
+        if model_adapter is None and model_adapter_resolver is None:
+            raise ValueError("CoreTurnService requires a model adapter or resolver")
         self._context_assembler = context_assembler
         self._model_adapter = model_adapter
+        self._model_adapter_resolver = model_adapter_resolver
         self._history_writer = history_writer
 
     async def handle(
@@ -38,7 +45,8 @@ class CoreTurnService:
                 request,
                 principal_id=principal_id,
             )
-            response = await self._generate_response(context)
+            adapter = await self._resolve_model_adapter(principal_id, request.conversation_id)
+            response = await self._generate_response(context, adapter)
             await self._history_writer.append_turn(
                 principal_id=principal_id,
                 conversation_id=request.conversation_id,
@@ -76,10 +84,25 @@ class CoreTurnService:
                 pass
             raise
 
-        # Once provider execution starts, keep the reservation on any ambiguous
-        # failure. A retry must not trigger a second potentially billable call.
+        # Resolve configuration before provider execution. Any resolver failure
+        # is safe to release; once generation starts, ambiguous failures retain the
+        # reservation so a retry cannot trigger a second potentially billable call.
         try:
-            response = await self._generate_response(context)
+            adapter = await self._resolve_model_adapter(principal_id, request.conversation_id)
+        except BaseException:
+            try:
+                await self._history_writer.release_idempotent_turn(
+                    principal_id=principal_id,
+                    conversation_id=request.conversation_id,
+                    idempotency_key=idempotency_key,
+                    user_message=request.message,
+                )
+            except Exception:
+                pass
+            raise
+
+        try:
+            response = await self._generate_response(context, adapter)
         except ModelProviderRejected:
             # Authentication/model/endpoint rejection is definitive; after the
             # operator fixes configuration, the same key can safely be retried.
@@ -103,8 +126,19 @@ class CoreTurnService:
         )
         return response
 
-    async def _generate_response(self, context) -> CoreTurnResponse:
-        raw_response = await self._model_adapter.generate(context)
+    async def _resolve_model_adapter(
+        self, principal_id: str, conversation_id: str
+    ) -> ModelAdapter:
+        if self._model_adapter_resolver is not None:
+            return await self._model_adapter_resolver(principal_id, conversation_id)
+        if self._model_adapter is None:
+            raise ModelAdapterContractError("No Lila model adapter is configured")
+        return self._model_adapter
+
+    async def _generate_response(
+        self, context, adapter: ModelAdapter
+    ) -> CoreTurnResponse:
+        raw_response = await adapter.generate(context)
         response = CoreTurnResponse.model_validate(raw_response)
         if response.conversation_id != context.conversation_id:
             raise ModelAdapterContractError(

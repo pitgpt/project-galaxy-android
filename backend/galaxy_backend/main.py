@@ -35,7 +35,7 @@ from .lila_core.provider_registry import validate_provider_endpoint
 from .lila_core.provider_egress import create_provider_http_client
 from .lila_core.service import CoreTurnService, ModelAdapterContractError
 from .lila_core.provider_routing import (
-    OwnerScopedModelRouter,
+    OwnerScopedModelAdapterResolver,
     ProviderSelectionRequired,
     SelectedProviderUnavailable,
 )
@@ -211,7 +211,7 @@ def create_app(
                     provider_config,
                 )
             app.state.lila_provider_adapter = default_adapter
-            router = OwnerScopedModelRouter(
+            adapter_resolver = OwnerScopedModelAdapterResolver(
                 registry=app.state.lila_provider_registry,
                 selection_store=store,
                 default_adapter=default_adapter,
@@ -220,8 +220,9 @@ def create_app(
             )
             app.state.lila_core_service = CoreTurnService(
                 ContextAssembler(store, store),
-                router,
+                None,
                 store,
+                model_adapter_resolver=adapter_resolver,
             )
         elif app.state.settings.environment == "production":
             raise RuntimeError(
