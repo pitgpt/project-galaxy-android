@@ -1,20 +1,27 @@
 import asyncio
 
-from galaxy_backend.lila_core.contracts import CoreTurnRequest
+from galaxy_backend.lila_core.context import AssembledContext
 from galaxy_backend.lila_core.fake_adapter import FakeModelAdapter
+from galaxy_backend.lila_core.memory import ConversationMessage, MemorySnippet
 
 
-def test_fake_adapter_returns_deterministic_response_for_same_conversation():
+def test_fake_adapter_returns_deterministic_response_for_assembled_context():
     adapter = FakeModelAdapter(
         response_text="Рада тебя видеть.",
         emotion="happy",
     )
-    request = CoreTurnRequest(
+    context = AssembledContext(
         conversation_id="conversation-42",
-        message="Привет, Лила!",
+        messages=(ConversationMessage(role="user", content="Привет, Лила!"),),
+        relevant_memories=(
+            MemorySnippet(
+                memory_id="memory-1",
+                content="Пользователь предпочитает русский язык.",
+            ),
+        ),
     )
 
-    response = asyncio.run(adapter.generate(request))
+    response = asyncio.run(adapter.generate(context))
 
     assert response.conversation_id == "conversation-42"
     assert response.text == "Рада тебя видеть."
@@ -24,9 +31,12 @@ def test_fake_adapter_returns_deterministic_response_for_same_conversation():
 
 def test_fake_adapter_defaults_to_neutral_emotion():
     adapter = FakeModelAdapter()
-    request = CoreTurnRequest(conversation_id="conversation-7", message="Привет")
+    context = AssembledContext(
+        conversation_id="conversation-7",
+        messages=(ConversationMessage(role="user", content="Привет"),),
+    )
 
-    response = asyncio.run(adapter.generate(request))
+    response = asyncio.run(adapter.generate(context))
 
     assert response.emotion == "neutral"
-    assert response.conversation_id == request.conversation_id
+    assert response.conversation_id == context.conversation_id
