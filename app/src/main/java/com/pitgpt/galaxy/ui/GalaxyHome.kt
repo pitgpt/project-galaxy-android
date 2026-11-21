@@ -1,5 +1,6 @@
 package com.pitgpt.galaxy.ui
 
+import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -52,7 +53,12 @@ import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
 import com.pitgpt.galaxy.core.usecase.SendMessage
+import com.pitgpt.galaxy.data.remote.GalaxyApiException
+import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
+import com.pitgpt.galaxy.data.remote.stableLilaConversationId
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import java.security.MessageDigest
 import java.util.UUID
 
 private val Night = Color(0xFF080B18)
@@ -73,12 +79,16 @@ fun GalaxyHome() {
     var reloadKey by remember { mutableStateOf(0) }
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
+    var showProviders by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
     var showEditCharacter by remember { mutableStateOf(false) }
     var editorProfile by remember { mutableStateOf<CharacterProfile?>(null) }
     var editorError by remember { mutableStateOf<String?>(null) }
     var profile by remember { mutableStateOf<CharacterProfile?>(null) }
+    var conversationOwnerKey by remember { mutableStateOf<String?>(null) }
+    var activeModelLabel by remember { mutableStateOf<String?>(null) }
+    var historySyncWarning by remember { mutableStateOf<String?>(null) }
     val messages = remember { mutableStateListOf<ConversationMessage>() }
     val scope = rememberCoroutineScope()
 
@@ -93,7 +103,11 @@ fun GalaxyHome() {
             val activeProfile = loadedCharacters.firstOrNull { it.id == preferredId }
                 ?: loadedCharacters.firstOrNull { it.id == CHARACTER_ID }
                 ?: throw IllegalStateException("Built-in character is missing")
-            val loadedMessages = app.conversations.getForCharacter(activeProfile.id)
+            val ownerId = app.auth?.currentUserId()
+            conversationOwnerKey = ownerId?.let(::ownerPartitionKey)
+            val loadedMessages = app.conversations.getForCharacter(
+                conversationStorageKey(conversationOwnerKey, activeProfile.id)
+            )
             characters = loadedCharacters
             activeCharacterId = activeProfile.id
             context.getSharedPreferences("galaxy_preferences", 0).edit()
@@ -105,6 +119,65 @@ fun GalaxyHome() {
             initialized = true
         } catch (error: Exception) {
             loadError = "Не удалось загрузить данные Galaxy. Проверь хранилище и попробуй ещё раз."
+        } finally {
+            isLoading = false
+        }
+    }
+
+    LaunchedEffect(showChat, activeCharacterId, conversationOwnerKey, loadError) {
+        if (!showChat || loadError != null || !app.lilaTurnProvider.isConfigured) {
+            historySyncWarning = null
+            return@LaunchedEffect
+        }
+        val ownerKey = conversationOwnerKey
+        if (ownerKey == null) {
+            activeModelLabel = null
+            historySyncWarning = "Войди в аккаунт Galaxy, чтобы синхронизировать историю Лилы."
+            return@LaunchedEffect
+        }
+
+        val conversationId = getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
+        val activeModelPreferenceKey = "lila_active_model_$conversationId"
+        val preferences = context.getSharedPreferences("galaxy_preferences", 0)
+        activeModelLabel = preferences.getString(activeModelPreferenceKey, null)
+        val storageCharacterId = conversationStorageKey(conversationOwnerKey, activeCharacterId)
+        historySyncWarning = null
+        isLoading = true
+        try {
+            val remoteHistory = app.lilaTurnProvider.loadAllHistory(conversationId)
+            val latestRemoteModel = remoteHistory.lastOrNull { it.role == "assistant" }?.displayModelLabel
+            // The current conversation selection can change on another client before
+            // the next assistant turn. Restore it independently from the last-used model.
+            val selectedModelLabel = try {
+                val selection = app.lilaProviderCatalog.getConversationModel(conversationId)
+                if (selection.selected) "${selection.providerId} · ${selection.modelId}" else null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            val restoredModelLabel = selectedModelLabel ?: latestRemoteModel
+            if (restoredModelLabel != null) {
+                activeModelLabel = restoredModelLabel
+                preferences.edit().putString(activeModelPreferenceKey, restoredModelLabel).apply()
+            }
+            if (remoteHistory.isNotEmpty()) {
+                val localHistory = app.conversations.getForCharacter(storageCharacterId)
+                val mergedHistory = mergeRemoteHistory(
+                    characterId = storageCharacterId,
+                    conversationId = conversationId,
+                    local = localHistory,
+                    remote = remoteHistory
+                )
+                app.conversations.replaceForCharacter(storageCharacterId, mergedHistory)
+                messages.clear()
+                messages.addAll(mergedHistory)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            historySyncWarning =
+                "Не удалось синхронизировать историю с Lila Core. Локальная переписка сохранена."
         } finally {
             isLoading = false
         }
@@ -154,6 +227,7 @@ fun GalaxyHome() {
                         profile = created
                         characterName = created.displayName
                         messages.clear()
+                        activeModelLabel = null
                         loadError = null
                         showCreateCharacter = false
                     } catch (error: Exception) {
@@ -183,7 +257,12 @@ fun GalaxyHome() {
                             profile = fallback
                             characterName = fallback.displayName
                             messages.clear()
-                            messages.addAll(app.conversations.getForCharacter(fallback.id))
+                            activeModelLabel = null
+                            messages.addAll(
+                                app.conversations.getForCharacter(
+                                    conversationStorageKey(conversationOwnerKey, fallback.id)
+                                )
+                            )
                         }
                     } catch (error: Exception) {
                         loadError = "Не удалось удалить персонажа. Данные не были изменены."
@@ -197,7 +276,9 @@ fun GalaxyHome() {
                     try {
                         val selectedProfile = app.characters.getById(selected.id)
                             ?: throw IllegalStateException("Character not found")
-                        val selectedMessages = app.conversations.getForCharacter(selectedProfile.id)
+                        val selectedMessages = app.conversations.getForCharacter(
+                            conversationStorageKey(conversationOwnerKey, selectedProfile.id)
+                        )
                         activeCharacterId = selectedProfile.id
                         context.getSharedPreferences("galaxy_preferences", 0).edit()
                             .putString("active_character_id", selectedProfile.id).apply()
@@ -205,6 +286,7 @@ fun GalaxyHome() {
                         characterName = selectedProfile.displayName
                         messages.clear()
                         messages.addAll(selectedMessages)
+                        activeModelLabel = null
                         showCharacters = false
                     } catch (error: Exception) {
                         loadError = "Не удалось переключить персонажа. Попробуй ещё раз."
@@ -232,17 +314,85 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showProviders) {
+        val providerConversationId = conversationOwnerKey?.let { ownerKey ->
+            getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
+        }
+        LilaProviderSettingsScreen(
+            catalog = app.lilaProviderCatalog,
+            conversationId = providerConversationId,
+            onBack = { showProviders = false },
+            onModelSelected = { label ->
+                activeModelLabel = label
+                providerConversationId?.let { conversationId ->
+                    context.getSharedPreferences("galaxy_preferences", 0).edit()
+                        .putString("lila_active_model_$conversationId", label)
+                        .apply()
+                }
+            }
+        )
     } else if (showChat) {
         ConversationScreen(
             characterName = characterName,
             messages = messages,
+            activeModelLabel = activeModelLabel,
+            aiConfigured = app.lilaTurnProvider.isConfigured,
             isLoading = isLoading,
             loadError = loadError,
+            historySyncWarning = historySyncWarning,
             onRetryLoad = { reloadKey += 1 },
             onBack = { showChat = false },
             onSend = { text ->
-                val message = SendMessage(app.conversations).invoke(activeCharacterId, text)
-                messages.add(message)
+                val storageCharacterId = conversationStorageKey(conversationOwnerKey, activeCharacterId)
+                if (app.lilaTurnProvider.isConfigured) {
+                    val ownerKey = conversationOwnerKey
+                        ?: throw GalaxyApiException(401, "Войди в аккаунт Galaxy, чтобы отправить сообщение Лиле.")
+                    val conversationId = getOrCreateLilaConversationId(
+                        context,
+                        ownerKey,
+                        activeCharacterId
+                    )
+                    val pendingTurnKey = getOrCreatePendingLilaTurnKey(context, ownerKey, conversationId, text)
+                    val response = app.lilaTurnProvider.sendTurn(conversationId, text, pendingTurnKey.value)
+                    val createdAt = System.currentTimeMillis()
+                    val userMessage = ConversationMessage(
+                        id = UUID.randomUUID().toString(),
+                        characterId = storageCharacterId,
+                        role = MessageRole.USER,
+                        content = text.trim(),
+                        createdAtEpochMillis = createdAt
+                    )
+                    val assistantMessage = ConversationMessage(
+                        id = UUID.randomUUID().toString(),
+                        characterId = storageCharacterId,
+                        role = MessageRole.CHARACTER,
+                        content = response.text,
+                        createdAtEpochMillis = createdAt + 1
+                    )
+                    try {
+                        app.conversations.appendTurn(userMessage, assistantMessage)
+                    } catch (error: Exception) {
+                        throw GalaxyApiException(
+                            null,
+                            "Ответ Лилы получен, но локальная копия не сохранилась. Повтори отправку того же сообщения: сервер вернёт сохранённый ответ без повторного вызова модели."
+                        )
+                    }
+                    clearPendingLilaTurnKey(context, pendingTurnKey.preferenceKey)
+                    messages.add(userMessage)
+                    messages.add(assistantMessage)
+                    activeModelLabel = response.displayModel.takeIf {
+                        response.providerId != null || response.modelId != null
+                    }
+                    activeModelLabel?.let { label ->
+                        context.getSharedPreferences("galaxy_preferences", 0).edit()
+                            .putString("lila_active_model_$conversationId", label)
+                            .apply()
+                    }
+                } else {
+                    val message = SendMessage(app.conversations).invoke(storageCharacterId, text)
+                    messages.add(message)
+                    activeModelLabel = null
+                }
             }
         )
     } else {
@@ -251,11 +401,13 @@ fun GalaxyHome() {
             avatarId = profile?.avatarId,
             avatarImageUri = profile?.avatarImageUri,
             isLoading = isLoading,
+            aiConfigured = app.lilaTurnProvider.isConfigured,
             loadError = loadError,
             onRetry = { reloadKey += 1 },
             onOpenChat = { showChat = true },
             onOpenProfile = { showProfile = true },
-            onOpenCharacters = { showCharacters = true }
+            onOpenCharacters = { showCharacters = true },
+            onOpenProviders = { showProviders = true }
         )
     }
 }
@@ -266,11 +418,13 @@ private fun HomeScreen(
     avatarId: String?,
     avatarImageUri: String?,
     isLoading: Boolean,
+    aiConfigured: Boolean,
     loadError: String?,
     onRetry: () -> Unit,
     onOpenChat: () -> Unit,
     onOpenProfile: () -> Unit,
-    onOpenCharacters: () -> Unit
+    onOpenCharacters: () -> Unit,
+    onOpenProviders: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -295,8 +449,13 @@ private fun HomeScreen(
                             .border(1.dp, Color(0x5546D9AC), RoundedCornerShape(50))
                             .padding(horizontal = 12.dp, vertical = 7.dp)
                     ) {
-                        Text("●  LOCAL PREVIEW", color = Color(0xFF75E2BD),
-                            fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                        Text(
+                            if (aiConfigured) "●  BACKEND CONFIGURED" else "●  LOCAL PREVIEW",
+                            color = Color(0xFF75E2BD),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        )
                     }
                     Spacer(Modifier.height(5.dp))
                     Text("v${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}",
@@ -340,7 +499,12 @@ private fun HomeScreen(
                     Text(loadError, color = Color(0xFFFF9B9B), fontSize = 11.sp)
                     TextButton(onClick = onRetry) { Text("ПОВТОРИТЬ", color = Ice) }
                 }
-                StatusLine("AI и голос", "Подключение на следующих этапах", Color(0xFFE9BD70))
+                StatusLine(
+                    "Lila Core",
+                    if (aiConfigured) "Backend настроен" else "Локальный режим; backend не настроен",
+                    if (aiConfigured) Color(0xFF65DDB2) else Color(0xFFE9BD70)
+                )
+                StatusLine("Голос", "После стабильного чата и изображений", Color(0xFFE9BD70))
             }
             Spacer(Modifier.height(18.dp))
             Button(
@@ -363,6 +527,15 @@ private fun HomeScreen(
             }
             Spacer(Modifier.height(10.dp))
             Button(
+                onClick = onOpenProviders,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("ПРОВАЙДЕРЫ И МОДЕЛИ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth().height(54.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
@@ -381,8 +554,11 @@ private fun HomeScreen(
 private fun ConversationScreen(
     characterName: String,
     messages: List<ConversationMessage>,
+    activeModelLabel: String?,
+    aiConfigured: Boolean,
     isLoading: Boolean,
     loadError: String?,
+    historySyncWarning: String?,
     onRetryLoad: () -> Unit,
     onBack: () -> Unit,
     onSend: suspend (String) -> Unit
@@ -395,7 +571,7 @@ private fun ConversationScreen(
 
     fun submitDraft() {
         val value = draft.trim()
-        if (value.isEmpty() || isSending) return
+        if (value.isEmpty() || isSending || isLoading) return
         sendScope.launch {
             isSending = true
             sendError = null
@@ -403,7 +579,8 @@ private fun ConversationScreen(
                 onSend(value)
                 draft = ""
             } catch (error: Exception) {
-                sendError = "Не удалось сохранить сообщение. Текст остался в поле, попробуй ещё раз."
+                sendError = (error as? GalaxyApiException)?.message
+                    ?: "Не удалось завершить отправку. Текст остался в поле, попробуй ещё раз."
             } finally {
                 isSending = false
             }
@@ -424,11 +601,21 @@ private fun ConversationScreen(
                 Column(horizontalAlignment = Alignment.End) {
                     Text(characterName, color = Color.White, fontSize = 18.sp,
                         fontWeight = FontWeight.SemiBold)
-                    Text("ЛОКАЛЬНЫЙ ДИАЛОГ · AI НЕ ПОДКЛЮЧЁН",
-                        color = Color(0xFFE9BD70), fontSize = 8.sp, letterSpacing = 0.7.sp)
+                    Text(
+                        activeModelLabel?.let { "LILA · $it" }
+                            ?: if (aiConfigured) "LILA CORE · BACKEND НАСТРОЕН"
+                            else "ЛОКАЛЬНЫЙ ДИАЛОГ · AI НЕ ПОДКЛЮЧЁН",
+                        color = if (activeModelLabel != null) Color(0xFF75E2BD) else Color(0xFFE9BD70),
+                        fontSize = 8.sp,
+                        letterSpacing = 0.7.sp
+                    )
                 }
             }
             Spacer(Modifier.height(12.dp))
+            historySyncWarning?.let {
+                Text(it, color = Color(0xFFE9BD70), fontSize = 11.sp, lineHeight = 16.sp)
+                Spacer(Modifier.height(8.dp))
+            }
             if (loadError != null) {
                 Column(
                     Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
@@ -456,7 +643,11 @@ private fun ConversationScreen(
                         fontWeight = FontWeight.Light, textAlign = TextAlign.Center)
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "Здесь можно записывать сообщения. Они сохраняются на телефоне и останутся после перезапуска приложения. Ответы AI появятся после подключения модели.",
+                        if (aiConfigured) {
+                            "Отправь сообщение — Galaxy передаст его в Lila Core. Ответ модели сохранится вместе с локальной историей."
+                        } else {
+                            "Здесь можно записывать сообщения. Они сохраняются на телефоне и останутся после перезапуска приложения. Ответы AI появятся после настройки backend."
+                        },
                         color = Muted, fontSize = 14.sp, lineHeight = 21.sp,
                         textAlign = TextAlign.Center
                     )
@@ -985,4 +1176,93 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
             Text(detail, color = Muted, fontSize = 11.sp)
         }
     }
+}
+
+
+internal fun mergeRemoteHistory(
+    characterId: String,
+    conversationId: String,
+    local: List<ConversationMessage>,
+    remote: List<LilaHistoryMessage>
+): List<ConversationMessage> {
+    val unmatchedLocal = local.toMutableList()
+    val remoteMessages = remote.map { entry ->
+        val role = when (entry.role) {
+            "user" -> MessageRole.USER
+            "assistant" -> MessageRole.CHARACTER
+            else -> throw IllegalArgumentException("Unsupported Lila history role")
+        }
+        val matchIndex = unmatchedLocal.indexOfFirst {
+            it.role == role && it.content == entry.content
+        }
+        val previous = if (matchIndex >= 0) unmatchedLocal.removeAt(matchIndex) else null
+        ConversationMessage(
+            id = previous?.id ?: "lila-$conversationId-${entry.sequence.toString().padStart(20, '0')}",
+            characterId = characterId,
+            role = role,
+            content = entry.content,
+            createdAtEpochMillis = previous?.createdAtEpochMillis ?: entry.createdAtEpochMillis
+        )
+    }
+    return (remoteMessages + unmatchedLocal)
+        .sortedBy { it.createdAtEpochMillis }
+}
+
+
+private fun ownerPartitionKey(ownerId: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(ownerId.toByteArray(Charsets.UTF_8))
+    return digest.take(16).joinToString("") { byte ->
+        (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+    }
+}
+
+private fun conversationStorageKey(ownerKey: String?, characterId: String): String =
+    ownerKey?.let { "owner:$it:$characterId" } ?: characterId
+
+private fun getOrCreateLilaConversationId(
+    context: Context,
+    ownerKey: String,
+    characterId: String
+): String {
+    val preferences = context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
+    val key = "lila_conversation_id_${ownerKey}_${characterId}"
+    val stableId = stableLilaConversationId(ownerKey, characterId)
+    if (preferences.getString(key, null) != stableId) {
+        preferences.edit().putString(key, stableId).apply()
+    }
+    return stableId
+}
+
+
+
+private data class PendingLilaTurnKey(
+    val value: String,
+    val preferenceKey: String
+)
+
+private fun getOrCreatePendingLilaTurnKey(
+    context: Context,
+    ownerKey: String,
+    conversationId: String,
+    message: String
+): PendingLilaTurnKey {
+    val fingerprint = MessageDigest.getInstance("SHA-256")
+        .digest("$ownerKey|$conversationId|$message".toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+    val preferenceKey = "lila_pending_turn_$fingerprint"
+    val preferences = context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
+    val existing = preferences.getString(preferenceKey, null)
+        ?.takeIf { runCatching { UUID.fromString(it) }.isSuccess }
+    val value = existing ?: UUID.randomUUID().toString().also { generated ->
+        preferences.edit().putString(preferenceKey, generated).apply()
+    }
+    return PendingLilaTurnKey(value, preferenceKey)
+}
+
+private fun clearPendingLilaTurnKey(context: Context, preferenceKey: String) {
+    context.getSharedPreferences("galaxy_preferences", Context.MODE_PRIVATE)
+        .edit()
+        .remove(preferenceKey)
+        .apply()
 }
