@@ -79,6 +79,7 @@ fun GalaxyHome() {
     var reloadKey by remember { mutableStateOf(0) }
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
+    var showProviders by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
     var showEditCharacter by remember { mutableStateOf(false) }
@@ -302,6 +303,23 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showProviders) {
+        val providerConversationId = conversationOwnerKey?.let { ownerKey ->
+            getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
+        }
+        LilaProviderSettingsScreen(
+            catalog = app.lilaProviderCatalog,
+            conversationId = providerConversationId,
+            onBack = { showProviders = false },
+            onModelSelected = { label ->
+                activeModelLabel = label
+                providerConversationId?.let { conversationId ->
+                    context.getSharedPreferences("galaxy_preferences", 0).edit()
+                        .putString("lila_active_model_$conversationId", label)
+                        .apply()
+                }
+            }
+        )
     } else if (showChat) {
         ConversationScreen(
             characterName = characterName,
@@ -377,7 +395,8 @@ fun GalaxyHome() {
             onRetry = { reloadKey += 1 },
             onOpenChat = { showChat = true },
             onOpenProfile = { showProfile = true },
-            onOpenCharacters = { showCharacters = true }
+            onOpenCharacters = { showCharacters = true },
+            onOpenProviders = { showProviders = true }
         )
     }
 }
@@ -393,7 +412,8 @@ private fun HomeScreen(
     onRetry: () -> Unit,
     onOpenChat: () -> Unit,
     onOpenProfile: () -> Unit,
-    onOpenCharacters: () -> Unit
+    onOpenCharacters: () -> Unit,
+    onOpenProviders: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -493,6 +513,15 @@ private fun HomeScreen(
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Text("ПЕРСОНАЖИ И ПРОФИЛИ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onOpenProviders,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("ПРОВАЙДЕРЫ И МОДЕЛИ", fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(10.dp))
             Button(

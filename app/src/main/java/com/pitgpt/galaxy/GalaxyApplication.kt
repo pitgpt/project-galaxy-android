@@ -10,6 +10,7 @@ import com.pitgpt.galaxy.data.auth.SupabaseClientFactory
 import com.pitgpt.galaxy.data.local.GalaxyDatabaseFactory
 import com.pitgpt.galaxy.data.remote.GalaxyAccessTokenProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaTurnProvider
+import com.pitgpt.galaxy.data.remote.HttpLilaProviderCatalog
 import com.pitgpt.galaxy.data.remote.HttpRealtimeSessionProvider
 import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
 import com.pitgpt.galaxy.data.repository.RoomConversationRepository
@@ -24,6 +25,9 @@ class GalaxyApplication : Application() {
     val auth: SupabaseAuthService? by lazy { SupabaseClientFactory.createOrNull(this) }
     val lilaTurnProvider: HttpLilaTurnProvider by lazy {
         HttpLilaTurnProvider(BuildConfig.GALAXY_API_BASE_URL, auth)
+    }
+    val lilaProviderCatalog: HttpLilaProviderCatalog by lazy {
+        HttpLilaProviderCatalog(BuildConfig.GALAXY_API_BASE_URL, auth)
     }
     private val initializeGalaxy by lazy { InitializeGalaxy(characters) }
 
