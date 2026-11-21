@@ -134,7 +134,7 @@ class ProviderCreateRequest(BaseModel):
     provider_type: Literal["cloud", "local"]
     base_url: str = Field(min_length=1, max_length=2048)
     model_id: str = Field(min_length=1, max_length=256)
-    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key: SecretStr | None = Field(default=None)
     timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
     capabilities: list[Literal["chat"]] = Field(default_factory=lambda: ["chat"], min_length=1, max_length=1)
     enabled: bool = True
@@ -170,7 +170,7 @@ class ProviderUpdateRequest(BaseModel):
     provider_type: Literal["cloud", "local"]
     base_url: str = Field(min_length=1, max_length=2048)
     model_id: str = Field(min_length=1, max_length=256)
-    api_key: SecretStr | None = Field(default=None, repr=False)
+    api_key: SecretStr | None = Field(default=None)
     clear_api_key: bool = False
     timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
     capabilities: list[Literal["chat"]] = Field(default_factory=lambda: ["chat"], min_length=1, max_length=1)
