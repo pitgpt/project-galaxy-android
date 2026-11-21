@@ -36,20 +36,34 @@ class Settings:
     lila_system_prompt: str = DEFAULT_LILA_SYSTEM_PROMPT
 
     @property
+    def lila_storage_is_configured(self) -> bool:
+        """Encrypted persistent storage can host the owner-scoped provider catalog."""
+        return bool(
+            self.lila_database_path
+            and self.lila_storage_encryption_key is not None
+        )
+
+    @property
+    def lila_provider_is_configured(self) -> bool:
+        """The legacy operator-selected provider is optional when using the catalog."""
+        return bool(self.lila_provider_base_url and self.lila_provider_model_id)
+
+    @property
     def lila_is_configured(self) -> bool:
-        return all((
+        return self.lila_storage_is_configured and self.lila_provider_is_configured
+
+    @property
+    def lila_provider_configuration_requested(self) -> bool:
+        return any((
             self.lila_provider_base_url,
             self.lila_provider_model_id,
-            self.lila_database_path,
-            self.lila_storage_encryption_key is not None,
+            self.lila_provider_api_key,
         ))
 
     @property
     def lila_configuration_requested(self) -> bool:
         return any((
-            self.lila_provider_base_url,
-            self.lila_provider_model_id,
-            self.lila_provider_api_key,
+            self.lila_provider_configuration_requested,
             self.lila_database_path,
             self.lila_storage_encryption_key is not None,
         ))
@@ -131,27 +145,33 @@ class Settings:
         if not lila_system_prompt.strip() or len(lila_system_prompt) > 8000:
             raise RuntimeError("LILA_SYSTEM_PROMPT must contain between 1 and 8000 characters")
 
-        lila_values_requested = any((
+        lila_storage_requested = any((lila_database_path, storage_key_text))
+        lila_storage_complete = bool(
+            lila_database_path and lila_storage_encryption_key is not None
+        )
+        lila_provider_requested = any((
             lila_provider_base_url,
             lila_provider_model_id,
             lila_provider_api_key,
-            lila_database_path,
-            storage_key_text,
         ))
-        lila_values_complete = all((
-            lila_provider_base_url,
-            lila_provider_model_id,
-            lila_database_path,
-            lila_storage_encryption_key is not None,
-        ))
-        if lila_values_requested and not lila_values_complete:
+        lila_provider_complete = bool(
+            lila_provider_base_url and lila_provider_model_id
+        )
+        if lila_storage_requested and not lila_storage_complete:
             raise RuntimeError(
-                "Lila configuration is incomplete; set LILA_PROVIDER_BASE_URL, "
-                "LILA_MODEL_ID, LILA_DATABASE_PATH and LILA_STORAGE_ENCRYPTION_KEY together"
+                "Lila provider storage is incomplete; set LILA_DATABASE_PATH "
+                "and LILA_STORAGE_ENCRYPTION_KEY together"
             )
-        if environment == "production" and not lila_values_complete:
+        if lila_provider_requested and not (
+            lila_provider_complete and lila_storage_complete
+        ):
             raise RuntimeError(
-                "Production requires a configured Lila model provider and encrypted persistent storage"
+                "Operator Lila provider configuration requires LILA_PROVIDER_BASE_URL, "
+                "LILA_MODEL_ID, LILA_DATABASE_PATH and LILA_STORAGE_ENCRYPTION_KEY"
+            )
+        if environment == "production" and not lila_storage_complete:
+            raise RuntimeError(
+                "Production requires encrypted persistent Lila storage"
             )
 
         voices = frozenset(
