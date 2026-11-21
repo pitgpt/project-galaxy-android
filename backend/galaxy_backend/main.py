@@ -14,6 +14,11 @@ from .lila_core.contracts import (
     CoreTurnRequest,
     CoreTurnResponse,
     ProviderModelDiscoveryResponse,
+    ProviderCreateRequest,
+    ProviderUpdateRequest,
+    ProviderSummary,
+    ProviderListResponse,
+    ProviderDeleteResponse,
 )
 from .lila_core.context import ContextAssembler
 from .lila_core.openai_compatible import (
@@ -23,8 +28,13 @@ from .lila_core.openai_compatible import (
     OpenAICompatibleModelAdapter,
 )
 from .lila_core.memory import IdempotencyKeyConflict, IdempotentTurnInProgress
+from .lila_core.provider_registry import validate_provider_endpoint
 from .lila_core.service import CoreTurnService, ModelAdapterContractError
-from .lila_core.sqlite_store import SqliteLilaStore
+from .lila_core.sqlite_store import (
+    ProviderAlreadyExists,
+    ProviderLimitExceeded,
+    SqliteLilaStore,
+)
 from redis.asyncio import Redis
 
 from .config import Settings
@@ -74,6 +84,7 @@ def create_app(
     lila_turn_rate_limiter: Any | None = None,
     lila_history_reader: Any | None = None,
     lila_provider_adapter: OpenAICompatibleModelAdapter | None = None,
+    lila_provider_registry: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -145,6 +156,7 @@ def create_app(
         app.state.lila_store = None
         app.state.lila_history_reader = lila_history_reader
         app.state.lila_provider_adapter = lila_provider_adapter
+        app.state.lila_provider_registry = lila_provider_registry
         if (
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
@@ -180,6 +192,8 @@ def create_app(
             )
             app.state.lila_store = store
             app.state.lila_history_reader = store
+            if app.state.lila_provider_registry is None:
+                app.state.lila_provider_registry = store
         elif app.state.settings.environment == "production":
             raise RuntimeError(
                 "Production requires a configured Lila model provider and encrypted persistent storage"
@@ -198,6 +212,7 @@ def create_app(
     app.state.lila_core_service = lila_core_service
     app.state.lila_history_reader = lila_history_reader
     app.state.lila_provider_adapter = lila_provider_adapter
+    app.state.lila_provider_registry = lila_provider_registry
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -286,6 +301,220 @@ def create_app(
             messages=[message.model_dump() for message in messages],
             next_before_sequence=next_cursor,
         )
+
+    async def require_lila_provider_registry(request: Request, user_id: str):
+        registry = request.app.state.lila_provider_registry
+        if registry is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider catalog is not configured",
+            )
+        try:
+            await request.app.state.lila_turn_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider catalog is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        return registry
+
+    def provider_summary(record: dict[str, object]) -> ProviderSummary:
+        return ProviderSummary(
+            provider_id=record["provider_id"],
+            provider_type=record["provider_type"],
+            model_id=record["model_id"],
+            capabilities=record["capabilities"],
+            timeout_seconds=record["timeout_seconds"],
+            enabled=record["enabled"],
+            has_api_key=bool(record.get("api_key")),
+        )
+
+    def validated_provider_config(
+        *,
+        provider_id: str,
+        provider_type: str,
+        base_url: str,
+        model_id: str,
+        api_key: str | None,
+        timeout_seconds: float,
+        capabilities: list[str],
+        enabled: bool,
+        system_prompt: str,
+    ) -> dict[str, object]:
+        validate_provider_endpoint(provider_type, base_url)
+        # Reuse the adapter's strict URL, identifier, credential and timeout
+        # validation without making an outbound request.
+        OpenAICompatibleConfig(
+            provider_id=provider_id,
+            base_url=base_url,
+            model_id=model_id,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+            system_prompt=system_prompt,
+        )
+        return {
+            "provider_id": provider_id,
+            "provider_type": provider_type,
+            "base_url": base_url,
+            "model_id": model_id,
+            "api_key": api_key,
+            "timeout_seconds": timeout_seconds,
+            "capabilities": capabilities,
+            "enabled": enabled,
+        }
+
+    @app.get("/v1/lila/providers", response_model=ProviderListResponse)
+    async def list_lila_providers(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        registry = await require_lila_provider_registry(request, user_id)
+        try:
+            records = await registry.list_providers(principal_id=user_id)
+            return ProviderListResponse(
+                providers=[provider_summary(record) for record in records]
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider catalog is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.post("/v1/lila/providers", response_model=ProviderSummary)
+    async def create_lila_provider(
+        payload: ProviderCreateRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        registry = await require_lila_provider_registry(request, user_id)
+        api_key = payload.api_key.get_secret_value() if payload.api_key is not None else None
+        try:
+            record = validated_provider_config(
+                provider_id=payload.provider_id,
+                provider_type=payload.provider_type,
+                base_url=payload.base_url,
+                model_id=payload.model_id,
+                api_key=api_key,
+                timeout_seconds=payload.timeout_seconds,
+                capabilities=list(payload.capabilities),
+                enabled=payload.enabled,
+                system_prompt=request.app.state.settings.lila_system_prompt,
+            )
+            await registry.save_provider(
+                principal_id=user_id, provider=record, create_only=True
+            )
+            return provider_summary(record)
+        except ProviderAlreadyExists:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A provider with this identifier already exists",
+            ) from None
+        except ProviderLimitExceeded:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The provider catalog limit has been reached",
+            ) from None
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Lila provider configuration is invalid",
+            ) from None
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider catalog is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.put("/v1/lila/providers/{provider_id}", response_model=ProviderSummary)
+    async def update_lila_provider(
+        provider_id: str,
+        payload: ProviderUpdateRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        registry = await require_lila_provider_registry(request, user_id)
+        try:
+            existing = await registry.get_provider(
+                principal_id=user_id, provider_id=provider_id
+            )
+            if existing is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Lila provider not found",
+                )
+            if payload.clear_api_key:
+                api_key = None
+            elif payload.api_key is not None:
+                api_key = payload.api_key.get_secret_value()
+            else:
+                api_key = existing.get("api_key")
+            record = validated_provider_config(
+                provider_id=provider_id,
+                provider_type=payload.provider_type,
+                base_url=payload.base_url,
+                model_id=payload.model_id,
+                api_key=api_key,
+                timeout_seconds=payload.timeout_seconds,
+                capabilities=list(payload.capabilities),
+                enabled=payload.enabled,
+                system_prompt=request.app.state.settings.lila_system_prompt,
+            )
+            await registry.save_provider(
+                principal_id=user_id, provider=record, create_only=False
+            )
+            return provider_summary(record)
+        except HTTPException:
+            raise
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Lila provider configuration is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider catalog is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.delete(
+        "/v1/lila/providers/{provider_id}",
+        response_model=ProviderDeleteResponse,
+    )
+    async def delete_lila_provider(
+        provider_id: str,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        registry = await require_lila_provider_registry(request, user_id)
+        try:
+            deleted = await registry.delete_provider(
+                principal_id=user_id, provider_id=provider_id
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Provider identifier is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider catalog is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lila provider not found",
+            )
+        return ProviderDeleteResponse(deleted=True)
 
     @app.post(
         "/v1/lila/provider/probe",
