@@ -6,7 +6,13 @@ on:
   push:
     branches:
       - feature/lila-core-foundation
+      - feature/lila-core-context-memory
+      - feature/lila-core-turn-service
+      - feature/lila-core-authenticated-api
+      - feature/lila-core-durable-history-memory
       - feature/lila-core-openai-compatible-composition
+      - feature/lila-provider-model-discovery
+      - feature/galaxy-lila-core-chat-client
     paths:
       - "backend/**"
       - ".github/workflows/lila-core-backend-ci.yml"
