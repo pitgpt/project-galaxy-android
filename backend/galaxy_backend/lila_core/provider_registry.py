@@ -20,9 +20,17 @@ _BLOCKED_CLOUD_SUFFIXES = (
     ".lan",
     ".home.arpa",
     ".onion",
+    ".corp",
+    ".home",
+    ".example.com",
+    ".example.net",
+    ".example.org",
 )
 _BLOCKED_CLOUD_HOSTS = {
     "localhost",
+    "example.com",
+    "example.net",
+    "example.org",
     "metadata.google.internal",
     "metadata",
 }
@@ -56,6 +64,7 @@ def validate_provider_endpoint(provider_type: str, base_url: str) -> None:
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
+        or "\\" in base_url
         or any(ord(character) < 32 or ord(character) == 127 for character in base_url)
     ):
         raise ValueError("Provider endpoint URL must be absolute and contain no credentials, query, or fragment")
