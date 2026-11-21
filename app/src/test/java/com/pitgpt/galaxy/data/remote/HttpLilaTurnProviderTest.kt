@@ -135,15 +135,15 @@ class HttpLilaTurnProviderTest {
     @Test
     fun readsCompletedTurnStatusWithoutPostingAnotherGeneration() = runBlocking {
         val status = FakeConnection(
-            URL("https://api.example.test/v1/lila/conversations/conversation-1/turns/$idempotencyKey"),
+            URL("https://api.example.test/v1/lila/conversations/00000000-0000-4000-8000-000000000501/turns/$idempotencyKey"),
             200,
             JSONObject()
-                .put("conversation_id", "conversation-1")
+                .put("conversation_id", "00000000-0000-4000-8000-000000000501")
                 .put("status", "completed")
                 .put(
                     "response",
                     JSONObject()
-                        .put("conversation_id", "conversation-1")
+                        .put("conversation_id", "00000000-0000-4000-8000-000000000501")
                         .put("text", "Ответ восстановлен")
                         .put("provider_id", "cloud-primary")
                         .put("model_id", "model-a")
@@ -156,7 +156,7 @@ class HttpLilaTurnProviderTest {
             connectionFactory = { status }
         )
 
-        val result = provider.getTurnStatus("conversation-1", idempotencyKey)
+        val result = provider.getTurnStatus("00000000-0000-4000-8000-000000000501", idempotencyKey)
 
         assertEquals(LilaTurnStatus.COMPLETED, result?.status)
         assertEquals("Ответ восстановлен", result?.result?.text)
@@ -170,10 +170,10 @@ class HttpLilaTurnProviderTest {
     @Test
     fun pendingAndNotFoundTurnStatusesDoNotStartGeneration() = runBlocking {
         val pending = FakeConnection(
-            URL("https://api.example.test/v1/lila/conversations/conversation-1/turns/$idempotencyKey"),
+            URL("https://api.example.test/v1/lila/conversations/00000000-0000-4000-8000-000000000501/turns/$idempotencyKey"),
             200,
             JSONObject()
-                .put("conversation_id", "conversation-1")
+                .put("conversation_id", "00000000-0000-4000-8000-000000000501")
                 .put("status", "pending")
                 .put("response", JSONObject.NULL)
                 .toString()
@@ -185,13 +185,13 @@ class HttpLilaTurnProviderTest {
         )
         assertEquals(
             LilaTurnStatus.PENDING,
-            pendingProvider.getTurnStatus("conversation-1", idempotencyKey)?.status
+            pendingProvider.getTurnStatus("00000000-0000-4000-8000-000000000501", idempotencyKey)?.status
         )
         assertEquals("GET", pending.requestMethod)
         assertTrue(pending.requestBody.size() == 0)
 
         val notFound = FakeConnection(
-            URL("https://api.example.test/v1/lila/conversations/conversation-1/turns/$idempotencyKey"),
+            URL("https://api.example.test/v1/lila/conversations/00000000-0000-4000-8000-000000000501/turns/$idempotencyKey"),
             404,
             "not found"
         )
@@ -202,7 +202,7 @@ class HttpLilaTurnProviderTest {
         )
         assertEquals(
             LilaTurnStatus.NOT_FOUND,
-            notFoundProvider.getTurnStatus("conversation-1", idempotencyKey)?.status
+            notFoundProvider.getTurnStatus("00000000-0000-4000-8000-000000000501", idempotencyKey)?.status
         )
         assertEquals("GET", notFound.requestMethod)
         assertTrue(notFound.requestBody.size() == 0)

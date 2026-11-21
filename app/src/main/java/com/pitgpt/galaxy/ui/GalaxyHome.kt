@@ -761,6 +761,18 @@ private fun ConversationScreen(
                                         fontSize = 10.sp,
                                         lineHeight = 14.sp
                                     )
+                                    TextButton(
+                                        onClick = {
+                                            draft = message.content
+                                            sendError = null
+                                        }
+                                    ) {
+                                        Text(
+                                            "ПОВТОРИТЬ ЭТО СООБЩЕНИЕ",
+                                            color = Color(0xFFE9BD70),
+                                            fontSize = 9.sp
+                                        )
+                                    }
                                 }
                                 Spacer(Modifier.height(5.dp))
                                 Text(message.content, color = Color.White, fontSize = 15.sp,
