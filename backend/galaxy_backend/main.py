@@ -1073,7 +1073,7 @@ def create_app(
         except (ModelAdapterContractError, ValidationError):
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Lila model returned an invalid response; generation may already have completed.",
+                detail="Lila model returned an invalid response",
                 headers={"X-Lila-Outcome-Unknown": "true"},
             ) from None
         except Exception as exc:
