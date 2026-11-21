@@ -31,6 +31,13 @@ data class LilaProviderProbeResult(
     val chatCompletionVerified: Boolean
 )
 
+data class LilaProviderChatTestResult(
+    val providerId: String,
+    val modelId: String,
+    val chatCompletionVerified: Boolean,
+    val responseCharacters: Int
+)
+
 data class LilaConversationModelSelection(
     val conversationId: String,
     val selected: Boolean,
@@ -163,6 +170,29 @@ class HttpLilaProviderCatalog(
         )
     }
 
+    suspend fun testProviderChat(providerId: String): LilaProviderChatTestResult {
+        val payload = requestJson(
+            "POST",
+            "/v1/lila/providers/${encodePathSegment(providerId)}/test-chat"
+        )
+        val returnedProviderId = payload.optString("provider_id", "")
+        val modelId = payload.optString("model_id", "")
+        val verified = payload.optBoolean("chat_completion_verified")
+        val responseCharacters = payload.optInt("response_characters", 0)
+        if (returnedProviderId != providerId ||
+            modelId.isBlank() || modelId.length > MAX_MODEL_ID_CHARS ||
+            !verified || responseCharacters !in 1..MAX_ASSISTANT_TEST_RESPONSE_CHARS
+        ) {
+            throw GalaxyApiException(null, "Сервис Lila не подтвердил тестовую генерацию.")
+        }
+        return LilaProviderChatTestResult(
+            providerId = returnedProviderId,
+            modelId = modelId,
+            chatCompletionVerified = verified,
+            responseCharacters = responseCharacters
+        )
+    }
+
     suspend fun getConversationModel(conversationId: String): LilaConversationModelSelection {
         require(conversationId.isNotBlank() && conversationId.length <= 128)
         val payload = requestJson(
@@ -257,7 +287,16 @@ class HttpLilaProviderCatalog(
             }
             val status = connection.responseCode
             if (status !in 200..299) {
-                throw GalaxyApiException(status, safeMessageFor(status))
+                val retrySafe = connection.getHeaderField("X-Lila-Retry-Safe")
+                    ?.equals("true", ignoreCase = true) == true
+                val outcomeUnknown = connection.getHeaderField("X-Lila-Outcome-Unknown")
+                    ?.equals("true", ignoreCase = true) == true
+                val message = when {
+                    retrySafe -> "Соединение не установлено до отправки запроса. Повтор безопасен."
+                    outcomeUnknown -> "Провайдер мог получить тестовый запрос. Повтор может снова расходовать токены."
+                    else -> safeMessageFor(status)
+                }
+                throw GalaxyApiException(status, message)
             }
             val responseText = readBounded(connection.inputStream)
             if (responseText.isBlank()) JSONObject() else try {
@@ -372,5 +411,6 @@ class HttpLilaProviderCatalog(
         const val MAX_PROVIDERS = 20
         const val MAX_MODELS = 100
         const val MAX_MODEL_ID_CHARS = 256
+        const val MAX_ASSISTANT_TEST_RESPONSE_CHARS = 12_000
     }
 }
