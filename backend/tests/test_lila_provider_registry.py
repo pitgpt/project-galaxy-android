@@ -371,6 +371,7 @@ def test_provider_api_rejects_unsafe_endpoint_classes(tmp_path):
         create_payload(base_url="http://api.vendor.com/v1"),
         create_payload(base_url="https://127.0.0.1/v1"),
         create_payload(base_url="https://metadata.google.internal/"),
+        create_payload(base_url="https://api.example.com/v1"),
         create_payload(
             provider_type="local",
             base_url="http://192.168.1.20:1234/v1",
