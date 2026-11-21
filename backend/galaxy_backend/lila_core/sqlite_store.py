@@ -1058,6 +1058,23 @@ class SqliteLilaStore:
             }
             if not required.issubset(payload):
                 raise TypeError("provider configuration is incomplete")
+            if (
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", provider_id)
+                or payload.get("provider_type") not in {"cloud", "local"}
+                or not isinstance(payload.get("base_url"), str)
+                or not 1 <= len(payload["base_url"]) <= 2048
+                or not isinstance(payload.get("model_id"), str)
+                or not 1 <= len(payload["model_id"]) <= 256
+                or (
+                    payload.get("api_key") is not None
+                    and not isinstance(payload.get("api_key"), str)
+                )
+                or not isinstance(payload.get("timeout_seconds"), (int, float))
+                or not 1 <= float(payload["timeout_seconds"]) <= 120
+                or payload.get("capabilities") != ["chat"]
+                or not isinstance(payload.get("enabled"), bool)
+            ):
+                raise TypeError("provider configuration fields are invalid")
             return payload
         except LilaStoreIntegrityError:
             raise
