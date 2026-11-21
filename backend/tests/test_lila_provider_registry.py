@@ -183,7 +183,7 @@ def test_schema_v4_migration_preserves_history_and_adds_provider_catalog(tmp_pat
     ]
     assert memories[0].content == "memory survives"
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 6
     assert database.execute(
         "SELECT COUNT(*) FROM lila_providers"
     ).fetchone()[0] == 1
@@ -258,6 +258,7 @@ def make_client(tmp_path, limiter=None, provider_http_client_factory=None):
         lila_turn_rate_limiter=limiter or RecordingLimiter(),
         lila_provider_registry=store,
         lila_provider_http_client_factory=provider_http_client_factory,
+        lila_store=store,
     )
     return TestClient(app), store
 
@@ -612,3 +613,302 @@ def test_owner_managed_provider_probe_sanitizes_auth_failure(tmp_path):
     )
     assert secret not in response.text
     assert factory_calls == [("cloud", 30.0)]
+
+
+
+def test_schema_v5_migration_preserves_encrypted_provider_catalog(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    store = SqliteLilaStore(path, KEY)
+    run(store.save_provider(
+        principal_id="owner-a",
+        provider=make_provider(),
+        create_only=True,
+    ))
+
+    database = sqlite3.connect(path)
+    database.execute("DROP TABLE IF EXISTS lila_conversation_models")
+    database.execute("PRAGMA user_version=5")
+    database.commit()
+    database.close()
+
+    migrated = SqliteLilaStore(path, KEY)
+    providers = run(migrated.list_providers(principal_id="owner-a"))
+    assert len(providers) == 1
+    assert providers[0]["provider_id"] == "cloud-main"
+
+    database = sqlite3.connect(path)
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert database.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lila_conversation_models'"
+    ).fetchone()[0] == 1
+    database.close()
+
+
+def test_conversation_model_selection_is_encrypted_owner_scoped_and_survives_restart(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    first = SqliteLilaStore(path, KEY)
+    run(first.save_provider(
+        principal_id="private-owner-a",
+        provider=make_provider(),
+        create_only=True,
+    ))
+    run(first.save_provider(
+        principal_id="private-owner-b",
+        provider=make_provider(
+            base_url="https://other.vendor.net/v1",
+            model_id="model-a",
+            api_key="owner-b-secret",
+        ),
+        create_only=True,
+    ))
+    run(first.set_conversation_model(
+        principal_id="private-owner-a",
+        conversation_id="private-conversation-a",
+        provider_id="cloud-main",
+        model_id="model-b",
+    ))
+
+    second = SqliteLilaStore(path, KEY)
+    assert run(second.get_conversation_model(
+        principal_id="private-owner-a",
+        conversation_id="private-conversation-a",
+    )) == {"provider_id": "cloud-main", "model_id": "model-b"}
+    assert run(second.get_conversation_model(
+        principal_id="private-owner-b",
+        conversation_id="private-conversation-a",
+    )) is None
+    assert run(second.get_conversation_model(
+        principal_id="private-owner-a",
+        conversation_id="another-conversation",
+    )) is None
+
+    database_bytes = b"".join(
+        candidate.read_bytes()
+        for candidate in (
+            path,
+            path.with_name(path.name + "-wal"),
+            path.with_name(path.name + "-shm"),
+        )
+        if candidate.exists()
+    )
+    for value in (
+        b"private-owner-a",
+        b"private-conversation-a",
+        b"cloud-main",
+        b"model-b",
+    ):
+        assert value not in database_bytes
+
+
+def test_deleting_selected_provider_does_not_silently_clear_conversation_selection(tmp_path):
+    store = SqliteLilaStore(tmp_path / "lila.sqlite3", KEY)
+    run(store.save_provider(
+        principal_id="owner-a", provider=make_provider(), create_only=True
+    ))
+    run(store.set_conversation_model(
+        principal_id="owner-a",
+        conversation_id="conversation-1",
+        provider_id="cloud-main",
+        model_id="model-b",
+    ))
+    assert run(store.delete_provider(
+        principal_id="owner-a", provider_id="cloud-main"
+    )) is True
+    assert run(store.get_conversation_model(
+        principal_id="owner-a", conversation_id="conversation-1"
+    )) == {"provider_id": "cloud-main", "model_id": "model-b"}
+
+
+def test_conversation_model_api_validates_discovery_and_restores_selection(tmp_path):
+    factory_calls = []
+
+    async def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"data": [{"id": "model-a"}, {"id": "model-b"}]})
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        created = client.post(
+            "/v1/lila/providers", headers=auth(), json=create_payload()
+        )
+        selected = client.put(
+            "/v1/lila/conversations/conversation-1/model",
+            headers=auth(),
+            json={"provider_id": "cloud-main", "model_id": "model-b"},
+        )
+        restored = client.get(
+            "/v1/lila/conversations/conversation-1/model",
+            headers=auth(),
+        )
+        rejected = client.put(
+            "/v1/lila/conversations/conversation-2/model",
+            headers=auth(),
+            json={"provider_id": "cloud-main", "model_id": "missing-model"},
+        )
+
+    assert created.status_code == 200
+    assert selected.status_code == 200
+    assert selected.json() == {
+        "conversation_id": "conversation-1",
+        "selected": True,
+        "provider_id": "cloud-main",
+        "model_id": "model-b",
+    }
+    assert restored.status_code == 200
+    assert restored.json() == selected.json()
+    assert rejected.status_code == 422
+    assert factory_calls == [("cloud", 30.0), ("cloud", 30.0)]
+
+
+def test_conversation_model_selection_is_owner_scoped(tmp_path):
+    factory_calls = []
+
+    async def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        created = client.post(
+            "/v1/lila/providers", headers=auth("a"), json=create_payload()
+        )
+        other_owner = client.put(
+            "/v1/lila/conversations/conversation-1/model",
+            headers=auth("b"),
+            json={"provider_id": "cloud-main", "model_id": "model-a"},
+        )
+
+    assert created.status_code == 200
+    assert other_owner.status_code == 404
+    assert factory_calls == []
+
+
+def test_turn_uses_selected_owner_provider_model_and_replays_without_second_generation(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"data": [{"id": "model-a"}, {"id": "model-b"}]},
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Ответ выбранной модели"}}]},
+        )
+
+    client, store = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    headers = {
+        **auth(),
+        "Idempotency-Key": "a9f2a3a8-5a8b-4c45-8f5e-7e9c2a0a8f11",
+    }
+    payload = {"conversation_id": "conversation-1", "message": "Привет, Лила"}
+    with client:
+        created = client.post("/v1/lila/providers", headers=auth(), json=create_payload())
+        selected = client.put(
+            "/v1/lila/conversations/conversation-1/model",
+            headers=auth(),
+            json={"provider_id": "cloud-main", "model_id": "model-b"},
+        )
+        first = client.post("/v1/lila/turns", headers=headers, json=payload)
+        replay = client.post("/v1/lila/turns", headers=headers, json=payload)
+        history = client.get(
+            "/v1/lila/conversations/conversation-1/messages",
+            headers=auth(),
+        )
+
+    assert created.status_code == selected.status_code == 200
+    assert first.status_code == replay.status_code == history.status_code == 200
+    assert first.json() == replay.json()
+    assert first.json()["text"] == "Ответ выбранной модели"
+    assert first.json()["provider_id"] == "cloud-main"
+    assert first.json()["model_id"] == "model-b"
+    assert [request.method for request in outbound] == ["GET", "POST"]
+    assert outbound[1].url.path == "/v1/chat/completions"
+    assert outbound[1].read()
+    assert b'"model":"model-b"' in outbound[1].content
+    assert outbound[1].headers["authorization"] == "Bearer provider-secret-value"
+    assert "provider-secret-value" not in first.text
+    assistant = history.json()["messages"][-1]
+    assert assistant["provider_id"] == "cloud-main"
+    assert assistant["model_id"] == "model-b"
+    assert len(run(store.load_recent_messages(
+        principal_id="owner-a",
+        conversation_id="conversation-1",
+        limit=10,
+    ))) == 2
+
+
+def test_turn_requires_explicit_selection_when_owner_has_registered_providers(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append(request)
+        return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        created = client.post("/v1/lila/providers", headers=auth(), json=create_payload())
+        response = client.post(
+            "/v1/lila/turns",
+            headers=auth(),
+            json={"conversation_id": "conversation-1", "message": "Привет"},
+        )
+
+    assert created.status_code == 200
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("Select a model provider")
+    assert outbound == []
+    assert factory_calls == []
+
+
+def test_turn_does_not_silently_fallback_when_selected_provider_is_deleted(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "unexpected fallback"}}]},
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        client.post("/v1/lila/providers", headers=auth(), json=create_payload())
+        selected = client.put(
+            "/v1/lila/conversations/conversation-1/model",
+            headers=auth(),
+            json={"provider_id": "cloud-main", "model_id": "model-a"},
+        )
+        deleted = client.delete("/v1/lila/providers/cloud-main", headers=auth())
+        response = client.post(
+            "/v1/lila/turns",
+            headers=auth(),
+            json={"conversation_id": "conversation-1", "message": "Продолжим"},
+        )
+
+    assert selected.status_code == deleted.status_code == 200
+    assert response.status_code == 409
+    assert "unavailable or disabled" in response.json()["detail"]
+    assert [request.method for request in outbound] == ["GET"]

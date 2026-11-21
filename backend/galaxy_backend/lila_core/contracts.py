@@ -235,3 +235,38 @@ class ProviderDeleteResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deleted: Literal[True] = True
+
+
+class ConversationModelSelectionRequest(BaseModel):
+    """Select one owner-managed provider/model for a conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=256)
+
+    @field_validator("provider_id")
+    @classmethod
+    def validate_provider_id(cls, value: str) -> str:
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
+            raise ValueError("provider_id must be a short stable identifier")
+        return value
+
+    @field_validator("model_id")
+    @classmethod
+    def validate_model_id(cls, value: str) -> str:
+        if not value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("model_id is invalid")
+        return value
+
+
+class ConversationModelSelectionResponse(BaseModel):
+    """Non-secret model selection restored by every client of the conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: str = Field(min_length=1, max_length=128)
+    selected: bool
+    provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    model_id: str | None = Field(default=None, min_length=1, max_length=256)

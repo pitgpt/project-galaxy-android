@@ -20,6 +20,8 @@ from .lila_core.contracts import (
     ProviderListResponse,
     ProviderDeleteResponse,
     ProviderConnectionTestResponse,
+    ConversationModelSelectionRequest,
+    ConversationModelSelectionResponse,
 )
 from .lila_core.context import ContextAssembler
 from .lila_core.openai_compatible import (
@@ -32,9 +34,16 @@ from .lila_core.memory import IdempotencyKeyConflict, IdempotentTurnInProgress
 from .lila_core.provider_registry import validate_provider_endpoint
 from .lila_core.provider_egress import create_provider_http_client
 from .lila_core.service import CoreTurnService, ModelAdapterContractError
+from .lila_core.provider_routing import (
+    OwnerScopedModelRouter,
+    ProviderSelectionRequired,
+    SelectedProviderUnavailable,
+)
 from .lila_core.sqlite_store import (
     ProviderAlreadyExists,
+    ProviderDisabled,
     ProviderLimitExceeded,
+    ProviderNotFound,
     SqliteLilaStore,
 )
 from redis.asyncio import Redis
@@ -88,6 +97,7 @@ def create_app(
     lila_provider_adapter: OpenAICompatibleModelAdapter | None = None,
     lila_provider_registry: Any | None = None,
     lila_provider_http_client_factory: Any | None = None,
+    lila_store: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -156,7 +166,7 @@ def create_app(
                 app.state.settings.lila_turns_per_day,
             )
 
-        app.state.lila_store = None
+        app.state.lila_store = lila_store
         app.state.lila_history_reader = lila_history_reader
         app.state.lila_provider_adapter = lila_provider_adapter
         app.state.lila_provider_registry = lila_provider_registry
@@ -164,6 +174,7 @@ def create_app(
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
             and not app.state.settings.lila_storage_is_configured
+            and lila_store is None
         ):
             raise RuntimeError("Lila configuration is incomplete: encrypted storage is not configured")
         if (
@@ -174,8 +185,8 @@ def create_app(
             raise RuntimeError("Operator Lila provider configuration is incomplete")
         if lila_core_service is not None:
             app.state.lila_core_service = lila_core_service
-        elif app.state.settings.lila_storage_is_configured:
-            store = SqliteLilaStore(
+        elif app.state.settings.lila_storage_is_configured or lila_store is not None:
+            store = lila_store or SqliteLilaStore(
                 app.state.settings.lila_database_path,
                 app.state.settings.lila_storage_encryption_key,
             )
@@ -185,6 +196,7 @@ def create_app(
             if app.state.lila_provider_registry is None:
                 app.state.lila_provider_registry = store
 
+            default_adapter = lila_provider_adapter
             if app.state.settings.lila_provider_is_configured:
                 provider_config = OpenAICompatibleConfig(
                     provider_id=app.state.settings.lila_provider_id,
@@ -194,23 +206,23 @@ def create_app(
                     timeout_seconds=app.state.settings.lila_provider_timeout_seconds,
                     system_prompt=app.state.settings.lila_system_prompt,
                 )
-                adapter = OpenAICompatibleModelAdapter(
+                default_adapter = OpenAICompatibleModelAdapter(
                     app.state.http_client,
                     provider_config,
                 )
-                app.state.lila_provider_adapter = adapter
-                assembler = ContextAssembler(store, store)
-                app.state.lila_core_service = CoreTurnService(
-                    assembler,
-                    adapter,
-                    store,
-                )
-            else:
-                # The encrypted catalog can be initialized before the owner
-                # adds the first provider. Turns remain unavailable until a
-                # provider is explicitly selected and composed.
-                app.state.lila_core_service = None
-                app.state.lila_provider_adapter = lila_provider_adapter
+            app.state.lila_provider_adapter = default_adapter
+            router = OwnerScopedModelRouter(
+                registry=app.state.lila_provider_registry,
+                selection_store=store,
+                default_adapter=default_adapter,
+                system_prompt=app.state.settings.lila_system_prompt,
+                http_client_factory=app.state.lila_provider_http_client_factory,
+            )
+            app.state.lila_core_service = CoreTurnService(
+                ContextAssembler(store, store),
+                router,
+                store,
+            )
         elif app.state.settings.environment == "production":
             raise RuntimeError(
                 "Production requires encrypted persistent Lila storage"
@@ -227,6 +239,7 @@ def create_app(
 
     app = FastAPI(title="Galaxy Backend", version="0.2.0", lifespan=lifespan)
     app.state.lila_core_service = lila_core_service
+    app.state.lila_store = lila_store
     app.state.lila_history_reader = lila_history_reader
     app.state.lila_provider_adapter = lila_provider_adapter
     app.state.lila_provider_registry = lila_provider_registry
@@ -641,6 +654,159 @@ def create_app(
             chat_completion_verified=False,
         )
 
+    @app.get(
+        "/v1/lila/conversations/{conversation_id}/model",
+        response_model=ConversationModelSelectionResponse,
+    )
+    async def get_lila_conversation_model(
+        conversation_id: str,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        await require_lila_provider_registry(request, user_id)
+        store = request.app.state.lila_store
+        if store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila conversation model selection is not configured",
+            )
+        if not conversation_id.strip() or len(conversation_id) > 128:
+            raise HTTPException(status_code=422, detail="Conversation ID is invalid")
+        try:
+            selection = await store.get_conversation_model(
+                principal_id=user_id,
+                conversation_id=conversation_id,
+            )
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Conversation ID is invalid") from None
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail="Lila conversation model selection is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        if selection is None:
+            return ConversationModelSelectionResponse(
+                conversation_id=conversation_id,
+                selected=False,
+            )
+        return ConversationModelSelectionResponse(
+            conversation_id=conversation_id,
+            selected=True,
+            provider_id=selection["provider_id"],
+            model_id=selection["model_id"],
+        )
+
+    @app.put(
+        "/v1/lila/conversations/{conversation_id}/model",
+        response_model=ConversationModelSelectionResponse,
+    )
+    async def set_lila_conversation_model(
+        conversation_id: str,
+        payload: ConversationModelSelectionRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        registry = await require_lila_provider_registry(request, user_id)
+        store = request.app.state.lila_store
+        if store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Lila conversation model selection is not configured",
+            )
+        if not conversation_id.strip() or len(conversation_id) > 128:
+            raise HTTPException(status_code=422, detail="Conversation ID is invalid")
+
+        try:
+            record = await registry.get_provider(
+                principal_id=user_id,
+                provider_id=payload.provider_id,
+            )
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Provider identifier is invalid") from None
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail="Lila provider catalog is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        if record is None:
+            raise HTTPException(status_code=404, detail="Lila provider not found")
+        if not record.get("enabled"):
+            raise HTTPException(status_code=409, detail="Lila provider is disabled")
+
+        try:
+            provider_type = str(record["provider_type"])
+            validate_provider_endpoint(provider_type, str(record["base_url"]))
+            config = OpenAICompatibleConfig(
+                provider_id=payload.provider_id,
+                base_url=str(record["base_url"]),
+                model_id=payload.model_id,
+                api_key=record.get("api_key"),
+                timeout_seconds=float(record["timeout_seconds"]),
+                system_prompt=request.app.state.settings.lila_system_prompt,
+            )
+            client = request.app.state.lila_provider_http_client_factory(
+                provider_type,
+                float(record["timeout_seconds"]),
+            )
+            async with client:
+                adapter = OpenAICompatibleModelAdapter(client, config)
+                discovered_models = await adapter.discover_models()
+        except ModelProviderConfigurationError as exc:
+            raise HTTPException(status_code=502, detail=exc.public_detail) from None
+        except ModelProviderUnavailable:
+            raise HTTPException(
+                status_code=503,
+                detail="Lila model endpoint is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        except ModelAdapterContractError:
+            raise HTTPException(
+                status_code=502,
+                detail="Lila model provider returned an invalid model catalog",
+            ) from None
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Stored Lila provider configuration is invalid") from None
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail="Lila model selection is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        if discovered_models is not None and payload.model_id not in discovered_models:
+            raise HTTPException(
+                status_code=422,
+                detail="The selected model is not available from this provider",
+            )
+        try:
+            await store.set_conversation_model(
+                principal_id=user_id,
+                conversation_id=conversation_id,
+                provider_id=payload.provider_id,
+                model_id=payload.model_id,
+            )
+        except ProviderNotFound:
+            raise HTTPException(status_code=404, detail="Lila provider not found") from None
+        except ProviderDisabled:
+            raise HTTPException(status_code=409, detail="Lila provider is disabled") from None
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Lila model selection is invalid") from None
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail="Lila model selection is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        return ConversationModelSelectionResponse(
+            conversation_id=conversation_id,
+            selected=True,
+            provider_id=payload.provider_id,
+            model_id=payload.model_id,
+        )
+
     @app.post(
         "/v1/lila/provider/probe",
         response_model=ProviderModelDiscoveryResponse,
@@ -745,6 +911,16 @@ def create_app(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A turn with this Idempotency-Key is still processing; retry the same request.",
                 headers={"Retry-After": "2"},
+            ) from None
+        except ProviderSelectionRequired:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Select a model provider for this conversation before sending a message.",
+            ) from None
+        except SelectedProviderUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The selected provider is unavailable or disabled; choose another provider.",
             ) from None
         except ModelProviderConfigurationError as exc:
             raise HTTPException(
