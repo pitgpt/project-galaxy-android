@@ -273,7 +273,7 @@ def test_provider_configuration_errors_return_safe_bad_gateway(
     assert "private-provider-detail" not in response.text
 
 
-def test_transient_provider_failure_returns_retryable_service_unavailable(tmp_path):
+def test_ambiguous_provider_failure_marks_outcome_unknown(tmp_path):
     settings = make_settings(tmp_path / "lila.sqlite3")
     service = RaisingCoreService(
         ModelProviderUnavailable("provider-secret must remain private")
@@ -284,6 +284,10 @@ def test_transient_provider_failure_returns_retryable_service_unavailable(tmp_pa
         response = send_turn(client, "Продолжим?")
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "Lila model provider is temporarily unavailable"
+    assert response.json()["detail"] == (
+        "Lila model provider outcome is unknown; it may have received the request."
+    )
     assert response.headers["Retry-After"] == "5"
+    assert response.headers["X-Lila-Outcome-Unknown"] == "true"
+    assert "X-Lila-Retry-Safe" not in response.headers
     assert "provider-secret" not in response.text
