@@ -1070,11 +1070,12 @@ def create_app(
                     "X-Lila-Outcome-Unknown": "true",
                 },
             ) from None
-        except (ModelAdapterContractError, ValidationError) as exc:
+        except (ModelAdapterContractError, ValidationError):
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Lila model returned an invalid response",
-            ) from exc
+                detail="Lila model returned an invalid response; generation may already have completed.",
+                headers={"X-Lila-Outcome-Unknown": "true"},
+            ) from None
         except Exception as exc:
             # Do not expose provider, memory-store, or history-store details.
             # asyncio cancellation is a BaseException and remains propagatable.
