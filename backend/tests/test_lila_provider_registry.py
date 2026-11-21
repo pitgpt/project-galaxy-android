@@ -160,6 +160,8 @@ def test_schema_v4_migration_preserves_history_and_adds_provider_catalog(tmp_pat
     ))
 
     database = sqlite3.connect(path)
+    # Simulate an actual v4 database: the v5 provider table does not exist yet.
+    database.execute("DROP TABLE IF EXISTS lila_providers")
     database.execute("PRAGMA user_version=4")
     database.commit()
     database.close()
