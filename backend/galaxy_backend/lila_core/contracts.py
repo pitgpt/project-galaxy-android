@@ -147,6 +147,13 @@ class ProviderCreateRequest(BaseModel):
             raise ValueError("provider_id must be a short stable identifier")
         return value
 
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("api_key must not be empty")
+        return value
+
     @field_validator("model_id")
     @classmethod
     def validate_model_id(cls, value: str) -> str:
@@ -174,6 +181,13 @@ class ProviderUpdateRequest(BaseModel):
         if self.clear_api_key and self.api_key is not None:
             raise ValueError("api_key and clear_api_key cannot be used together")
         return self
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("api_key must not be empty")
+        return value
 
     @field_validator("model_id")
     @classmethod
