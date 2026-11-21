@@ -139,6 +139,17 @@ class ProviderConnectionTestResponse(BaseModel):
     chat_completion_verified: Literal[False] = False
 
 
+class ProviderChatTestResponse(BaseModel):
+    """Result of an explicit, billable chat-completion smoke test."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=256)
+    chat_completion_verified: Literal[True] = True
+    response_characters: int = Field(ge=1, le=12_000)
+
+
 class ProviderCreateRequest(BaseModel):
     """Create an owner-scoped provider without returning its endpoint or secret."""
 

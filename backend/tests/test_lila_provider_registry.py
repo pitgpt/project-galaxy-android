@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 
 import httpx
@@ -987,3 +988,330 @@ def test_turn_does_not_silently_fallback_when_selected_provider_is_deleted(tmp_p
     assert response.status_code == 409
     assert "unavailable or disabled" in response.json()["detail"]
     assert [request.method for request in outbound] == ["GET"]
+
+
+def test_provider_chat_test_runs_one_completion_without_persisting_history(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append(request)
+        assert request.method == "POST"
+        assert request.url.path == "/v1/chat/completions"
+        payload = json.loads(request.content)
+        assert payload["model"] == "model-a"
+        assert payload["stream"] is False
+        assert payload["messages"][-1] == {
+            "role": "user",
+            "content": "Reply with exactly: LILA_OK",
+        }
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "LILA_OK"}}]},
+        )
+
+    client, store = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        created = client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        tested = client.post(
+            "/v1/lila/providers/cloud-main/test-chat",
+            headers=auth(),
+        )
+
+    assert created.status_code == 200
+    assert tested.status_code == 200
+    assert tested.json() == {
+        "provider_id": "cloud-main",
+        "model_id": "model-a",
+        "chat_completion_verified": True,
+        "response_characters": 7,
+    }
+    assert "provider-secret-value" not in tested.text
+    assert "api.vendor.com" not in tested.text
+    assert len(outbound) == 1
+    assert len(factory_calls) == 1
+    history = run(store.load_recent_messages(
+        principal_id="owner-a",
+        conversation_id="lila-provider-chat-test",
+        limit=10,
+    ))
+    assert not history
+
+
+def test_provider_chat_test_refuses_disabled_provider_without_egress(tmp_path):
+    outbound = []
+    factory_calls = []
+
+    async def handler(request):
+        outbound.append(request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "unexpected"}}]},
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    with client:
+        created = client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(enabled=False),
+        )
+        tested = client.post(
+            "/v1/lila/providers/cloud-main/test-chat",
+            headers=auth(),
+        )
+
+    assert created.status_code == 200
+    assert tested.status_code == 409
+    assert outbound == []
+    assert factory_calls == []
+
+
+def test_provider_chat_test_marks_only_pre_send_failure_retry_safe(tmp_path):
+    async def handler(request):
+        raise httpx.ConnectError(
+            "provider-secret private diagnostic",
+            request=request,
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, []),
+    )
+    with client:
+        client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        tested = client.post(
+            "/v1/lila/providers/cloud-main/test-chat",
+            headers=auth(),
+        )
+
+    assert tested.status_code == 503
+    assert tested.headers["X-Lila-Retry-Safe"] == "true"
+    assert "provider-secret" not in tested.text
+    assert "private diagnostic" not in tested.text
+
+
+def test_provider_chat_test_does_not_mark_ambiguous_failure_retry_safe(tmp_path):
+    async def handler(request):
+        raise httpx.ReadTimeout(
+            "provider-secret private diagnostic",
+            request=request,
+        )
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, []),
+    )
+    with client:
+        client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(),
+        )
+        tested = client.post(
+            "/v1/lila/providers/cloud-main/test-chat",
+            headers=auth(),
+        )
+
+    assert tested.status_code == 503
+    assert "X-Lila-Retry-Safe" not in tested.headers
+    assert tested.headers["X-Lila-Outcome-Unknown"] == "true"
+    assert "provider-secret" not in tested.text
+    assert "private diagnostic" not in tested.text
+
+
+def test_local_provider_runs_authenticated_api_to_core_history_over_real_pinned_socket(tmp_path):
+    """Exercise the complete owner-managed local path over a real TCP socket.
+
+    The test uses only loopback and one of the production allowlisted runtime
+    ports. It does not depend on an installed model runtime or external network.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from galaxy_backend.lila_core.provider_egress import create_provider_http_client
+    from galaxy_backend.lila_core.provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
+
+    class ProviderHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        observed = []
+
+        def log_message(self, format, *args):
+            return
+
+        def _send_json(self, payload):
+            encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self):
+            self.__class__.observed.append(
+                ("GET", self.path, self.headers.get("Authorization"))
+            )
+            if self.path != "/v1/models":
+                self.send_error(404)
+                return
+            self._send_json({
+                "object": "list",
+                "data": [{"id": "local-integration-model"}],
+            })
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            self.__class__.observed.append(
+                ("POST", self.path, self.headers.get("Authorization"), payload)
+            )
+            if self.path != "/v1/chat/completions":
+                self.send_error(404)
+                return
+            last_message = payload["messages"][-1]["content"]
+            content = (
+                "LILA_OK"
+                if last_message == "Reply with exactly: LILA_OK"
+                else "Ответ через настоящий loopback HTTP"
+            )
+            self._send_json({
+                "choices": [{"message": {"content": content}}],
+            })
+
+    server = None
+    for candidate_port in sorted(DEFAULT_LOCAL_PROVIDER_PORTS):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", candidate_port), ProviderHandler)
+            break
+        except OSError:
+            continue
+    if server is None:
+        pytest.skip("No production-allowlisted local model port is available")
+
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+
+    def real_provider_client_factory(provider_type, timeout_seconds):
+        from galaxy_backend.lila_core.provider_egress import create_provider_http_client
+        return create_provider_http_client(provider_type, timeout_seconds)
+
+    try:
+        client, store = make_client(
+            tmp_path,
+            provider_http_client_factory=real_provider_client_factory,
+        )
+        headers = {
+            **auth(),
+            "Idempotency-Key": "4a7cbcc8-2e3e-49ab-9d92-37d9d53b0f11",
+        }
+        with client:
+            created = client.post(
+                "/v1/lila/providers",
+                headers=auth(),
+                json=create_payload(
+                    provider_id="local-integration",
+                    provider_type="local",
+                    base_url=f"http://127.0.0.1:{port}/v1",
+                    model_id="local-integration-model",
+                    api_key="integration-only-secret",
+                ),
+            )
+            probe = client.post(
+                "/v1/lila/providers/local-integration/probe",
+                headers=auth(),
+            )
+            chat_test = client.post(
+                "/v1/lila/providers/local-integration/test-chat",
+                headers=auth(),
+            )
+            selected = client.put(
+                "/v1/lila/conversations/live-local/model",
+                headers=auth(),
+                json={
+                    "provider_id": "local-integration",
+                    "model_id": "local-integration-model",
+                },
+            )
+            turn_payload = {
+                "conversation_id": "live-local",
+                "message": "Ответь через локальный сервер",
+            }
+            first = client.post(
+                "/v1/lila/turns",
+                headers=headers,
+                json=turn_payload,
+            )
+            replay = client.post(
+                "/v1/lila/turns",
+                headers=headers,
+                json=turn_payload,
+            )
+            history = client.get(
+                "/v1/lila/conversations/live-local/messages",
+                headers=auth(),
+            )
+
+        assert created.status_code == 200
+        assert "integration-only-secret" not in created.text
+        assert probe.status_code == 200
+        assert probe.json()["configured_model_available"] is True
+        assert probe.json()["chat_completion_verified"] is False
+        assert chat_test.status_code == 200
+        assert chat_test.json()["chat_completion_verified"] is True
+        assert chat_test.json()["response_characters"] == 7
+        assert "integration-only-secret" not in chat_test.text
+        assert selected.status_code == 200
+        assert first.status_code == replay.status_code == history.status_code == 200
+        assert first.json() == replay.json()
+        assert first.json()["text"] == "Ответ через настоящий loopback HTTP"
+        assert first.json()["provider_id"] == "local-integration"
+        assert first.json()["model_id"] == "local-integration-model"
+        assert history.json()["messages"][-1]["provider_id"] == "local-integration"
+        assert history.json()["messages"][-1]["model_id"] == "local-integration-model"
+
+        observed = ProviderHandler.observed
+        assert [item[0:2] for item in observed] == [
+            ("GET", "/v1/models"),
+            ("POST", "/v1/chat/completions"),
+            ("GET", "/v1/models"),
+            ("POST", "/v1/chat/completions"),
+        ]
+        assert all(
+            item[2] == "Bearer integration-only-secret"
+            for item in observed
+        )
+        assert not run(store.load_recent_messages(
+            principal_id="owner-a",
+            conversation_id="lila-provider-chat-test",
+            limit=10,
+        ))
+        persisted = run(store.load_recent_messages(
+            principal_id="owner-a",
+            conversation_id="live-local",
+            limit=10,
+        ))
+        assert [message.content for message in persisted] == [
+            "Ответь через локальный сервер",
+            "Ответ через настоящий loopback HTTP",
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

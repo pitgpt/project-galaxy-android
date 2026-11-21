@@ -20,18 +20,23 @@ from .lila_core.contracts import (
     ProviderListResponse,
     ProviderDeleteResponse,
     ProviderConnectionTestResponse,
+    ProviderChatTestResponse,
     ConversationModelSelectionRequest,
     ConversationModelSelectionResponse,
 )
 from .lila_core.adapters import ModelProviderConnectionUnavailable
-from .lila_core.context import ContextAssembler
+from .lila_core.context import AssembledContext, ContextAssembler
 from .lila_core.openai_compatible import (
     ModelProviderConfigurationError,
     ModelProviderUnavailable,
     OpenAICompatibleConfig,
     OpenAICompatibleModelAdapter,
 )
-from .lila_core.memory import IdempotencyKeyConflict, IdempotentTurnInProgress
+from .lila_core.memory import (
+    ConversationMessage,
+    IdempotencyKeyConflict,
+    IdempotentTurnInProgress,
+)
 from .lila_core.provider_registry import validate_provider_endpoint
 from .lila_core.provider_egress import create_provider_http_client
 from .lila_core.service import CoreTurnService, ModelAdapterContractError
@@ -654,6 +659,127 @@ def create_app(
             ),
             model_ids=list(model_ids or ()),
             chat_completion_verified=False,
+        )
+
+    @app.post(
+        "/v1/lila/providers/{provider_id}/test-chat",
+        response_model=ProviderChatTestResponse,
+    )
+    async def test_lila_provider_chat_completion(
+        provider_id: str,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        """Run an explicit minimal completion without adding a conversation turn.
+
+        This operation is generative and may consume provider tokens. It is
+        user-triggered, rate-limited, and returns no generated text or provider
+        diagnostics. Ambiguous post-send failures are never marked retry-safe.
+        """
+        registry = await require_lila_provider_registry(request, user_id)
+        try:
+            record = await registry.get_provider(
+                principal_id=user_id,
+                provider_id=provider_id,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Provider identifier is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider catalog is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lila provider not found",
+            )
+        if not record.get("enabled"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Lila provider is disabled",
+            )
+
+        try:
+            provider_type = str(record["provider_type"])
+            timeout_seconds = float(record["timeout_seconds"])
+            config = OpenAICompatibleConfig(
+                provider_id=str(record["provider_id"]),
+                base_url=str(record["base_url"]),
+                model_id=str(record["model_id"]),
+                api_key=record.get("api_key"),
+                timeout_seconds=timeout_seconds,
+                system_prompt=request.app.state.settings.lila_system_prompt,
+            )
+            validate_provider_endpoint(provider_type, config.base_url)
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Stored Lila provider configuration is invalid",
+            ) from None
+
+        context = AssembledContext(
+            conversation_id="lila-provider-chat-test",
+            messages=(
+                ConversationMessage(
+                    role="user",
+                    content="Reply with exactly: LILA_OK",
+                ),
+            ),
+        )
+        try:
+            client = request.app.state.lila_provider_http_client_factory(
+                provider_type,
+                timeout_seconds,
+            )
+            async with client:
+                adapter = OpenAICompatibleModelAdapter(client, config)
+                result = await adapter.generate(context)
+        except ModelProviderConnectionUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider could not be reached before the test request was sent; retry is safe.",
+                headers={
+                    "Retry-After": "5",
+                    "X-Lila-Retry-Safe": "true",
+                },
+            ) from None
+        except ModelProviderConfigurationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=exc.public_detail,
+            ) from None
+        except ModelProviderUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider test outcome is unavailable; the provider may have received the request.",
+                headers={
+                    "Retry-After": "5",
+                    "X-Lila-Outcome-Unknown": "true",
+                },
+            ) from None
+        except ModelAdapterContractError:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Lila provider returned an unsupported chat-completion response",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider chat test is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        return ProviderChatTestResponse(
+            provider_id=result.provider_id or config.provider_id,
+            model_id=result.model_id or config.model_id,
+            chat_completion_verified=True,
+            response_characters=len(result.text),
         )
 
     @app.get(
