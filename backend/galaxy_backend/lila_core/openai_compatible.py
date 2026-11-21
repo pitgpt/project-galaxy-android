@@ -17,7 +17,11 @@ import httpx
 
 from .context import AssembledContext
 from .contracts import CoreTurnResponse
-from .adapters import ModelAdapterContractError, ModelProviderRejected
+from .adapters import (
+    ModelAdapterContractError,
+    ModelProviderRejected,
+    ModelProviderConnectionUnavailable,
+)
 
 
 MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
@@ -130,7 +134,7 @@ class OpenAICompatibleConfig:
                     )
                 )
             except ValueError:
-                allowed_cleartext = hostname.lower() == "localhost"
+                allowed_cleartext = hostname.lower() in {"localhost", "host.docker.internal"}
             if not allowed_cleartext:
                 raise ValueError("Cleartext Lila endpoints must use localhost or a literal private IP; use HTTPS otherwise")
 
@@ -320,9 +324,17 @@ class OpenAICompatibleModelAdapter:
             raise ModelProviderUnavailable(
                 "The configured Lila model provider is temporarily unavailable"
             ) from None
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            # A connect failure occurs before the HTTP request is sent. The
+            # idempotency reservation can therefore be released safely, and an
+            # explicitly configured fallback may be attempted without risking a
+            # second billable generation.
+            raise ModelProviderConnectionUnavailable(
+                "The configured Lila model provider could not be reached"
+            ) from None
         except httpx.HTTPError:
-            # Transport, timeout, and protocol failures are transient from the
-            # application's perspective. Keep their diagnostics private.
+            # Read/write/protocol failures may happen after the provider received
+            # the request. Keep the outcome ambiguous and retain the reservation.
             raise ModelProviderUnavailable(
                 "The configured Lila model provider is temporarily unavailable"
             ) from None

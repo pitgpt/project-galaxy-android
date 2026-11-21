@@ -9,6 +9,7 @@ from galaxy_backend.lila_core.contracts import CoreTurnResponse
 from galaxy_backend.lila_core.memory import ConversationMessage, MemorySnippet
 from galaxy_backend.lila_core.openai_compatible import (
     ModelProviderConfigurationError,
+    ModelProviderConnectionUnavailable,
     ModelProviderUnavailable,
     OpenAICompatibleConfig,
     OpenAICompatibleModelAdapter,
@@ -156,9 +157,31 @@ def test_provider_transient_statuses_remain_retryable(status_code):
     asyncio.run(scenario())
 
 
-def test_provider_transport_failure_is_sanitized():
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.ConnectError("provider-secret private-provider-detail"),
+        httpx.ConnectTimeout("provider-secret private-provider-detail"),
+    ],
+)
+def test_pre_send_connection_failures_are_definitive_and_sanitized(failure):
     async def handler(request):
-        raise httpx.ConnectTimeout("provider-secret private-provider-detail")
+        raise failure
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelProviderConnectionUnavailable) as captured:
+                await adapter.generate(make_context())
+            assert "provider-secret" not in str(captured.value)
+            assert "private-provider-detail" not in str(captured.value)
+
+    asyncio.run(scenario())
+
+
+def test_read_timeout_remains_ambiguous_and_keeps_provider_outcome_private():
+    async def handler(request):
+        raise httpx.ReadTimeout("provider-secret private-provider-detail")
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:

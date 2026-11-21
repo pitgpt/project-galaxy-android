@@ -12,6 +12,7 @@ on:
       - feature/lila-core-durable-history-memory
       - feature/lila-core-openai-compatible-composition
       - feature/lila-provider-model-discovery
+      - feature/lila-encrypted-provider-registry
       - feature/galaxy-lila-core-chat-client
     paths:
       - "backend/**"
@@ -19,6 +20,7 @@ on:
   pull_request:
     branches:
       - "feature/lila-core-*"
+      - "feature/lila-provider-*"
     paths:
       - "backend/**"
 
