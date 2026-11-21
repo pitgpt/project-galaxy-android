@@ -7,6 +7,7 @@ on:
     branches:
       - feature/lila-core-foundation
       - feature/lila-core-openai-compatible-composition
+      - feature/lila-provider-model-discovery
     paths:
       - "backend/**"
       - ".github/workflows/lila-core-backend-ci.yml"

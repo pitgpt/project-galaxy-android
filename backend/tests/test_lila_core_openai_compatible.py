@@ -257,3 +257,128 @@ def test_chunked_provider_response_is_decoded_across_chunk_boundaries():
     response = asyncio.run(scenario())
     assert response.text == "Ответ из нескольких частей"
     assert stream.closed is True
+
+
+
+@pytest.mark.parametrize(
+    ("runtime", "base_url", "expected_url"),
+    [
+        (
+            "LM Studio",
+            "http://127.0.0.1:1234/v1",
+            "http://127.0.0.1:1234/v1/models",
+        ),
+        (
+            "Ollama OpenAI-compatible API",
+            "http://127.0.0.1:11434/v1",
+            "http://127.0.0.1:11434/v1/models",
+        ),
+        (
+            "llama.cpp server OpenAI-compatible API",
+            "http://127.0.0.1:8080/v1",
+            "http://127.0.0.1:8080/v1/models",
+        ),
+    ],
+)
+def test_model_discovery_uses_common_local_openai_compatible_contract(
+    runtime, base_url, expected_url
+):
+    captured = {}
+
+    async def handler(request):
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers.get("Authorization")
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": "qwen-local"},
+                    {"id": "llama-local"},
+                    {"id": "qwen-local"},
+                    {"id": ""},
+                    {"id": "invalid\nmodel"},
+                ],
+            },
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(
+                client,
+                make_config(base_url=base_url, api_key=None),
+            )
+            return await adapter.discover_models()
+
+    assert asyncio.run(scenario()) == ("qwen-local", "llama-local")
+    assert captured["url"] == expected_url
+    assert captured["authorization"] is None
+
+
+@pytest.mark.parametrize("status_code", [404, 405])
+def test_model_discovery_reports_unsupported_route_without_generation(status_code):
+    captured = []
+
+    async def handler(request):
+        captured.append((request.method, str(request.url)))
+        return httpx.Response(status_code)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            return await adapter.discover_models()
+
+    assert asyncio.run(scenario()) is None
+    assert captured == [("GET", "http://127.0.0.1:1234/v1/models")]
+
+
+def test_model_discovery_rejects_malformed_catalog_without_raw_payload():
+    async def handler(request):
+        return httpx.Response(
+            200,
+            json={"error": {"message": "provider-secret-private-detail"}},
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelAdapterContractError) as captured:
+                await adapter.discover_models()
+            assert "provider-secret-private-detail" not in str(captured.value)
+
+    asyncio.run(scenario())
+
+
+def test_model_discovery_rejects_oversized_catalog_and_closes_stream():
+    stream = TrackedChunkStream([b"x" * (16 * 1024) for _ in range(5)])
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelAdapterContractError, match="catalog exceeds"):
+                await adapter.discover_models()
+
+    asyncio.run(scenario())
+    assert stream.closed is True
+
+
+def test_model_discovery_maps_auth_rejection_without_provider_details():
+    async def handler(request):
+        return httpx.Response(
+            401,
+            json={"error": {"message": "provider-secret-private-detail"}},
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelProviderConfigurationError) as captured:
+                await adapter.discover_models()
+            assert captured.value.public_detail
+            assert "provider-secret" not in str(captured.value)
+            assert "private-detail" not in str(captured.value)
+
+    asyncio.run(scenario())

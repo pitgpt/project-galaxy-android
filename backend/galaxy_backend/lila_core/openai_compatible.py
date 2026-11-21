@@ -21,6 +21,8 @@ from .adapters import ModelAdapterContractError, ModelProviderRejected
 
 
 MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
+MAX_PROVIDER_MODEL_LIST_BYTES = 65_536
+MAX_DISCOVERED_MODELS = 100
 
 
 DEFAULT_LILA_SYSTEM_PROMPT = (
@@ -146,6 +148,97 @@ class OpenAICompatibleModelAdapter:
             f"{type(self).__name__}(provider_id={self._config.provider_id!r}, "
             f"model_id={self._config.model_id!r})"
         )
+
+    @property
+    def provider_id(self) -> str:
+        return self._config.provider_id
+
+    @property
+    def model_id(self) -> str:
+        return self._config.model_id
+
+    async def discover_models(self) -> tuple[str, ...] | None:
+        """Read a bounded OpenAI-compatible /models catalog without generating text.
+
+        Returns None when the endpoint responds with 404/405, which indicates
+        that model discovery is not implemented. This probe does not verify
+        /chat/completions and never makes a billable generation request.
+        """
+        headers = {"Accept": "application/json"}
+        if self._config.api_key:
+            headers["Authorization"] = f"Bearer {self._config.api_key}"
+
+        response_body = bytearray()
+        try:
+            async with self._http_client.stream(
+                "GET",
+                self._config.base_url.rstrip("/") + "/models",
+                headers=headers,
+                timeout=httpx.Timeout(float(self._config.timeout_seconds)),
+                follow_redirects=False,
+            ) as response:
+                if response.status_code in {404, 405}:
+                    return None
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes(chunk_size=16 * 1024):
+                    if len(response_body) + len(chunk) > MAX_PROVIDER_MODEL_LIST_BYTES:
+                        raise ModelAdapterContractError(
+                            "The configured Lila model catalog exceeds the supported size"
+                        )
+                    response_body.extend(chunk)
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code in {408, 425, 429} or 500 <= status_code <= 599:
+                raise ModelProviderUnavailable(
+                    "The configured Lila model endpoint is temporarily unavailable"
+                ) from None
+            if status_code in {401, 403}:
+                raise ModelProviderConfigurationError(
+                    "authentication_rejected"
+                ) from None
+            if 300 <= status_code <= 399:
+                raise ModelProviderConfigurationError("redirect_refused") from None
+            if 400 <= status_code <= 499:
+                raise ModelProviderConfigurationError("request_rejected") from None
+            raise ModelProviderUnavailable(
+                "The configured Lila model endpoint is temporarily unavailable"
+            ) from None
+        except httpx.HTTPError:
+            raise ModelProviderUnavailable(
+                "The configured Lila model endpoint is temporarily unavailable"
+            ) from None
+
+        try:
+            payload = json.loads(response_body)
+            data = payload["data"]
+            if not isinstance(data, list):
+                raise TypeError("model catalog data must be a list")
+
+            model_ids: list[str] = []
+            seen: set[str] = set()
+            for item in data[:MAX_DISCOVERED_MODELS]:
+                if not isinstance(item, dict):
+                    continue
+                model_id = item.get("id")
+                if not isinstance(model_id, str):
+                    continue
+                model_id = model_id.strip()
+                if (
+                    not model_id
+                    or len(model_id) > 256
+                    or any(ord(character) < 32 or ord(character) == 127 for character in model_id)
+                    or model_id in seen
+                ):
+                    continue
+                seen.add(model_id)
+                model_ids.append(model_id)
+            return tuple(model_ids)
+        except (KeyError, TypeError, ValueError):
+            raise ModelAdapterContractError(
+                "The configured Lila model provider returned an unsupported model catalog"
+            ) from None
+        finally:
+            response_body[:] = b"\0" * len(response_body)
 
     def _messages(self, context: AssembledContext) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = [

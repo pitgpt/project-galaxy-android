@@ -9,7 +9,12 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, ValidationError
 
-from .lila_core.contracts import ConversationHistoryPage, CoreTurnRequest, CoreTurnResponse
+from .lila_core.contracts import (
+    ConversationHistoryPage,
+    CoreTurnRequest,
+    CoreTurnResponse,
+    ProviderModelDiscoveryResponse,
+)
 from .lila_core.context import ContextAssembler
 from .lila_core.openai_compatible import (
     ModelProviderConfigurationError,
@@ -68,6 +73,7 @@ def create_app(
     lila_core_service: CoreTurnService | None = None,
     lila_turn_rate_limiter: Any | None = None,
     lila_history_reader: Any | None = None,
+    lila_provider_adapter: OpenAICompatibleModelAdapter | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -138,6 +144,7 @@ def create_app(
 
         app.state.lila_store = None
         app.state.lila_history_reader = lila_history_reader
+        app.state.lila_provider_adapter = lila_provider_adapter
         if (
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
@@ -164,6 +171,7 @@ def create_app(
                 app.state.http_client,
                 provider_config,
             )
+            app.state.lila_provider_adapter = adapter
             assembler = ContextAssembler(store, store)
             app.state.lila_core_service = CoreTurnService(
                 assembler,
@@ -178,6 +186,7 @@ def create_app(
             )
         else:
             app.state.lila_core_service = None
+            app.state.lila_provider_adapter = None
 
         yield
         if app.state.redis is not None:
@@ -188,6 +197,7 @@ def create_app(
     app = FastAPI(title="Galaxy Backend", version="0.2.0", lifespan=lifespan)
     app.state.lila_core_service = lila_core_service
     app.state.lila_history_reader = lila_history_reader
+    app.state.lila_provider_adapter = lila_provider_adapter
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -275,6 +285,68 @@ def create_app(
             conversation_id=conversation_id,
             messages=[message.model_dump() for message in messages],
             next_before_sequence=next_cursor,
+        )
+
+    @app.post(
+        "/v1/lila/provider/probe",
+        response_model=ProviderModelDiscoveryResponse,
+    )
+    async def probe_lila_provider(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        """Probe only the configured /models endpoint; never issue a generation."""
+        adapter: OpenAICompatibleModelAdapter | None = request.app.state.lila_provider_adapter
+        if adapter is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila model provider is not configured",
+            )
+
+        # Reuse the per-user Lila quota to bound outbound discovery requests.
+        try:
+            await request.app.state.lila_turn_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider discovery is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        try:
+            model_ids = await adapter.discover_models()
+        except ModelProviderConfigurationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=exc.public_detail,
+            ) from None
+        except ModelProviderUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila model endpoint is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        except ModelAdapterContractError:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Lila model provider returned an invalid model catalog",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila provider discovery is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+        return ProviderModelDiscoveryResponse(
+            provider_id=adapter.provider_id,
+            configured_model_id=adapter.model_id,
+            models_endpoint_responded=True,
+            model_discovery_supported=model_ids is not None,
+            model_ids=list(model_ids or ()),
+            chat_completion_verified=False,
         )
 
     @app.post("/v1/lila/turns", response_model=CoreTurnResponse)

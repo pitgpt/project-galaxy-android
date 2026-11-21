@@ -9,7 +9,11 @@ from galaxy_backend.config import Settings
 from galaxy_backend.lila_core.context import ContextAssembler
 from galaxy_backend.lila_core.contracts import CoreTurnResponse
 from galaxy_backend.lila_core.memory import ConversationMessage, MemorySnippet
-from galaxy_backend.lila_core.service import CoreTurnService
+from galaxy_backend.lila_core.openai_compatible import (
+    ModelProviderConfigurationError,
+    ModelProviderUnavailable,
+)
+from galaxy_backend.lila_core.service import CoreTurnService, ModelAdapterContractError
 from galaxy_backend.lila_core.sqlite_store import SqliteLilaStore
 from galaxy_backend.main import create_app
 
@@ -108,6 +112,23 @@ class RecordingModelAdapter:
         )
 
 
+
+class RecordingProviderAdapter:
+    provider_id = "operator-configured"
+    model_id = "configured-model"
+
+    def __init__(self, *, models=("model-a", "model-b"), error=None):
+        self.models = models
+        self.error = error
+        self.calls = 0
+
+    async def discover_models(self):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.models
+
+
 def make_settings():
     return Settings(
         openai_api_key="sk-test-only",
@@ -129,7 +150,7 @@ def build_service(*, adapter=None):
     return service, history, memories, model
 
 
-def make_client(service=None, turn_limiter=None, history_reader=None):
+def make_client(service=None, turn_limiter=None, history_reader=None, provider_adapter=None):
     app = create_app(
         settings=make_settings(),
         http_client=FakeHttpClient(),
@@ -137,6 +158,7 @@ def make_client(service=None, turn_limiter=None, history_reader=None):
         lila_core_service=service,
         lila_turn_rate_limiter=turn_limiter,
         lila_history_reader=history_reader,
+        lila_provider_adapter=provider_adapter,
     )
     return TestClient(app)
 
@@ -606,3 +628,122 @@ def test_lila_history_fails_closed_without_history_reader_and_bounds_page_size()
 
     assert unavailable.status_code == 503
     assert oversized.status_code == 422
+
+
+
+def test_lila_provider_probe_requires_bearer_token_without_outbound_call():
+    adapter = RecordingProviderAdapter()
+    limiter = RecordingTurnLimiter()
+    with make_client(turn_limiter=limiter, provider_adapter=adapter) as client:
+        response = client.post("/v1/lila/provider/probe")
+
+    assert response.status_code == 401
+    assert adapter.calls == 0
+    assert limiter.calls == []
+
+
+def test_lila_provider_probe_returns_only_bounded_non_secret_model_metadata():
+    adapter = RecordingProviderAdapter(models=("qwen-local", "llama-local"))
+    limiter = RecordingTurnLimiter()
+    with make_client(turn_limiter=limiter, provider_adapter=adapter) as client:
+        response = client.post(
+            "/v1/lila/provider/probe",
+            headers={"Authorization": "Bearer user-a-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider_id": "operator-configured",
+        "configured_model_id": "configured-model",
+        "models_endpoint_responded": True,
+        "model_discovery_supported": True,
+        "model_ids": ["qwen-local", "llama-local"],
+        "chat_completion_verified": False,
+    }
+    assert limiter.calls == ["user-a"]
+    assert adapter.calls == 1
+    assert "base_url" not in response.text
+    assert "api_key" not in response.text
+    assert "provider-secret" not in response.text
+
+
+def test_lila_provider_probe_reports_unsupported_models_route_without_claiming_chat_test():
+    adapter = RecordingProviderAdapter(models=None)
+    with make_client(provider_adapter=adapter) as client:
+        response = client.post(
+            "/v1/lila/provider/probe",
+            headers={"Authorization": "Bearer user-a-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["models_endpoint_responded"] is True
+    assert response.json()["model_discovery_supported"] is False
+    assert response.json()["model_ids"] == []
+    assert response.json()["chat_completion_verified"] is False
+
+
+def test_lila_provider_probe_fails_closed_when_no_provider_is_configured():
+    with make_client() as client:
+        response = client.post(
+            "/v1/lila/provider/probe",
+            headers={"Authorization": "Bearer user-a-token"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Lila model provider is not configured"
+
+
+def test_lila_provider_probe_obeys_per_user_rate_limit_before_network_call():
+    adapter = RecordingProviderAdapter()
+    limiter = RecordingTurnLimiter(
+        error=HTTPException(
+            status_code=429,
+            detail="Lila turn rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
+    )
+    with make_client(turn_limiter=limiter, provider_adapter=adapter) as client:
+        response = client.post(
+            "/v1/lila/provider/probe",
+            headers={"Authorization": "Bearer user-a-token"},
+        )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert limiter.calls == ["user-a"]
+    assert adapter.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_detail"),
+    [
+        (
+            ModelProviderConfigurationError("authentication_rejected"),
+            502,
+            "Lila model provider rejected authentication; verify its credentials and access permissions.",
+        ),
+        (
+            ModelProviderUnavailable("private-provider-detail"),
+            503,
+            "Lila model endpoint is temporarily unavailable",
+        ),
+        (
+            ModelAdapterContractError("private-provider-detail"),
+            502,
+            "Lila model provider returned an invalid model catalog",
+        ),
+    ],
+)
+def test_lila_provider_probe_sanitizes_provider_failures(
+    error, expected_status, expected_detail
+):
+    adapter = RecordingProviderAdapter(error=error)
+    with make_client(provider_adapter=adapter) as client:
+        response = client.post(
+            "/v1/lila/provider/probe",
+            headers={"Authorization": "Bearer user-a-token"},
+        )
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"] == expected_detail
+    assert "private-provider-detail" not in response.text

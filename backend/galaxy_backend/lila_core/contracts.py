@@ -108,3 +108,17 @@ class ConversationHistoryPage(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=128)
     messages: list[ConversationHistoryItem] = Field(default_factory=list, max_length=20)
     next_before_sequence: int | None = Field(default=None, ge=1)
+
+
+
+class ProviderModelDiscoveryResponse(BaseModel):
+    """Non-secret result of probing an OpenAI-compatible /models endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    configured_model_id: str = Field(min_length=1, max_length=256)
+    models_endpoint_responded: bool
+    model_discovery_supported: bool
+    model_ids: list[str] = Field(default_factory=list, max_length=100)
+    chat_completion_verified: Literal[False] = False
