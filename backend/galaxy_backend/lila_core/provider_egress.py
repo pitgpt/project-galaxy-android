@@ -84,7 +84,11 @@ class PinnedAsyncNetworkBackend:
         else:
             try:
                 ascii_host = normalized_host.encode("idna").decode("ascii")
-                resolve_task = self._resolver(ascii_host + ".", port)
+                # "localhost." is not present in every NSS hosts database;
+                # the literal localhost name is safe because local providers
+                # are restricted to loopback and every answer is checked.
+                query_host = ascii_host if normalized_host == "localhost" else ascii_host + "."
+                resolve_task = self._resolver(query_host, port)
                 if timeout is None:
                     raw_addresses = await resolve_task
                 else:
@@ -98,6 +102,8 @@ class PinnedAsyncNetworkBackend:
                     if not isinstance(raw, str) or "%" in raw:
                         raise ValueError("Invalid DNS address")
                     address = ipaddress.ip_address(raw)
+                    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+                        address = address.ipv4_mapped
                     if address not in seen:
                         seen.add(address)
                         parsed_addresses.append(address)

@@ -78,7 +78,7 @@ async def test_localhost_accepts_only_loopback_dns_answers():
     backend = RecordingBackend()
 
     async def resolver(host, port):
-        assert host == "localhost."
+        assert host == "localhost"
         return ["::1", "127.0.0.1"]
 
     network = PinnedAsyncNetworkBackend("local", resolver=resolver, backend=backend)
@@ -152,3 +152,32 @@ async def test_local_dns_timeout_fails_as_connect_timeout():
         await network.connect_tcp("localhost", 1234, timeout=0.001)
 
     assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_localhost_name_connects_to_ipv4_loopback_when_ipv6_is_unavailable():
+    async def handle(reader, writer):
+        await reader.readline()
+        while True:
+            line = await reader.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Length: 2\r\n"
+            b"Connection: close\r\n\r\n{}"
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        async with create_provider_http_client("local", 2.0) as client:
+            response = await client.get(f"http://localhost:{port}/models")
+        assert response.status_code == 200
+        assert response.text == "{}"
+    finally:
+        server.close()
+        await server.wait_closed()
