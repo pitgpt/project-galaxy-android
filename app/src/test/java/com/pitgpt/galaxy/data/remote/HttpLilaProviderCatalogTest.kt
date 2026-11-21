@@ -127,6 +127,33 @@ class HttpLilaProviderCatalogTest {
     }
 
     @Test
+    fun restoresExistingConversationModelSelection() = runBlocking {
+        val connection = FakeConnection(
+            URL("https://api.example.test/v1/lila/conversations/conversation-1/model"),
+            200,
+            JSONObject()
+                .put("conversation_id", "conversation-1")
+                .put("selected", true)
+                .put("provider_id", "local-main")
+                .put("model_id", "qwen-local")
+                .toString()
+        )
+        val catalog = HttpLilaProviderCatalog(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "token" },
+            connectionFactory = { connection }
+        )
+
+        val selection = catalog.getConversationModel("conversation-1")
+
+        assertTrue(selection.selected)
+        assertEquals("local-main", selection.providerId)
+        assertEquals("qwen-local", selection.modelId)
+        assertEquals("GET", connection.requestMethod)
+        assertTrue(connection.disconnected)
+    }
+
+    @Test
     fun refusesCatalogCallsWithoutSessionAndRejectsRemoteCleartext() = runBlocking {
         var opened = false
         val noSession = HttpLilaProviderCatalog(

@@ -337,6 +337,7 @@ fun LilaProviderSettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
+                    enabled = !clearApiKey,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
                 )
                 OutlinedTextField(
@@ -353,11 +354,17 @@ fun LilaProviderSettingsScreen(
                 }
                 if (editingProviderId != null) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = clearApiKey, onCheckedChange = { clearApiKey = it })
+                        Checkbox(
+                            checked = clearApiKey,
+                            onCheckedChange = {
+                                clearApiKey = it
+                                if (it) apiKey = ""
+                            }
+                        )
                         Text("Удалить сохранённый API key")
                     }
                     Text(
-                        "Локальные серверы должны быть доступны с машины backend. Для Docker localhost относится к контейнеру.",
+                        "Local egress пока разрешает только loopback backend. В Docker localhost относится к контейнеру; host bridge ещё не поддерживается.",
                         color = ProviderScreenMuted,
                         fontSize = 11.sp
                     )

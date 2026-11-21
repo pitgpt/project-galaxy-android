@@ -146,9 +146,20 @@ fun GalaxyHome() {
         try {
             val remoteHistory = app.lilaTurnProvider.loadAllHistory(conversationId)
             val latestRemoteModel = remoteHistory.lastOrNull { it.role == "assistant" }?.displayModelLabel
-            if (latestRemoteModel != null) {
-                activeModelLabel = latestRemoteModel
-                preferences.edit().putString(activeModelPreferenceKey, latestRemoteModel).apply()
+            // The current conversation selection can change on another client before
+            // the next assistant turn. Restore it independently from the last-used model.
+            val selectedModelLabel = try {
+                val selection = app.lilaProviderCatalog.getConversationModel(conversationId)
+                if (selection.selected) "${selection.providerId} · ${selection.modelId}" else null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            val restoredModelLabel = selectedModelLabel ?: latestRemoteModel
+            if (restoredModelLabel != null) {
+                activeModelLabel = restoredModelLabel
+                preferences.edit().putString(activeModelPreferenceKey, restoredModelLabel).apply()
             }
             if (remoteHistory.isNotEmpty()) {
                 val localHistory = app.conversations.getForCharacter(storageCharacterId)
