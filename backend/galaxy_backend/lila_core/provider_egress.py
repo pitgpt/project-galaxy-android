@@ -17,6 +17,8 @@ import httpcore
 import httpx
 from httpcore._backends.auto import AutoBackend
 
+from .provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
+
 
 AddressResolver = Callable[[str, int], Awaitable[Iterable[str]]]
 
@@ -30,10 +32,17 @@ class PinnedAsyncNetworkBackend:
         *,
         resolver: AddressResolver | None = None,
         backend=None,
+        local_allowed_ports: Iterable[int] = DEFAULT_LOCAL_PROVIDER_PORTS,
     ) -> None:
         if provider_type not in {"cloud", "local"}:
             raise ValueError("Unsupported provider type")
         self._provider_type = provider_type
+        self._local_allowed_ports = frozenset(local_allowed_ports)
+        if provider_type == "local" and (
+            not self._local_allowed_ports
+            or any(not isinstance(port, int) or not 1 <= port <= 65535 for port in self._local_allowed_ports)
+        ):
+            raise ValueError("Local provider port allowlist is invalid")
         self._resolver = resolver or self._resolve_system
         self._backend = backend or AutoBackend()
 
@@ -49,10 +58,23 @@ class PinnedAsyncNetworkBackend:
         )
         return tuple(record[4][0] for record in records)
 
-    def _approved(self, address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    def _approved(
+        self,
+        address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+        hostname: str,
+    ) -> bool:
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
             address = address.ipv4_mapped
         if self._provider_type == "local":
+            if hostname == "host.docker.internal":
+                return (
+                    address.is_private
+                    and not address.is_loopback
+                    and not address.is_link_local
+                    and not address.is_multicast
+                    and not address.is_unspecified
+                    and not address.is_reserved
+                )
             return address.is_loopback
         return address.is_global
 
@@ -66,6 +88,8 @@ class PinnedAsyncNetworkBackend:
     ):
         started = time.monotonic()
         normalized_host = host.rstrip(".").lower()
+        if self._provider_type == "local" and port not in self._local_allowed_ports:
+            raise httpcore.ConnectError("Local provider port is not allowed")
         if not normalized_host or "%" in normalized_host:
             raise httpcore.ConnectError("Provider host is invalid")
 
@@ -76,8 +100,10 @@ class PinnedAsyncNetworkBackend:
 
         if self._provider_type == "cloud" and literal is not None:
             raise httpcore.ConnectError("Cloud provider DNS host is required")
-        if self._provider_type == "local" and literal is None and normalized_host != "localhost":
-            raise httpcore.ConnectError("Local provider must use loopback")
+        if self._provider_type == "local" and literal is None and normalized_host not in {
+            "localhost", "host.docker.internal"
+        }:
+            raise httpcore.ConnectError("Local provider must use loopback or the explicit Docker host gateway")
 
         if literal is not None:
             addresses = (literal,)
@@ -87,7 +113,11 @@ class PinnedAsyncNetworkBackend:
                 # "localhost." is not present in every NSS hosts database;
                 # the literal localhost name is safe because local providers
                 # are restricted to loopback and every answer is checked.
-                query_host = ascii_host if normalized_host == "localhost" else ascii_host + "."
+                query_host = (
+                    ascii_host
+                    if normalized_host in {"localhost", "host.docker.internal"}
+                    else ascii_host + "."
+                )
                 resolve_task = self._resolver(query_host, port)
                 if timeout is None:
                     raw_addresses = await resolve_task
@@ -115,7 +145,9 @@ class PinnedAsyncNetworkBackend:
 
         if not addresses:
             raise httpcore.ConnectError("Provider DNS resolution returned no addresses")
-        if any(not self._approved(address) for address in addresses):
+        if normalized_host == "host.docker.internal" and len(addresses) != 1:
+            raise httpcore.ConnectError("Docker host gateway must resolve to exactly one address")
+        if any(not self._approved(address, normalized_host) for address in addresses):
             raise httpcore.ConnectError("Provider DNS resolution returned a disallowed address")
 
         last_error = None
@@ -150,7 +182,11 @@ class PinnedAsyncNetworkBackend:
 class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
     """HTTPX transport whose TCP connections use the DNS-pinned backend."""
 
-    def __init__(self, provider_type: str) -> None:
+    def __init__(
+        self,
+        provider_type: str,
+        local_allowed_ports: Iterable[int] = DEFAULT_LOCAL_PROVIDER_PORTS,
+    ) -> None:
         ssl_context = httpx.create_ssl_context(verify=True, trust_env=False)
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl_context,
@@ -160,18 +196,20 @@ class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
             http1=True,
             http2=False,
             retries=0,
-            network_backend=PinnedAsyncNetworkBackend(provider_type),
+            network_backend=PinnedAsyncNetworkBackend(provider_type, local_allowed_ports=local_allowed_ports),
         )
 
 
 def create_provider_http_client(
     provider_type: str,
     timeout_seconds: float = 30.0,
+    *,
+    local_allowed_ports: Iterable[int] = DEFAULT_LOCAL_PROVIDER_PORTS,
 ) -> httpx.AsyncClient:
     """Create a no-proxy, no-redirect client with DNS-pinned egress."""
     if not 1.0 <= float(timeout_seconds) <= 120.0:
         raise ValueError("Provider timeout must be between 1 and 120 seconds")
-    transport = PinnedAsyncHTTPTransport(provider_type)
+    transport = PinnedAsyncHTTPTransport(provider_type, local_allowed_ports)
     return httpx.AsyncClient(
         transport=transport,
         timeout=httpx.Timeout(

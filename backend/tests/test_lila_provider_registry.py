@@ -378,6 +378,8 @@ def test_provider_api_rejects_unsafe_endpoint_classes(tmp_path):
         create_payload(base_url="https://127.0.0.1/v1"),
         create_payload(base_url="https://metadata.google.internal/"),
         create_payload(base_url="https://api.example.com/v1"),
+        create_payload(provider_type="local", base_url="http://127.0.0.1:6379/"),
+        create_payload(provider_type="local", base_url="http://host.docker.internal:6379/v1"),
         create_payload(
             provider_type="local",
             base_url="http://192.168.1.20:1234/v1",
@@ -398,10 +400,21 @@ def test_provider_api_rejects_unsafe_endpoint_classes(tmp_path):
                 api_key=None,
             ),
         )
+        host_gateway = client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=create_payload(
+                provider_id="local-docker-host",
+                provider_type="local",
+                base_url="http://host.docker.internal:1234/v1",
+                api_key=None,
+            ),
+        )
 
     assert all(response.status_code == 422 for response in responses)
     assert local.status_code == 200
     assert local.json()["provider_type"] == "local"
+    assert host_gateway.status_code == 200
 
 
 def test_provider_api_requires_auth_and_obeys_per_user_rate_limit(tmp_path):

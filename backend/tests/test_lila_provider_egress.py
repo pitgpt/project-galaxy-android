@@ -102,11 +102,60 @@ async def test_localhost_rejects_non_loopback_dns_answer():
 
 
 @pytest.mark.asyncio
-async def test_local_provider_rejects_non_loopback_hostname():
+async def test_local_provider_rejects_unapproved_port_before_dns():
+    backend = RecordingBackend()
+    resolver_calls = []
+
+    async def resolver(host, port):
+        resolver_calls.append((host, port))
+        return ["127.0.0.1"]
+
+    network = PinnedAsyncNetworkBackend("local", resolver=resolver, backend=backend)
+    with pytest.raises(httpcore.ConnectError):
+        await network.connect_tcp("localhost", 6379, timeout=2.0)
+    assert resolver_calls == []
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_local_docker_host_gateway_is_pinned_to_one_private_address():
+    backend = RecordingBackend()
+    resolver_calls = []
+
+    async def resolver(host, port):
+        resolver_calls.append((host, port))
+        return ["172.17.0.1"]
+
+    network = PinnedAsyncNetworkBackend(
+        "local", resolver=resolver, backend=backend, local_allowed_ports={1234}
+    )
+    await network.connect_tcp("host.docker.internal", 1234, timeout=2.0)
+    assert resolver_calls == [("host.docker.internal", 1234)]
+    assert backend.calls[0][0] == "172.17.0.1"
+    assert backend.calls[0][1] == 1234
+
+
+@pytest.mark.asyncio
+async def test_local_docker_host_gateway_rejects_multiple_or_public_addresses():
+    backend = RecordingBackend()
+
+    async def mixed_resolver(host, port):
+        return ["172.17.0.1", "8.8.8.8"]
+
+    network = PinnedAsyncNetworkBackend(
+        "local", resolver=mixed_resolver, backend=backend, local_allowed_ports={1234}
+    )
+    with pytest.raises(httpcore.ConnectError):
+        await network.connect_tcp("host.docker.internal", 1234, timeout=2.0)
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_local_provider_rejects_unapproved_hostname():
     backend = RecordingBackend()
     network = PinnedAsyncNetworkBackend("local", resolver=lambda host, port: None, backend=backend)
     with pytest.raises(httpcore.ConnectError):
-        await network.connect_tcp("host.docker.internal", 1234, timeout=2.0)
+        await network.connect_tcp("arbitrary.internal", 1234, timeout=2.0)
     assert backend.calls == []
 
 
@@ -130,7 +179,7 @@ async def test_local_loopback_http_request_uses_pinned_transport():
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     try:
-        async with create_provider_http_client("local", 2.0) as client:
+        async with create_provider_http_client("local", 2.0, local_allowed_ports={port}) as client:
             response = await client.get(f"http://127.0.0.1:{port}/models")
         assert response.status_code == 200
         assert response.text == "{}"
@@ -174,7 +223,7 @@ async def test_localhost_name_connects_to_ipv4_loopback_when_ipv6_is_unavailable
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     try:
-        async with create_provider_http_client("local", 2.0) as client:
+        async with create_provider_http_client("local", 2.0, local_allowed_ports={port}) as client:
             response = await client.get(f"http://localhost:{port}/models")
         assert response.status_code == 200
         assert response.text == "{}"

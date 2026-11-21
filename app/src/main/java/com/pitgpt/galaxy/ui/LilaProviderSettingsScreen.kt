@@ -364,7 +364,7 @@ fun LilaProviderSettingsScreen(
                         Text("Удалить сохранённый API key")
                     }
                     Text(
-                        "Local egress пока разрешает только loopback backend. В Docker localhost относится к контейнеру; host bridge ещё не поддерживается.",
+                        "Для локального runtime используй localhost (backend на той же машине) или host.docker.internal (Docker). По умолчанию разрешены порты 1234, 8080 и 11434; другие порты требуют настройки оператора. Сервер должен быть доступен из backend container.",
                         color = ProviderScreenMuted,
                         fontSize = 11.sp
                     )
