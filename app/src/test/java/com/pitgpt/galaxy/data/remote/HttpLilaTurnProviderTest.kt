@@ -264,6 +264,33 @@ class HttpLilaTurnProviderTest {
         assertTrue(connection.disconnected)
     }
 
+    @Test
+    fun warnsWhenProviderMayHaveReceivedTurnWithoutConfirmedResponse() = runBlocking {
+        val connection = FakeConnection(
+            URL("https://api.example.test/v1/lila/turns"),
+            503,
+            """{"detail":"provider-secret private diagnostic"}""",
+            mapOf("X-Lila-Outcome-Unknown" to "true")
+        )
+        val provider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "supabase-access-token" },
+            connectionFactory = { connection }
+        )
+
+        val error = expectApiError {
+            provider.sendTurn("conversation-1", "Привет", idempotencyKey)
+        }
+
+        assertEquals(503, error.httpStatus)
+        assertTrue(error.message.orEmpty().contains("могла получить", ignoreCase = true))
+        assertTrue(error.message.orEmpty().contains("не отправляй", ignoreCase = true))
+        assertFalse(error.message.orEmpty().contains("provider-secret"))
+        assertFalse(error.message.orEmpty().contains("private diagnostic"))
+        assertFalse(error.message.orEmpty().contains("supabase-access-token"))
+        assertTrue(connection.disconnected)
+    }
+
     private suspend fun expectApiError(block: suspend () -> Unit): GalaxyApiException {
         try {
             block()
