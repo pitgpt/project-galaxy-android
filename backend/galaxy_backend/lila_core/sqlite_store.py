@@ -36,6 +36,14 @@ from .memory import (
 )
 
 
+class ProviderAlreadyExists(RuntimeError):
+    """An owner already has a provider with this identifier."""
+
+
+class ProviderLimitExceeded(RuntimeError):
+    """The owner has reached the provider catalog limit."""
+
+
 class LilaStoreIntegrityError(RuntimeError):
     """Stored Lila data failed authenticated decryption or validation."""
 
@@ -50,7 +58,7 @@ class SqliteLilaStore:
     This adapter does not make an ephemeral container filesystem durable.
     """
 
-    _SCHEMA_VERSION = 4
+    _SCHEMA_VERSION = 5
     _NONCE_BYTES = 12
     _MEMORY_BACKFILL_BATCH = 128
     _MAX_MEMORY_CANDIDATES = 256
@@ -157,7 +165,7 @@ class SqliteLilaStore:
                         ) WITHOUT ROWID"""
                     )
                     version = 1
-                elif version not in {1, 2, 3, self._SCHEMA_VERSION}:
+                elif version not in {1, 2, 3, 4, self._SCHEMA_VERSION}:
                     raise RuntimeError("Unsupported Lila database schema version")
                 else:
                     row = connection.execute(
@@ -218,6 +226,19 @@ class SqliteLilaStore:
                             REFERENCES lila_messages(owner_key, conversation_key, sequence)
                             ON DELETE CASCADE,
                         CHECK(provider_id IS NOT NULL OR model_id IS NOT NULL)
+                    ) WITHOUT ROWID"""
+                )
+                # Version 5 stores owner-managed provider configuration as authenticated ciphertext.
+                # Provider IDs and owner IDs are represented only by HMAC-derived indexes.
+                connection.execute(
+                    """CREATE TABLE IF NOT EXISTS lila_providers (
+                        owner_key TEXT NOT NULL,
+                        provider_key TEXT NOT NULL,
+                        nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+                        ciphertext BLOB NOT NULL,
+                        created_at_ms INTEGER NOT NULL,
+                        updated_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY(owner_key, provider_key)
                     ) WITHOUT ROWID"""
                 )
                 connection.execute(f"PRAGMA user_version={self._SCHEMA_VERSION}")
@@ -1005,3 +1026,208 @@ class SqliteLilaStore:
 
         ranked.sort(key=lambda item: (-item[0], -item[1], item[2].memory_id))
         return tuple(item[2] for item in ranked[:limit])
+
+    _MAX_PROVIDERS_PER_OWNER = 20
+
+    def _decode_provider(
+        self,
+        owner_key: str,
+        provider_key: str,
+        nonce: bytes,
+        ciphertext: bytes,
+    ) -> dict[str, object]:
+        plaintext = bytearray(
+            self._decrypt(
+                nonce,
+                ciphertext,
+                self._aad("provider", owner_key, provider_key),
+            )
+        )
+        try:
+            payload = json.loads(plaintext.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise TypeError("provider payload must be an object")
+            provider_id = payload.get("provider_id")
+            if not isinstance(provider_id, str):
+                raise TypeError("provider identifier is invalid")
+            if self._resource_key("provider", provider_id, 64) != provider_key:
+                raise TypeError("provider identifier does not match its authenticated index")
+            required = {
+                "provider_type", "base_url", "model_id", "api_key",
+                "timeout_seconds", "capabilities", "enabled",
+            }
+            if not required.issubset(payload):
+                raise TypeError("provider configuration is incomplete")
+            return payload
+        except LilaStoreIntegrityError:
+            raise
+        except Exception:
+            raise LilaStoreIntegrityError(
+                "Stored Lila provider configuration failed validation"
+            ) from None
+        finally:
+            plaintext[:] = bytes(len(plaintext))
+
+    async def save_provider(
+        self,
+        *,
+        principal_id: str,
+        provider: dict[str, object],
+        create_only: bool = False,
+    ) -> bool:
+        """Encrypt and save one provider. Return True when a new record was created."""
+        if not isinstance(provider, dict):
+            raise ValueError("provider configuration must be an object")
+        provider_id = provider.get("provider_id")
+        provider_key = self._resource_key("provider", provider_id, 64)
+        owner_key = self._owner_key(principal_id)
+        payload = bytearray(
+            json.dumps(provider, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        try:
+            nonce, ciphertext = self._encrypt(
+                bytes(payload), self._aad("provider", owner_key, provider_key)
+            )
+        finally:
+            payload[:] = bytes(len(payload))
+        return await asyncio.to_thread(
+            self._save_provider_sync,
+            owner_key,
+            provider_key,
+            nonce,
+            ciphertext,
+            create_only,
+        )
+
+    def _save_provider_sync(
+        self,
+        owner_key: str,
+        provider_key: str,
+        nonce: bytes,
+        ciphertext: bytes,
+        create_only: bool,
+    ) -> bool:
+        now = int(time.time() * 1000)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT 1 FROM lila_providers WHERE owner_key=? AND provider_key=?",
+                    (owner_key, provider_key),
+                ).fetchone()
+                created = existing is None
+                if create_only and not created:
+                    raise ProviderAlreadyExists("Provider already exists")
+                if created:
+                    count = int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM lila_providers WHERE owner_key=?",
+                            (owner_key,),
+                        ).fetchone()[0]
+                    )
+                    if count >= self._MAX_PROVIDERS_PER_OWNER:
+                        raise ProviderLimitExceeded("Provider catalog limit reached")
+                    connection.execute(
+                        "INSERT INTO lila_providers(owner_key, provider_key, nonce, ciphertext, created_at_ms, updated_at_ms) "
+                        "VALUES(?, ?, ?, ?, ?, ?)",
+                        (owner_key, provider_key, nonce, ciphertext, now, now),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE lila_providers SET nonce=?, ciphertext=?, updated_at_ms=? "
+                        "WHERE owner_key=? AND provider_key=?",
+                        (nonce, ciphertext, now, owner_key, provider_key),
+                    )
+                connection.execute("COMMIT")
+                return created
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        finally:
+            connection.close()
+
+    async def get_provider(
+        self, *, principal_id: str, provider_id: str
+    ) -> dict[str, object] | None:
+        await self.initialize()
+        owner_key = self._owner_key(principal_id)
+        provider_key = self._resource_key("provider", provider_id, 64)
+        return await asyncio.to_thread(
+            self._get_provider_sync, owner_key, provider_key
+        )
+
+    def _get_provider_sync(
+        self, owner_key: str, provider_key: str
+    ) -> dict[str, object] | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT nonce, ciphertext FROM lila_providers WHERE owner_key=? AND provider_key=?",
+                (owner_key, provider_key),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        return self._decode_provider(
+            owner_key, provider_key, row["nonce"], row["ciphertext"]
+        )
+
+    async def list_providers(
+        self, *, principal_id: str
+    ) -> tuple[dict[str, object], ...]:
+        await self.initialize()
+        owner_key = self._owner_key(principal_id)
+        return await asyncio.to_thread(self._list_providers_sync, owner_key)
+
+    def _list_providers_sync(
+        self, owner_key: str
+    ) -> tuple[dict[str, object], ...]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT provider_key, nonce, ciphertext FROM lila_providers "
+                "WHERE owner_key=? ORDER BY updated_at_ms DESC, provider_key ASC",
+                (owner_key,),
+            ).fetchall()
+        finally:
+            connection.close()
+        providers = [
+            self._decode_provider(
+                owner_key, str(row["provider_key"]), row["nonce"], row["ciphertext"]
+            )
+            for row in rows
+        ]
+        providers.sort(key=lambda item: str(item.get("provider_id", "")))
+        return tuple(providers)
+
+    async def delete_provider(
+        self, *, principal_id: str, provider_id: str
+    ) -> bool:
+        await self.initialize()
+        owner_key = self._owner_key(principal_id)
+        provider_key = self._resource_key("provider", provider_id, 64)
+        return await asyncio.to_thread(
+            self._delete_provider_sync, owner_key, provider_key
+        )
+
+    def _delete_provider_sync(self, owner_key: str, provider_key: str) -> bool:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    "DELETE FROM lila_providers WHERE owner_key=? AND provider_key=?",
+                    (owner_key, provider_key),
+                )
+                connection.execute("COMMIT")
+                return cursor.rowcount == 1
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        finally:
+            connection.close()
+
