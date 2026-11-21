@@ -331,8 +331,6 @@ class HttpLilaTurnProviderTest {
             requestHeaders[key] = value
         }
     }
-}
-
 
     @Test
     fun recoversCommittedTurnFromStatusAfterTheOriginalResponseIsLost() = runBlocking {
@@ -415,3 +413,4 @@ class HttpLilaTurnProviderTest {
         assertTrue(turn.disconnected)
         assertTrue(status.disconnected)
     }
+}
