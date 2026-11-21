@@ -101,7 +101,8 @@ async def test_localhost_rejects_non_loopback_dns_answer():
     assert backend.calls == []
 
 
-def test_local_provider_rejects_unapproved_port_before_dns():
+@pytest.mark.asyncio
+async def test_local_provider_rejects_unapproved_port_before_dns():
     backend = RecordingBackend()
     resolver_calls = []
 
