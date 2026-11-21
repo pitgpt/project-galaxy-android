@@ -1064,8 +1064,11 @@ def create_app(
         except ModelProviderUnavailable:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Lila model provider is temporarily unavailable",
-                headers={"Retry-After": "5"},
+                detail="Lila model provider outcome is unknown; it may have received the request.",
+                headers={
+                    "Retry-After": "5",
+                    "X-Lila-Outcome-Unknown": "true",
+                },
             ) from None
         except (ModelAdapterContractError, ValidationError) as exc:
             raise HTTPException(
