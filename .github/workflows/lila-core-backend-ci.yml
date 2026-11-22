@@ -61,6 +61,10 @@ jobs:
           docker compose config --quiet
           docker compose build backend
 
+      - name: Verify Docker Compose secrets reach Lila config as files
+        run: |
+          docker compose run --rm --no-deps --entrypoint python backend -c "from galaxy_backend.config import Settings; s = Settings.from_env(); assert s.lila_storage_is_configured; assert s.lila_storage_encryption_key is not None; assert s.lila_provider_api_key is None"
+
       - name: Verify Lila named volume survives container recreation
         run: |
           docker compose run --rm --no-deps --entrypoint python backend -c "from pathlib import Path; p = Path('/var/lib/galaxy/lila/.volume-smoke'); p.write_text('lila-volume-ok')"
