@@ -5,6 +5,33 @@ from pathlib import Path
 from .lila_core.openai_compatible import DEFAULT_LILA_SYSTEM_PROMPT
 
 
+def _read_secret_setting(name: str, *, max_bytes: int) -> tuple[str | None, bool]:
+    """Read a secret from the environment or a mounted secret file, never both."""
+    file_name = f"{name}_FILE"
+    direct_value = os.getenv(name) or None
+    file_path = os.getenv(file_name) or None
+    if direct_value is not None and file_path is not None:
+        raise RuntimeError(f"Set only one of {name} or {file_name}")
+    if file_path is None:
+        return direct_value, False
+
+    path = Path(file_path)
+    if not path.is_absolute():
+        raise RuntimeError(f"{file_name} must be an absolute path")
+    try:
+        with path.open("rb") as secret_file:
+            raw = secret_file.read(max_bytes + 1)
+    except OSError:
+        raise RuntimeError(f"{file_name} could not be read") from None
+    if len(raw) > max_bytes:
+        raise RuntimeError(f"{file_name} exceeds the maximum allowed size")
+    try:
+        value = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        raise RuntimeError(f"{file_name} must contain ASCII text") from None
+    return value or None, True
+
+
 @dataclass(frozen=True)
 class Settings:
     # Realtime/voice credentials are optional so a local-only Lila deployment
@@ -115,9 +142,13 @@ class Settings:
 
         lila_provider_base_url = os.getenv("LILA_PROVIDER_BASE_URL") or None
         lila_provider_model_id = os.getenv("LILA_MODEL_ID") or None
-        lila_provider_api_key = os.getenv("LILA_PROVIDER_API_KEY") or None
+        lila_provider_api_key, _ = _read_secret_setting(
+            "LILA_PROVIDER_API_KEY", max_bytes=4096
+        )
         lila_database_path = os.getenv("LILA_DATABASE_PATH") or None
-        storage_key_text = os.getenv("LILA_STORAGE_ENCRYPTION_KEY") or None
+        storage_key_text, storage_key_file_requested = _read_secret_setting(
+            "LILA_STORAGE_ENCRYPTION_KEY", max_bytes=128
+        )
 
         lila_storage_encryption_key = None
         if storage_key_text is not None:
@@ -145,7 +176,11 @@ class Settings:
         if not lila_system_prompt.strip() or len(lila_system_prompt) > 8000:
             raise RuntimeError("LILA_SYSTEM_PROMPT must contain between 1 and 8000 characters")
 
-        lila_storage_requested = any((lila_database_path, storage_key_text))
+        lila_storage_requested = any((
+            lila_database_path,
+            storage_key_text,
+            storage_key_file_requested,
+        ))
         lila_storage_complete = bool(
             lila_database_path and lila_storage_encryption_key is not None
         )
@@ -160,7 +195,7 @@ class Settings:
         if lila_storage_requested and not lila_storage_complete:
             raise RuntimeError(
                 "Lila provider storage is incomplete; set LILA_DATABASE_PATH "
-                "and LILA_STORAGE_ENCRYPTION_KEY together"
+                "and LILA_STORAGE_ENCRYPTION_KEY or LILA_STORAGE_ENCRYPTION_KEY_FILE together"
             )
         if lila_provider_requested and not (
             lila_provider_complete and lila_storage_complete

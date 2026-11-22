@@ -52,9 +52,12 @@ jobs:
         run: |
           cp .env.example .env
           test_key="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+          provider_key="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
           echo "::add-mask::$test_key"
+          echo "::add-mask::$provider_key"
           printf 'LILA_STORAGE_ENCRYPTION_KEY=%s\n' "$test_key" >> "$GITHUB_ENV"
-          unset test_key
+          printf 'LILA_PROVIDER_API_KEY=%s\n' "$provider_key" >> "$GITHUB_ENV"
+          unset test_key provider_key
 
       - name: Validate Compose configuration and build backend image
         run: |
