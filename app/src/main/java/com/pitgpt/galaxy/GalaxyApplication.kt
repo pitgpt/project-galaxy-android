@@ -10,6 +10,7 @@ import com.pitgpt.galaxy.data.auth.GalaxyBackendConfiguration
 import com.pitgpt.galaxy.data.auth.SupabaseAuthService
 import com.pitgpt.galaxy.data.auth.SupabaseClientFactory
 import com.pitgpt.galaxy.data.local.GalaxyDatabaseFactory
+import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.remote.GalaxyAccessTokenProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaTurnProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaProviderCatalog
@@ -24,6 +25,11 @@ class GalaxyApplication : Application() {
     val characters: CharacterRepository by lazy { RoomCharacterRepository(database.characterDao()) }
     val conversations: ConversationRepository by lazy { RoomConversationRepository(database.conversationMessageDao()) }
     val memories: MemoryRepository by lazy { RoomMemoryRepository(database.memoryDao()) }
+    /**
+     * Device-bound app-private media storage. Binary assets are AES-GCM ciphertext;
+     * image metadata remains a separate Room concern.
+     */
+    val mediaStore: EncryptedMediaStore by lazy { EncryptedMediaStore.fromContext(this) }
     private lateinit var backendConfigStore: EncryptedGalaxyBackendConfigStore
     private var activeBackendConfiguration: GalaxyBackendConfiguration? = null
 
