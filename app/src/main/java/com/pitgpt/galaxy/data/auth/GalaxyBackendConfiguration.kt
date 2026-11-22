@@ -2,13 +2,15 @@ package com.pitgpt.galaxy.data.auth
 
 import com.pitgpt.galaxy.BuildConfig
 import java.net.URI
+import java.util.Base64
+import org.json.JSONObject
 
 /**
  * Public connection settings needed by the Android client to reach Galaxy Core
  * and authenticate with the configured Supabase project.
  *
- * The publishable/anon key is client-visible by design. Never put a service-role
- * key or a model-provider API key in this configuration.
+ * Accepts modern publishable keys and legacy anon JWTs. Secret/service_role
+ * keys and model-provider credentials must never be placed in this configuration.
  */
 data class GalaxyBackendConfiguration(
     val galaxyApiBaseUrl: String,
@@ -36,6 +38,9 @@ data class GalaxyBackendConfiguration(
         require(publicKey.none { it.code < 32 || it.code == 127 }) {
             "Supabase publishable key содержит недопустимые символы."
         }
+        require(isAllowedPublishableKey(publicKey)) {
+            "Используй Supabase publishable key (sb_publishable_...) или legacy anon key. Secret/service_role keys запрещены."
+        }
         return copy(
             galaxyApiBaseUrl = apiUrl,
             supabaseUrl = authUrl,
@@ -50,6 +55,8 @@ data class GalaxyBackendConfiguration(
     companion object {
         private const val MAX_URL_LENGTH = 2048
         private const val MAX_PUBLISHABLE_KEY_LENGTH = 4096
+        private const val PUBLISHABLE_KEY_PREFIX = "sb_publishable_"
+        private const val SECRET_KEY_PREFIX = "sb_secret_"
 
         fun fromBuildConfig(): GalaxyBackendConfiguration? {
             val apiUrl = BuildConfig.GALAXY_API_BASE_URL.trim()
@@ -59,6 +66,49 @@ data class GalaxyBackendConfiguration(
             return runCatching {
                 GalaxyBackendConfiguration(apiUrl, authUrl, publicKey).validated()
             }.getOrNull()
+        }
+
+        private fun isAllowedPublishableKey(value: String): Boolean {
+            if (value.startsWith(PUBLISHABLE_KEY_PREFIX)) {
+                val suffix = value.removePrefix(PUBLISHABLE_KEY_PREFIX)
+                return suffix.isNotEmpty() && suffix.all { character ->
+                    character in 'a'..'z' ||
+                        character in 'A'..'Z' ||
+                        character in '0'..'9' ||
+                        character == '_' ||
+                        character == '-'
+                }
+            }
+            if (value.startsWith(SECRET_KEY_PREFIX)) return false
+
+            // Existing Supabase projects may still use the legacy anon JWT. Inspect
+            // only its public role claim; never accept service_role or arbitrary JWTs.
+            return isLegacyAnonJwt(value)
+        }
+
+        private fun isLegacyAnonJwt(value: String): Boolean {
+            val segments = value.split('.')
+            if (segments.size != 3 || segments.any(String::isBlank)) return false
+            return try {
+                val decoder = Base64.getUrlDecoder()
+                val headerBytes = decoder.decode(segments[0])
+                val claimsBytes = decoder.decode(segments[1])
+                val signatureBytes = decoder.decode(segments[2])
+                try {
+                    if (signatureBytes.isEmpty()) return false
+                    val header = JSONObject(String(headerBytes, Charsets.UTF_8))
+                    val claims = JSONObject(String(claimsBytes, Charsets.UTF_8))
+                    header.optString("typ") == "JWT" &&
+                        header.optString("alg") == "HS256" &&
+                        claims.optString("role") == "anon"
+                } finally {
+                    headerBytes.fill(0)
+                    claimsBytes.fill(0)
+                    signatureBytes.fill(0)
+                }
+            } catch (_: Exception) {
+                false
+            }
         }
 
         private fun normalizeHttpsUrl(
