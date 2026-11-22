@@ -6,6 +6,7 @@ A selected provider is never silently replaced by another provider.
 from __future__ import annotations
 
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -17,6 +18,7 @@ from .openai_compatible import (
     OpenAICompatibleModelAdapter,
 )
 from .provider_registry import validate_provider_endpoint
+from .ollama import OllamaModelAdapter
 
 
 class ProviderSelectionRequired(ModelProviderRejected):
@@ -27,7 +29,35 @@ class SelectedProviderUnavailable(ModelProviderRejected):
     """The selected owner provider was removed, disabled, or no longer supports chat."""
 
 
-class ManagedOpenAICompatibleModelAdapter:
+def is_native_ollama_endpoint(provider_type: str, base_url: str) -> bool:
+    """Select Ollama's native API only for its local root endpoint.
+
+    A local Ollama endpoint ending in /v1 deliberately stays on the common
+    OpenAI-compatible adapter. This allows both supported Ollama API surfaces
+    without guessing from the provider name or silently changing protocols.
+    """
+    if provider_type != "local":
+        return False
+    try:
+        parsed = urlsplit(base_url)
+        port = parsed.port
+    except ValueError:
+        return False
+    return port == 11434 and parsed.path in {"", "/"}
+
+
+def create_provider_model_adapter(
+    http_client: httpx.AsyncClient,
+    provider_type: str,
+    config: OpenAICompatibleConfig,
+) -> OpenAICompatibleModelAdapter | OllamaModelAdapter:
+    """Build the explicit runtime adapter for a validated provider endpoint."""
+    if is_native_ollama_endpoint(provider_type, config.base_url):
+        return OllamaModelAdapter(http_client, config)
+    return OpenAICompatibleModelAdapter(http_client, config)
+
+
+class ManagedProviderModelAdapter:
     """Open one short-lived pinned client for exactly one model generation."""
 
     def __init__(
@@ -49,7 +79,11 @@ class ManagedOpenAICompatibleModelAdapter:
             self._timeout_seconds,
         )
         async with client:
-            adapter = OpenAICompatibleModelAdapter(client, self._config)
+            adapter = create_provider_model_adapter(
+                client,
+                self._provider_type,
+                self._config,
+            )
             return await adapter.generate(context)
 
 
@@ -124,7 +158,7 @@ class OwnerScopedModelAdapterResolver:
         except (KeyError, TypeError, ValueError):
             raise ModelProviderConfigurationError("request_rejected") from None
 
-        return ManagedOpenAICompatibleModelAdapter(
+        return ManagedProviderModelAdapter(
             provider_type=provider_type,
             timeout_seconds=timeout_seconds,
             config=config,

@@ -1518,3 +1518,116 @@ def test_turn_result_status_survives_store_recreation(tmp_path):
 
     assert status == "completed"
     assert recovered == response
+
+
+
+def test_native_ollama_probe_test_chat_and_turn_use_native_api_and_replay_once(tmp_path):
+    outbound = []
+    generation_calls = 0
+
+    async def handler(request):
+        nonlocal generation_calls
+        outbound.append((request.method, request.url.path, request.headers.get("Authorization")))
+        if request.method == "GET" and request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3:8b"}, {"model": "llama3.2:latest"}]},
+            )
+        if request.method == "POST" and request.url.path == "/api/chat":
+            generation_calls += 1
+            body = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "model": body["model"],
+                    "message": {"role": "assistant", "content": "Ответ от Ollama"},
+                    "done": True,
+                },
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    factory_calls = []
+    client, store = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    provider_payload = create_payload(
+        provider_id="ollama-local",
+        provider_type="local",
+        base_url="http://127.0.0.1:11434",
+        model_id="qwen3:8b",
+        api_key=None,
+    )
+    idempotency_key = "d2f3a4b5-c6d7-4890-9abc-def012345678"
+    turn_headers = {
+        **auth(),
+        "Idempotency-Key": idempotency_key,
+    }
+    turn_payload = {
+        "conversation_id": "conversation-ollama",
+        "message": "Привет, Лила",
+    }
+
+    with client:
+        created = client.post("/v1/lila/providers", headers=auth(), json=provider_payload)
+        probed = client.post("/v1/lila/providers/ollama-local/probe", headers=auth())
+        selected = client.put(
+            "/v1/lila/conversations/conversation-ollama/model",
+            headers=auth(),
+            json={"provider_id": "ollama-local", "model_id": "qwen3:8b"},
+        )
+        chat_test = client.post(
+            "/v1/lila/providers/ollama-local/test-chat",
+            headers=auth(),
+        )
+        first_turn = client.post(
+            "/v1/lila/turns",
+            headers=turn_headers,
+            json=turn_payload,
+        )
+        replay = client.post(
+            "/v1/lila/turns",
+            headers=turn_headers,
+            json=turn_payload,
+        )
+        history = client.get(
+            "/v1/lila/conversations/conversation-ollama/messages",
+            headers=auth(),
+        )
+
+    assert created.status_code == 200
+    assert probed.status_code == 200
+    assert probed.json()["model_discovery_supported"] is True
+    assert probed.json()["configured_model_available"] is True
+    assert probed.json()["model_ids"] == ["qwen3:8b", "llama3.2:latest"]
+    assert selected.status_code == 200
+    assert selected.json()["model_id"] == "qwen3:8b"
+    assert chat_test.status_code == 200
+    assert chat_test.json()["chat_completion_verified"] is True
+    assert first_turn.status_code == 200
+    assert first_turn.json()["text"] == "Ответ от Ollama"
+    assert first_turn.json()["provider_id"] == "ollama-local"
+    assert first_turn.json()["model_id"] == "qwen3:8b"
+    assert replay.status_code == 200
+    assert replay.json() == first_turn.json()
+    assert history.status_code == 200
+    assert [item["content"] for item in history.json()["messages"]] == [
+        "Привет, Лила",
+        "Ответ от Ollama",
+    ]
+    assert generation_calls == 2  # explicit test-chat plus one committed turn
+    assert [path for method, path, _ in outbound] == [
+        "/api/tags",
+        "/api/tags",
+        "/api/chat",
+        "/api/chat",
+    ]
+    assert all(authorization is None for _, _, authorization in outbound)
+    assert len(factory_calls) == 4
+    assert "provider-secret-value" not in (
+        created.text + probed.text + selected.text + chat_test.text + first_turn.text
+    )
+    assert run(store.get_conversation_model(
+        principal_id="owner-a",
+        conversation_id="conversation-ollama",
+    )) == {"provider_id": "ollama-local", "model_id": "qwen3:8b"}

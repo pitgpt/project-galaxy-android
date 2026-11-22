@@ -45,6 +45,7 @@ from .lila_core.provider_routing import (
     OwnerScopedModelAdapterResolver,
     ProviderSelectionRequired,
     SelectedProviderUnavailable,
+    create_provider_model_adapter,
 )
 from .lila_core.sqlite_store import (
     ProviderAlreadyExists,
@@ -567,11 +568,10 @@ def create_app(
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
     ):
-        """Test one owner-managed provider through the DNS-pinned egress path.
+        """Probe the provider-native model catalog without generating text.
 
-        This is a non-generative GET /models probe. It never calls
-        /chat/completions, so it does not claim that generation works or spend
-        model tokens.
+        OpenAI-compatible endpoints use GET /models; native local Ollama uses
+        GET /api/tags. Neither probe calls a generation endpoint.
         """
         registry = await require_lila_provider_registry(request, user_id)
         try:
@@ -625,7 +625,7 @@ def create_app(
                 float(record["timeout_seconds"]),
             )
             async with client:
-                adapter = OpenAICompatibleModelAdapter(client, config)
+                adapter = create_provider_model_adapter(client, provider_type, config)
                 model_ids = await adapter.discover_models()
         except ModelProviderConfigurationError as exc:
             raise HTTPException(
@@ -671,7 +671,7 @@ def create_app(
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
     ):
-        """Run an explicit minimal completion without adding a conversation turn.
+        """Run an explicit minimal chat generation without adding a conversation turn.
 
         This operation is generative and may consume provider tokens. It is
         user-triggered, rate-limited, and returns no generated text or provider
@@ -739,7 +739,7 @@ def create_app(
                 timeout_seconds,
             )
             async with client:
-                adapter = OpenAICompatibleModelAdapter(client, config)
+                adapter = create_provider_model_adapter(client, provider_type, config)
                 result = await adapter.generate(context)
         except ModelProviderConnectionUnavailable:
             raise HTTPException(
@@ -880,7 +880,7 @@ def create_app(
                 float(record["timeout_seconds"]),
             )
             async with client:
-                adapter = OpenAICompatibleModelAdapter(client, config)
+                adapter = create_provider_model_adapter(client, provider_type, config)
                 discovered_models = await adapter.discover_models()
         except ModelProviderConfigurationError as exc:
             raise HTTPException(status_code=502, detail=exc.public_detail) from None
