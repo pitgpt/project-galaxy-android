@@ -14,7 +14,7 @@ import java.security.MessageDigest
  * The plaintext rollback copy is retained until Room has successfully opened the encrypted DB.
  */
 internal class PlaintextDatabaseEncryptor {
-    data class PendingMigration internal constructor(
+    class PendingMigration internal constructor(
         internal val original: File,
         internal val backup: File,
         internal val expectedSnapshot: DatabaseSnapshot
