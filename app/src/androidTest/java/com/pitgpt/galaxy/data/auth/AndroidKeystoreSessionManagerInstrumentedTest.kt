@@ -7,12 +7,14 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.jan.supabase.auth.user.UserSession
 import java.security.KeyStore
 import java.util.UUID
 import javax.crypto.KeyGenerator
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -49,6 +51,24 @@ class AndroidKeystoreSessionManagerInstrumentedTest {
             val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
             if (keyStore.containsAlias(keyAlias)) keyStore.deleteEntry(keyAlias)
         }
+    }
+
+    @Test
+    fun saveAndLoadRoundTripsEncryptedSessionWithoutPersistingTokenText() {
+        val session = UserSession(
+            accessToken = "access-token-secret",
+            refreshToken = "refresh-token-secret",
+            expiresIn = 3600,
+            tokenType = "bearer"
+        )
+
+        kotlinx.coroutines.runBlocking { manager.saveSession(session) }
+
+        val encoded = preferences.getString(sessionKey, null)
+        assertNotNull(encoded)
+        assertFalse(encoded!!.contains(session.accessToken))
+        assertFalse(encoded.contains(session.refreshToken))
+        assertEquals(session, kotlinx.coroutines.runBlocking { manager.loadSession() })
     }
 
     @Test

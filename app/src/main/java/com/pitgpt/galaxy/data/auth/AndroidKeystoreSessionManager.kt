@@ -6,8 +6,12 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import io.github.jan.supabase.auth.SessionManager
 import io.github.jan.supabase.auth.user.UserSession
-import kotlinx.serialization.encodeToString
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromStream
+import kotlinx.serialization.json.encodeToStream
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -17,7 +21,12 @@ import javax.crypto.spec.GCMParameterSpec
 /**
  * Stores the complete Supabase session as AES-GCM ciphertext.
  * The AES key is non-exportable and managed by Android Keystore.
+ *
+ * Plaintext serialization buffers are zeroized on both successful and failed
+ * save/load paths. The immutable token Strings required by UserSession remain
+ * owned by the Supabase session object.
  */
+@OptIn(ExperimentalSerializationApi::class)
 class AndroidKeystoreSessionManager(
     context: Context,
     private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = true },
@@ -31,13 +40,36 @@ class AndroidKeystoreSessionManager(
     )
 
     override suspend fun saveSession(session: UserSession) {
-        val plaintext = json.encodeToString(session).toByteArray(Charsets.UTF_8)
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        val encrypted = cipher.doFinal(plaintext)
-        val payload = cipher.iv + encrypted
-        check(preferences.edit().putString(sessionKey, Base64.encodeToString(payload, Base64.NO_WRAP)).commit()) {
-            "Could not persist the encrypted authentication session"
+        val plaintext = ZeroizingByteArrayOutputStream()
+        try {
+            json.encodeToStream(session, plaintext)
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+            val encrypted = plaintext.useBytes { bytes, length ->
+                cipher.doFinal(bytes, 0, length)
+            }
+            try {
+                val iv = cipher.iv
+                try {
+                    val payload = ByteArray(iv.size + encrypted.size)
+                    try {
+                        System.arraycopy(iv, 0, payload, 0, iv.size)
+                        System.arraycopy(encrypted, 0, payload, iv.size, encrypted.size)
+                        val encoded = Base64.encodeToString(payload, Base64.NO_WRAP)
+                        check(preferences.edit().putString(sessionKey, encoded).commit()) {
+                            "Could not persist the encrypted authentication session"
+                        }
+                    } finally {
+                        payload.fill(0)
+                    }
+                } finally {
+                    iv.fill(0)
+                }
+            } finally {
+                encrypted.fill(0)
+            }
+        } finally {
+            plaintext.wipe()
         }
     }
 
@@ -48,13 +80,31 @@ class AndroidKeystoreSessionManager(
             // decrypted with its original key, and a missing/invalidated key needs explicit recovery.
             val key = getExistingKey() ?: return null
             val payload = Base64.decode(encoded, Base64.NO_WRAP)
-            require(payload.size > GCM_IV_LENGTH_BYTES) { "Invalid encrypted session payload" }
-            val iv = payload.copyOfRange(0, GCM_IV_LENGTH_BYTES)
-            val ciphertext = payload.copyOfRange(GCM_IV_LENGTH_BYTES, payload.size)
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
-            val plaintext = cipher.doFinal(ciphertext).toString(Charsets.UTF_8)
-            json.decodeFromString<UserSession>(plaintext)
+            try {
+                require(payload.size > GCM_IV_LENGTH_BYTES) { "Invalid encrypted session payload" }
+                val iv = payload.copyOfRange(0, GCM_IV_LENGTH_BYTES)
+                try {
+                    val ciphertext = payload.copyOfRange(GCM_IV_LENGTH_BYTES, payload.size)
+                    try {
+                        val cipher = Cipher.getInstance(TRANSFORMATION)
+                        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+                        val plaintext = cipher.doFinal(ciphertext)
+                        try {
+                            ByteArrayInputStream(plaintext).use { input ->
+                                json.decodeFromStream<UserSession>(input)
+                            }
+                        } finally {
+                            plaintext.fill(0)
+                        }
+                    } finally {
+                        ciphertext.fill(0)
+                    }
+                } finally {
+                    iv.fill(0)
+                }
+            } finally {
+                payload.fill(0)
+            }
         } catch (_: Exception) {
             // Preserve ciphertext on key invalidation, authentication failure, or malformed data.
             null
@@ -86,6 +136,15 @@ class AndroidKeystoreSessionManager(
     private fun getExistingKey(): SecretKey? {
         val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
         return keyStore.getKey(keyAlias, null) as? SecretKey
+    }
+
+    private class ZeroizingByteArrayOutputStream : ByteArrayOutputStream() {
+        fun <T> useBytes(block: (ByteArray, Int) -> T): T = block(buf, count)
+
+        fun wipe() {
+            buf.fill(0)
+            reset()
+        }
     }
 
     private companion object {
