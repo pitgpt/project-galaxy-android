@@ -6,6 +6,7 @@ A selected provider is never silently replaced by another provider.
 from __future__ import annotations
 
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -17,6 +18,7 @@ from .openai_compatible import (
     OpenAICompatibleModelAdapter,
 )
 from .provider_registry import validate_provider_endpoint
+from .ollama import OllamaModelAdapter
 
 
 class ProviderSelectionRequired(ModelProviderRejected):
@@ -156,7 +158,7 @@ class OwnerScopedModelAdapterResolver:
         except (KeyError, TypeError, ValueError):
             raise ModelProviderConfigurationError("request_rejected") from None
 
-        return ManagedOpenAICompatibleModelAdapter(
+        return ManagedProviderModelAdapter(
             provider_type=provider_type,
             timeout_seconds=timeout_seconds,
             config=config,
