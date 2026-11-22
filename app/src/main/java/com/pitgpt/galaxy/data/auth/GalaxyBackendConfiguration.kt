@@ -3,7 +3,10 @@ package com.pitgpt.galaxy.data.auth
 import com.pitgpt.galaxy.BuildConfig
 import java.net.URI
 import java.util.Base64
-import org.json.JSONObject
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Public connection settings needed by the Android client to reach Galaxy Core
@@ -96,11 +99,15 @@ data class GalaxyBackendConfiguration(
                 val signatureBytes = decoder.decode(segments[2])
                 try {
                     if (signatureBytes.isEmpty()) return false
-                    val header = JSONObject(String(headerBytes, Charsets.UTF_8))
-                    val claims = JSONObject(String(claimsBytes, Charsets.UTF_8))
-                    header.optString("typ") == "JWT" &&
-                        header.optString("alg") == "HS256" &&
-                        claims.optString("role") == "anon"
+                    val header = Json.parseToJsonElement(
+                        String(headerBytes, Charsets.UTF_8)
+                    ).jsonObject
+                    val claims = Json.parseToJsonElement(
+                        String(claimsBytes, Charsets.UTF_8)
+                    ).jsonObject
+                    header["typ"]?.jsonPrimitive?.contentOrNull == "JWT" &&
+                        header["alg"]?.jsonPrimitive?.contentOrNull == "HS256" &&
+                        claims["role"]?.jsonPrimitive?.contentOrNull == "anon"
                 } finally {
                     headerBytes.fill(0)
                     claimsBytes.fill(0)
