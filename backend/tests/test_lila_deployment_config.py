@@ -79,6 +79,10 @@ def test_env_example_does_not_store_lila_secrets():
     assert "LILA_PROVIDER_API_KEY" not in values
     assert "LILA_STORAGE_ENCRYPTION_KEY" not in values
     assert values["LILA_DATABASE_PATH"] == LILA_DATABASE_PATH
+    assert values["AUTH_JWKS_URL"] == "https://YOUR_PROJECT_REF.supabase.co/auth/v1/.well-known/jwks.json"
+    assert values["AUTH_ISSUER"] == "https://YOUR_PROJECT_REF.supabase.co/auth/v1"
+    assert values["AUTH_AUDIENCE"] == "authenticated"
+    assert "asymmetric RS256/ES256" in env_text
     assert "host secret manager" in env_text
 
 
