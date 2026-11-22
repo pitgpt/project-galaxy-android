@@ -1,5 +1,6 @@
 package com.pitgpt.galaxy.data.auth
 
+import java.util.Base64
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -24,6 +25,48 @@ class GalaxyBackendConfigurationTest {
         assertEquals("https://API.EXAMPLE.TEST/gateway", normalized.galaxyApiBaseUrl)
         assertEquals("https://auth.example.org", normalized.supabaseUrl)
         assertEquals("sb_publishable_example", normalized.supabasePublishableKey)
+    }
+
+    @Test
+    fun acceptsLegacySupabaseAnonJwtForExistingProjects() {
+        val anonKey = legacyJwt(role = "anon")
+
+        assertEquals(
+            anonKey,
+            validConfiguration(key = anonKey).validated().supabasePublishableKey
+        )
+    }
+
+    @Test
+    fun rejectsLegacySupabaseServiceRoleJwt() {
+        val serviceRoleKey = legacyJwt(role = "service_role")
+
+        assertThrows(IllegalArgumentException::class.java) {
+            validConfiguration(key = serviceRoleKey).validated()
+        }
+    }
+
+    @Test
+    fun rejectsNewSupabaseSecretKeysAndUnknownOpaqueKeys() {
+        assertThrows(IllegalArgumentException::class.java) {
+            validConfiguration(key = "sb_secret_example").validated()
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            validConfiguration(key = "arbitrary-provider-key").validated()
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            validConfiguration(key = "sb_publishable_").validated()
+        }
+    }
+
+    @Test
+    fun rejectsMalformedOrNonAnonLegacyJwtKeys() {
+        assertThrows(IllegalArgumentException::class.java) {
+            validConfiguration(key = "eyJhbGciOiJIUzI1NiJ9.not-json.signature").validated()
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            validConfiguration(key = legacyJwt(role = "authenticated")).validated()
+        }
     }
 
     @Test
@@ -77,5 +120,17 @@ class GalaxyBackendConfigurationTest {
         assertThrows(IllegalArgumentException::class.java) {
             validConfiguration(key = "public-key\nwith-newline").validated()
         }
+    }
+
+    private fun legacyJwt(role: String): String {
+        fun encode(value: String): String =
+            Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(value.toByteArray(Charsets.UTF_8))
+
+        return listOf(
+            encode("""{"alg":"HS256","typ":"JWT"}"""),
+            encode("""{"iss":"supabase","role":"$role","iat":1795000000,"exp":2110000000}"""),
+            encode("test-signature")
+        ).joinToString(".")
     }
 }
