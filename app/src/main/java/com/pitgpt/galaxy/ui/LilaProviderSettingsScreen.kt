@@ -200,9 +200,9 @@ fun LilaProviderSettingsScreen(
                                             selectedProviderId = provider.providerId
                                             selectedModelId = result.configuredModelId
                                             notice = if (result.modelDiscoverySupported) {
-                                                "Соединение доступно. /models вернул ${result.modelIds.size} моделей; генерация ещё не проверялась."
+                                                "Соединение доступно. Каталог вернул ${result.modelIds.size} моделей; генерация ещё не проверялась."
                                             } else {
-                                                "Endpoint доступен, но /models не поддерживается. Укажи model ID вручную."
+                                                "Endpoint доступен, но каталог моделей не поддерживается. Укажи model ID вручную."
                                             }
                                         } catch (exception: CancellationException) {
                                             throw exception
@@ -246,7 +246,7 @@ fun LilaProviderSettingsScreen(
                                         try {
                                             val result = catalog.testProviderChat(provider.providerId)
                                             chatTests = chatTests + (provider.providerId to result)
-                                            notice = "Chat completion подтверждён: ${result.modelId}. Тестовый ответ не сохранён в истории."
+                                            notice = "Генерация чата подтверждена: ${result.modelId}. Тестовый ответ не сохранён в истории."
                                         } catch (exception: CancellationException) {
                                             throw exception
                                         } catch (exception: Exception) {
@@ -357,6 +357,13 @@ fun LilaProviderSettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
+                if (providerType == "local") {
+                    Text(
+                        "LM Studio: http://host.docker.internal:1234/v1 · llama.cpp: http://host.docker.internal:8080/v1 · Ollama native: http://host.docker.internal:11434 (без /v1) · Ollama OpenAI-compatible: добавь /v1. Для backend на той же машине можно использовать localhost. Сервер должен быть доступен из backend container.",
+                        color = ProviderScreenMuted,
+                        fontSize = 11.sp
+                    )
+                }
                 OutlinedTextField(
                     value = modelId,
                     onValueChange = { modelId = it },
@@ -397,11 +404,6 @@ fun LilaProviderSettingsScreen(
                         )
                         Text("Удалить сохранённый API key")
                     }
-                    Text(
-                        "Для локального runtime используй localhost (backend на той же машине) или host.docker.internal (Docker). Сейчас разрешены только порты 1234 (LM Studio), 8080 (llama.cpp) и 11434 (Ollama); другие порты пока не поддерживаются. Сервер должен быть доступен из backend container.",
-                        color = ProviderScreenMuted,
-                        fontSize = 11.sp
-                    )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
@@ -451,7 +453,7 @@ fun LilaProviderSettingsScreen(
             }
         }
         Text(
-            "ПРОВЕРИТЬ выполняет только GET /models. ТЕСТ ГЕНЕРАЦИИ отправляет короткий запрос и может расходовать токены. При неоднозначном таймауте не повторяй тест сразу: провайдер мог уже принять запрос.",
+            "ПРОВЕРИТЬ выполняет только запрос каталога: GET /models для OpenAI-compatible API или GET /api/tags для native Ollama. ТЕСТ ГЕНЕРАЦИИ отправляет короткий запрос и может расходовать токены. При неоднозначном таймауте не повторяй тест сразу: провайдер мог уже принять запрос.",
             color = ProviderScreenMuted,
             fontSize = 11.sp
         )
