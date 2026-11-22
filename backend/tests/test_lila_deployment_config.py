@@ -58,15 +58,15 @@ def test_compose_mounts_storage_and_provider_secrets_without_container_environme
     assert storage_key is not None and len(storage_key) == 64
     assert backend_environment["LILA_STORAGE_ENCRYPTION_KEY"] == ""
     assert backend_environment["LILA_PROVIDER_API_KEY"] == ""
+    assert "LILA_PROVIDER_API_KEY_FILE" not in backend_environment
     assert backend_environment["LILA_STORAGE_ENCRYPTION_KEY_FILE"] == "/run/secrets/lila_storage_encryption_key"
-    assert backend_environment["LILA_PROVIDER_API_KEY_FILE"] == "/run/secrets/lila_provider_api_key"
     mounted = {
         item if isinstance(item, str) else item["source"]
         for item in backend["secrets"]
     }
-    assert mounted == {"lila_storage_encryption_key", "lila_provider_api_key"}
+    assert mounted == {"lila_storage_encryption_key"}
+    assert set(config["secrets"]) == {"lila_storage_encryption_key"}
     assert config["secrets"]["lila_storage_encryption_key"]["environment"] == "LILA_STORAGE_ENCRYPTION_KEY"
-    assert config["secrets"]["lila_provider_api_key"]["environment"] == "LILA_PROVIDER_API_KEY"
     resolved = json.dumps(config)
     assert storage_key not in resolved
     if provider_key:
