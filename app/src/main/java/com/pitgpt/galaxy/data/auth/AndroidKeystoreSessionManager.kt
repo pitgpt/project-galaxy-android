@@ -20,10 +20,13 @@ import javax.crypto.spec.GCMParameterSpec
  */
 class AndroidKeystoreSessionManager(
     context: Context,
-    private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+    private val json: Json = Json { encodeDefaults = true; ignoreUnknownKeys = true },
+    preferencesName: String = PREFS_NAME,
+    private val sessionKey: String = SESSION_KEY,
+    private val keyAlias: String = KEY_ALIAS
 ) : SessionManager {
     private val preferences = context.applicationContext.getSharedPreferences(
-        PREFS_NAME,
+        preferencesName,
         Context.MODE_PRIVATE
     )
 
@@ -33,42 +36,43 @@ class AndroidKeystoreSessionManager(
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
         val encrypted = cipher.doFinal(plaintext)
         val payload = cipher.iv + encrypted
-        check(preferences.edit().putString(SESSION_KEY, Base64.encodeToString(payload, Base64.NO_WRAP)).commit()) {
+        check(preferences.edit().putString(sessionKey, Base64.encodeToString(payload, Base64.NO_WRAP)).commit()) {
             "Could not persist the encrypted authentication session"
         }
     }
 
     override suspend fun loadSession(): UserSession? {
-        val encoded = preferences.getString(SESSION_KEY, null) ?: return null
+        val encoded = preferences.getString(sessionKey, null) ?: return null
         return try {
+            // Loading must never create a replacement key: existing ciphertext can only be
+            // decrypted with its original key, and a missing/invalidated key needs explicit recovery.
+            val key = getExistingKey() ?: return null
             val payload = Base64.decode(encoded, Base64.NO_WRAP)
             require(payload.size > GCM_IV_LENGTH_BYTES) { "Invalid encrypted session payload" }
             val iv = payload.copyOfRange(0, GCM_IV_LENGTH_BYTES)
             val ciphertext = payload.copyOfRange(GCM_IV_LENGTH_BYTES, payload.size)
             val cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+            cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
             val plaintext = cipher.doFinal(ciphertext).toString(Charsets.UTF_8)
             json.decodeFromString<UserSession>(plaintext)
-        } catch (exception: Exception) {
-            // A lost/invalidated Keystore key or corrupt ciphertext must never become an auth session.
-            deleteSession()
+        } catch (_: Exception) {
+            // Preserve ciphertext on key invalidation, authentication failure, or malformed data.
             null
         }
     }
 
     override suspend fun deleteSession() {
-        check(preferences.edit().remove(SESSION_KEY).commit()) {
+        check(preferences.edit().remove(sessionKey).commit()) {
             "Could not delete the encrypted authentication session"
         }
     }
 
     private fun getOrCreateKey(): SecretKey {
-        val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        getExistingKey()?.let { return it }
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEY_STORE)
         generator.init(
             KeyGenParameterSpec.Builder(
-                KEY_ALIAS,
+                keyAlias,
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
             )
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -77,6 +81,11 @@ class AndroidKeystoreSessionManager(
                 .build()
         )
         return generator.generateKey()
+    }
+
+    private fun getExistingKey(): SecretKey? {
+        val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }
+        return keyStore.getKey(keyAlias, null) as? SecretKey
     }
 
     private companion object {
