@@ -1,6 +1,11 @@
 package com.pitgpt.galaxy.data.remote
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -17,10 +22,37 @@ import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class HttpLilaTurnProviderTest {
     private val idempotencyKey = "00000000-0000-4000-8000-000000000201"
+
+    @Test
+    fun cancellationDisconnectsAnInFlightTurnConnection() = runBlocking {
+        val connection = BlockingHttpURLConnection(
+            URL("https://api.example.test/v1/lila/turns")
+        )
+        val provider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "supabase-access-token" },
+            connectionFactory = { connection }
+        )
+
+        val request = launch {
+            provider.sendTurn("conversation-1", "Привет", idempotencyKey)
+        }
+        assertTrue(
+            withContext(Dispatchers.IO) {
+                connection.responseCodeStarted.await(2, TimeUnit.SECONDS)
+            }
+        )
+
+        withTimeout(2_000) { request.cancelAndJoin() }
+
+        assertTrue(connection.disconnected)
+    }
+
     @Test
     fun postsAuthenticatedTurnAndReturnsProviderIdentity() = runBlocking {
         val connection = FakeConnection(

@@ -156,14 +156,16 @@ class HttpLilaTurnProvider(
                     .toString()
                 requestBytes = body.toByteArray(Charsets.UTF_8)
                 connection.setFixedLengthStreamingMode(requestBytes.size)
-                connection.outputStream.use { output ->
-                    // Once the request stream is acquired, a partial write may already
-                    // have reached Core; reconcile by idempotency key if the write fails.
-                    requestMayHaveReachedCore = true
-                    output.write(requestBytes)
+                connection.executeCancellable {
+                    connection.outputStream.use { output ->
+                        // Once the request stream is acquired, a partial write may already
+                        // have reached Core; reconcile by idempotency key if the write fails.
+                        requestMayHaveReachedCore = true
+                        output.write(requestBytes)
+                    }
                 }
 
-                val status = connection.responseCode
+                val status = connection.executeCancellable { connection.responseCode }
                 if (status !in 200..299) {
                     val retrySafe = connection.getHeaderField("X-Lila-Retry-Safe")
                         ?.trim()
@@ -196,7 +198,7 @@ class HttpLilaTurnProvider(
                     throw originalError
                 }
 
-                val responseText = readBounded(connection.inputStream)
+                val responseText = connection.executeCancellable { readBounded(connection.inputStream) }
                 val payload = try {
                     JSONObject(responseText)
                 } catch (exception: Exception) {
@@ -286,7 +288,7 @@ class HttpLilaTurnProvider(
      * Fetch a previously committed response by its idempotency key. This never
      * sends a new model request. A pending reservation remains non-retryable.
      */
-    private fun reconcileTurnResultBlocking(
+    private suspend fun reconcileTurnResultBlocking(
         conversationId: String,
         idempotencyKey: String,
         token: String
@@ -312,11 +314,11 @@ class HttpLilaTurnProvider(
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("Authorization", "Bearer $token")
 
-            val status = connection.responseCode
+            val status = connection.executeCancellable { connection.responseCode }
             if (status == 404) return LilaTurnReconciliation(LilaTurnStatus.NOT_FOUND)
             if (status !in 200..299) return null
 
-            val payload = JSONObject(readBounded(connection.inputStream, MAX_RESPONSE_BYTES))
+            val payload = JSONObject(connection.executeCancellable { readBounded(connection.inputStream, MAX_RESPONSE_BYTES) })
             if (payload.optString("conversation_id", "") != conversationId) return null
             return when (payload.optString("status", "")) {
                 "pending" -> LilaTurnReconciliation(LilaTurnStatus.PENDING)
@@ -435,7 +437,7 @@ class HttpLilaTurnProvider(
             messages.sortedBy { it.sequence }
         }
 
-    private fun loadHistoryPageBlocking(
+    private suspend fun loadHistoryPageBlocking(
         conversationId: String,
         token: String,
         beforeSequence: Long?
@@ -467,12 +469,12 @@ class HttpLilaTurnProvider(
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("Authorization", "Bearer $token")
 
-            val status = connection.responseCode
+            val status = connection.executeCancellable { connection.responseCode }
             if (status !in 200..299) {
                 throw GalaxyApiException(status, safeMessageFor(status))
             }
             val payload = try {
-                JSONObject(readBounded(connection.inputStream, MAX_HISTORY_PAGE_BYTES))
+                JSONObject(connection.executeCancellable { readBounded(connection.inputStream, MAX_HISTORY_PAGE_BYTES) })
             } catch (exception: GalaxyApiException) {
                 throw exception
             } catch (exception: Exception) {

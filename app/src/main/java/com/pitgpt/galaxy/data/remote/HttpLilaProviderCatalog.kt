@@ -283,9 +283,9 @@ class HttpLilaProviderCatalog(
                 requestBytes = body.toString().toByteArray(Charsets.UTF_8)
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 connection.setFixedLengthStreamingMode(requestBytes.size)
-                connection.outputStream.use { output -> output.write(requestBytes) }
+                connection.executeCancellable { connection.outputStream.use { output -> output.write(requestBytes) } }
             }
-            val status = connection.responseCode
+            val status = connection.executeCancellable { connection.responseCode }
             if (status !in 200..299) {
                 val retrySafe = connection.getHeaderField("X-Lila-Retry-Safe")
                     ?.equals("true", ignoreCase = true) == true
@@ -298,7 +298,7 @@ class HttpLilaProviderCatalog(
                 }
                 throw GalaxyApiException(status, message)
             }
-            val responseText = readBounded(connection.inputStream)
+            val responseText = connection.executeCancellable { readBounded(connection.inputStream) }
             if (responseText.isBlank()) JSONObject() else try {
                 JSONObject(responseText)
             } catch (exception: Exception) {
