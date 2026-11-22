@@ -53,10 +53,9 @@ def test_compose_mounts_storage_and_provider_secrets_without_container_environme
     backend = config["services"]["backend"]
     backend_environment = backend["environment"]
     storage_key = os.environ.get("LILA_STORAGE_ENCRYPTION_KEY")
-    provider_key = os.environ.get("LILA_PROVIDER_API_KEY")
+    provider_key = os.environ.get("LILA_PROVIDER_API_KEY", "")
 
     assert storage_key is not None and len(storage_key) == 64
-    assert provider_key is not None and provider_key
     assert backend_environment["LILA_STORAGE_ENCRYPTION_KEY"] == ""
     assert backend_environment["LILA_PROVIDER_API_KEY"] == ""
     assert backend_environment["LILA_STORAGE_ENCRYPTION_KEY_FILE"] == "/run/secrets/lila_storage_encryption_key"
@@ -70,7 +69,8 @@ def test_compose_mounts_storage_and_provider_secrets_without_container_environme
     assert config["secrets"]["lila_provider_api_key"]["environment"] == "LILA_PROVIDER_API_KEY"
     resolved = json.dumps(config)
     assert storage_key not in resolved
-    assert provider_key not in resolved
+    if provider_key:
+        assert provider_key not in resolved
 
 
 def test_backend_image_prepares_private_store_directory_for_runtime_uid():

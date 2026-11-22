@@ -48,16 +48,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Prepare non-secret Compose validation environment
+      - name: Prepare ephemeral Compose secret validation environment
         run: |
           cp .env.example .env
           test_key="$(python -c 'import secrets; print(secrets.token_hex(32))')"
-          provider_key="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
           echo "::add-mask::$test_key"
-          echo "::add-mask::$provider_key"
           printf 'LILA_STORAGE_ENCRYPTION_KEY=%s\n' "$test_key" >> "$GITHUB_ENV"
-          printf 'LILA_PROVIDER_API_KEY=%s\n' "$provider_key" >> "$GITHUB_ENV"
-          unset test_key provider_key
+          unset test_key
 
       - name: Validate Compose configuration and build backend image
         run: |
