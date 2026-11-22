@@ -11,7 +11,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromStream
 import kotlinx.serialization.json.encodeToStream
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.OutputStream
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -22,9 +23,9 @@ import javax.crypto.spec.GCMParameterSpec
  * Stores the complete Supabase session as AES-GCM ciphertext.
  * The AES key is non-exportable and managed by Android Keystore.
  *
- * Plaintext serialization buffers are zeroized on both successful and failed
- * save/load paths. The immutable token Strings required by UserSession remain
- * owned by the Supabase session object.
+ * Plaintext serialization uses a fixed-size buffer, avoiding abandoned
+ * plaintext arrays during growth. The active buffer is zeroized on every exit.
+ * Immutable token Strings required by UserSession remain owned by Supabase.
  */
 @OptIn(ExperimentalSerializationApi::class)
 class AndroidKeystoreSessionManager(
@@ -40,7 +41,7 @@ class AndroidKeystoreSessionManager(
     )
 
     override suspend fun saveSession(session: UserSession) {
-        val plaintext = ZeroizingByteArrayOutputStream()
+        val plaintext = ZeroizingSessionOutputStream()
         try {
             json.encodeToStream(session, plaintext)
             val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -75,6 +76,7 @@ class AndroidKeystoreSessionManager(
 
     override suspend fun loadSession(): UserSession? {
         val encoded = preferences.getString(sessionKey, null) ?: return null
+        if (encoded.length > MAX_ENCODED_SESSION_CHARS) return null
         return try {
             // Loading must never create a replacement key: existing ciphertext can only be
             // decrypted with its original key, and a missing/invalidated key needs explicit recovery.
@@ -138,12 +140,35 @@ class AndroidKeystoreSessionManager(
         return keyStore.getKey(keyAlias, null) as? SecretKey
     }
 
-    private class ZeroizingByteArrayOutputStream : ByteArrayOutputStream() {
-        fun <T> useBytes(block: (ByteArray, Int) -> T): T = block(buf, count)
+    private class ZeroizingSessionOutputStream : OutputStream() {
+        private val buffer = ByteArray(MAX_SESSION_PLAINTEXT_BYTES)
+        private var count = 0
+
+        override fun write(value: Int) {
+            ensureCapacity(1)
+            buffer[count++] = value.toByte()
+        }
+
+        override fun write(source: ByteArray, offset: Int, length: Int) {
+            if (offset < 0 || length < 0 || offset > source.size - length) {
+                throw IndexOutOfBoundsException("Invalid session serialization buffer range")
+            }
+            ensureCapacity(length)
+            System.arraycopy(source, offset, buffer, count, length)
+            count += length
+        }
+
+        fun <T> useBytes(block: (ByteArray, Int) -> T): T = block(buffer, count)
 
         fun wipe() {
-            buf.fill(0)
-            reset()
+            buffer.fill(0)
+            count = 0
+        }
+
+        private fun ensureCapacity(additional: Int) {
+            if (additional > buffer.size - count) {
+                throw IOException("Supabase session exceeds the encrypted storage limit")
+            }
         }
     }
 
@@ -155,5 +180,7 @@ class AndroidKeystoreSessionManager(
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val GCM_IV_LENGTH_BYTES = 12
         const val GCM_TAG_LENGTH_BITS = 128
+        const val MAX_SESSION_PLAINTEXT_BYTES = 64 * 1024
+        const val MAX_ENCODED_SESSION_CHARS = 128 * 1024
     }
 }

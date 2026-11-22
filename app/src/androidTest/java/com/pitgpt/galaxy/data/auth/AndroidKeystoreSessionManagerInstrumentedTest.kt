@@ -14,13 +14,13 @@ import javax.crypto.KeyGenerator
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
+@OptIn(kotlin.time.ExperimentalTime::class)
 @RunWith(AndroidJUnit4::class)
 class AndroidKeystoreSessionManagerInstrumentedTest {
     private lateinit var preferences: SharedPreferences
@@ -64,11 +64,22 @@ class AndroidKeystoreSessionManagerInstrumentedTest {
 
         kotlinx.coroutines.runBlocking { manager.saveSession(session) }
 
-        val encoded = preferences.getString(sessionKey, null)
-        assertNotNull(encoded)
-        assertFalse(encoded!!.contains(session.accessToken))
+        val encoded = requireNotNull(preferences.getString(sessionKey, null))
+        assertFalse(encoded.contains(session.accessToken))
         assertFalse(encoded.contains(session.refreshToken))
         assertEquals(session, kotlinx.coroutines.runBlocking { manager.loadSession() })
+    }
+
+    @Test
+    fun oversizedStoredSessionIsRejectedWithoutMutatingCiphertextOrCreatingKey() {
+        val encoded = "A".repeat(128 * 1024 + 1)
+        assertTrue(preferences.edit().putString(sessionKey, encoded).commit())
+        assertFalse(hasKey())
+
+        assertNull(kotlinx.coroutines.runBlocking { manager.loadSession() })
+
+        assertEquals(encoded, preferences.getString(sessionKey, null))
+        assertFalse("Loading must not generate a replacement Android Keystore key", hasKey())
     }
 
     @Test
