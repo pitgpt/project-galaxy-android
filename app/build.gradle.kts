@@ -10,7 +10,7 @@ val gitSha = System.getenv("GITHUB_SHA")?.take(7) ?: "local"
 val galaxyApiBaseUrl = providers.gradleProperty("galaxyApiBaseUrl").orElse(providers.environmentVariable("GALAXY_API_BASE_URL")).getOrElse("https://api.galaxy.invalid")
 val supabaseUrl = providers.gradleProperty("supabaseUrl").orElse(providers.environmentVariable("SUPABASE_URL")).getOrElse("")
 val supabasePublishableKey = providers.gradleProperty("supabasePublishableKey").orElse(providers.environmentVariable("SUPABASE_PUBLISHABLE_KEY")).getOrElse("")
-fun buildConfigString(value: String) = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+fun buildConfigString(value: String) = "\"\${value.replace("\\\\", "\\\\\\\\").replace("\\\"", "\\\\\"")}\""
 
 android {
     namespace = "com.pitgpt.galaxy"
@@ -59,7 +59,10 @@ dependencies {
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
     implementation("androidx.sqlite:sqlite:2.7.0")
-    implementation("net.zetetic:sqlcipher-android:4.20.0@aar")
+    // Use the published Maven Central module metadata/POM so clean CI runners can
+    // resolve the AAR and its androidx.sqlite runtime dependency without relying
+    // on a previously warmed Gradle artifact cache.
+    implementation("net.zetetic:sqlcipher-android:4.20.0")
     ksp("androidx.room:room-compiler:$roomVersion")
 
     testImplementation("junit:junit:4.13.2")
