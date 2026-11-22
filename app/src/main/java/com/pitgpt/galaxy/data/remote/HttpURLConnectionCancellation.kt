@@ -12,14 +12,25 @@ import java.net.HttpURLConnection
  */
 internal suspend fun <T> HttpURLConnection.executeCancellable(block: () -> T): T =
     suspendCancellableCoroutine { continuation ->
-        continuation.invokeOnCancellation { disconnect() }
+        val gate = Any()
+        var cancelled = false
+        continuation.invokeOnCancellation {
+            synchronized(gate) {
+                cancelled = true
+                disconnect()
+            }
+        }
         Dispatchers.IO.dispatch(continuation.context, Runnable {
-            if (!continuation.isActive) return@Runnable
+            synchronized(gate) {
+                if (cancelled || !continuation.isActive) return@Runnable
+            }
             val result = try {
                 Result.success(block())
             } catch (failure: Throwable) {
                 Result.failure(failure)
             }
-            continuation.resumeWith(result)
+            synchronized(gate) {
+                if (!cancelled && continuation.isActive) continuation.resumeWith(result)
+            }
         })
     }
