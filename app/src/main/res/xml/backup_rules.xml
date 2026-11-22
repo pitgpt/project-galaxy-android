@@ -4,6 +4,7 @@
     <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
     <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
     <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+    <exclude domain="sharedpref" path="galaxy_backend_config.xml" />
     <exclude domain="database" path="." />
     <exclude domain="file" path="galaxy_media/" />
 </full-backup-content>

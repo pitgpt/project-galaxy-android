@@ -130,6 +130,7 @@ class MediaBackupExclusionsTest {
             "sharedpref" to "galaxy_secure_auth.xml",
             "sharedpref" to "galaxy_provider_vault.xml",
             "sharedpref" to "galaxy_database_key.xml",
+            "sharedpref" to "galaxy_backend_config.xml",
             "database" to ".",
             "file" to "galaxy_media/"
         )
