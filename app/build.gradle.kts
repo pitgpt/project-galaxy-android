@@ -10,7 +10,7 @@ val gitSha = System.getenv("GITHUB_SHA")?.take(7) ?: "local"
 val galaxyApiBaseUrl = providers.gradleProperty("galaxyApiBaseUrl").orElse(providers.environmentVariable("GALAXY_API_BASE_URL")).getOrElse("https://api.galaxy.invalid")
 val supabaseUrl = providers.gradleProperty("supabaseUrl").orElse(providers.environmentVariable("SUPABASE_URL")).getOrElse("")
 val supabasePublishableKey = providers.gradleProperty("supabasePublishableKey").orElse(providers.environmentVariable("SUPABASE_PUBLISHABLE_KEY")).getOrElse("")
-fun buildConfigString(value: String) = "\"\${value.replace("\\\\", "\\\\\\\\").replace("\\\"", "\\\\\"")}\""
+fun buildConfigString(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 android {
     namespace = "com.pitgpt.galaxy"
