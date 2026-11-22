@@ -1,7 +1,9 @@
 package com.pitgpt.galaxy.data.auth
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GalaxyBackendConfigurationTest {
@@ -22,6 +24,13 @@ class GalaxyBackendConfigurationTest {
         assertEquals("https://API.EXAMPLE.TEST/gateway", normalized.galaxyApiBaseUrl)
         assertEquals("https://auth.example.org", normalized.supabaseUrl)
         assertEquals("sb_publishable_example", normalized.supabasePublishableKey)
+    }
+
+    @Test
+    fun redactsPublishableKeyFromConfigurationStringRepresentation() {
+        val configuration = validConfiguration()
+        assertFalse(configuration.toString().contains("sb_publishable_example"))
+        assertTrue(configuration.toString().contains("[REDACTED]"))
     }
 
     @Test

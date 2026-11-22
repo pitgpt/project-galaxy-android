@@ -43,6 +43,10 @@ data class GalaxyBackendConfiguration(
         )
     }
 
+    override fun toString(): String =
+        "GalaxyBackendConfiguration(galaxyApiBaseUrl=$galaxyApiBaseUrl, " +
+            "supabaseUrl=$supabaseUrl, supabasePublishableKey=[REDACTED])"
+
     companion object {
         private const val MAX_URL_LENGTH = 2048
         private const val MAX_PUBLISHABLE_KEY_LENGTH = 4096
