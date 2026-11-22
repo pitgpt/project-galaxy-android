@@ -23,9 +23,14 @@ services:
       GALAXY_ENVIRONMENT: production
       REDIS_URL: redis://redis:6379/0
       LILA_DATABASE_PATH: /var/lib/galaxy/lila/lila.sqlite3
-      # Secret values are injected by the host secret manager, never stored in .env.
-      LILA_STORAGE_ENCRYPTION_KEY: ${LILA_STORAGE_ENCRYPTION_KEY:?Inject LILA_STORAGE_ENCRYPTION_KEY from a secret manager}
-      LILA_PROVIDER_API_KEY: ${LILA_PROVIDER_API_KEY:-}
+      # Secret values are mounted as files; never expose them in container environment metadata.
+      LILA_STORAGE_ENCRYPTION_KEY: ""
+      LILA_STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/lila_storage_encryption_key
+      LILA_PROVIDER_API_KEY: ""
+      LILA_PROVIDER_API_KEY_FILE: /run/secrets/lila_provider_api_key
+    secrets:
+      - lila_storage_encryption_key
+      - lila_provider_api_key
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -46,3 +51,9 @@ volumes:
 networks:
   galaxy-internal:
     driver: bridge
+
+secrets:
+  lila_storage_encryption_key:
+    environment: LILA_STORAGE_ENCRYPTION_KEY
+  lila_provider_api_key:
+    environment: LILA_PROVIDER_API_KEY

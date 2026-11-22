@@ -48,7 +48,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Prepare non-secret Compose validation environment
+      - name: Prepare ephemeral Compose secret validation environment
         run: |
           cp .env.example .env
           test_key="$(python -c 'import secrets; print(secrets.token_hex(32))')"
