@@ -138,6 +138,8 @@ def test_settings_load_secret_files_without_exposing_values_in_repr(monkeypatch,
     monkeypatch.setenv("AUTH_AUDIENCE", "galaxy-android")
     monkeypatch.setenv("GALAXY_ENVIRONMENT", "development")
     monkeypatch.setenv("LILA_DATABASE_PATH", str(tmp_path / "lila.sqlite3"))
+    monkeypatch.setenv("LILA_PROVIDER_BASE_URL", "https://api.example.test/v1")
+    monkeypatch.setenv("LILA_MODEL_ID", "model-a")
     monkeypatch.delenv("LILA_STORAGE_ENCRYPTION_KEY", raising=False)
     monkeypatch.setenv("LILA_STORAGE_ENCRYPTION_KEY_FILE", str(storage_file))
     monkeypatch.delenv("LILA_PROVIDER_API_KEY", raising=False)
@@ -176,6 +178,7 @@ def test_settings_fail_closed_when_secret_file_is_missing(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTH_AUDIENCE", "galaxy-android")
     monkeypatch.setenv("GALAXY_ENVIRONMENT", "development")
     monkeypatch.setenv("LILA_DATABASE_PATH", str(tmp_path / "lila.sqlite3"))
+    monkeypatch.delenv("LILA_STORAGE_ENCRYPTION_KEY", raising=False)
     monkeypatch.setenv("LILA_STORAGE_ENCRYPTION_KEY_FILE", str(tmp_path / "missing-secret"))
 
     with pytest.raises(RuntimeError, match="LILA_STORAGE_ENCRYPTION_KEY_FILE could not be read"):
