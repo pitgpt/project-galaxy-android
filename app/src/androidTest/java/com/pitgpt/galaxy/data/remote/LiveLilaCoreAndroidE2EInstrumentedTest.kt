@@ -42,33 +42,68 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
         val conversationId = stableLilaConversationId(ownerKey, characterId)
         val storageCharacterId = "owner:$ownerKey:$characterId"
         val tokenProvider = GalaxyAccessTokenProvider { accessToken }
-        val catalog = HttpLilaProviderCatalog(baseUrl, tokenProvider)
+        val catalogRequestIds = mutableListOf<String>()
+        val catalogDiagnostics = mutableListOf<LilaRequestDiagnostic>()
+        val catalog = HttpLilaProviderCatalog(
+            baseUrl = baseUrl,
+            accessTokenProvider = tokenProvider,
+            requestIdProvider = {
+                UUID.randomUUID().toString().also(catalogRequestIds::add)
+            },
+            diagnosticObserver = catalogDiagnostics::add
+        )
+        suspend fun <T> catalogStep(name: String, action: suspend () -> T): T {
+            try {
+                return action()
+            } catch (exception: Exception) {
+                val diagnostic = catalogDiagnostics.lastOrNull()
+                val requestId = diagnostic?.requestId
+                    ?: catalogRequestIds.lastOrNull()
+                    ?: "not-issued"
+                val operation = diagnostic?.operation ?: name
+                val category = diagnostic?.category ?: "not-captured"
+                val httpStatus = diagnostic?.httpStatus?.toString() ?: "none"
+                val failure = AssertionError(
+                    "Live Lila catalog step=${operation} request_id=${requestId} " +
+                        "category=${category} http_status=${httpStatus} " +
+                        "exception=${exception.javaClass.simpleName}"
+                )
+                failure.initCause(exception)
+                throw failure
+            }
+        }
         val app = InstrumentationRegistry.getInstrumentation()
             .targetContext.applicationContext as GalaxyApplication
 
         try {
-            val created = catalog.createProvider(
-                providerId = providerId,
-                providerType = "local",
-                baseUrl = providerBaseUrl,
-                modelId = modelId,
-                apiKey = null,
-                timeoutSeconds = 120.0
-            )
+            val created = catalogStep("create-provider") {
+                catalog.createProvider(
+                    providerId = providerId,
+                    providerType = "local",
+                    baseUrl = providerBaseUrl,
+                    modelId = modelId,
+                    apiKey = null,
+                    timeoutSeconds = 120.0
+                )
+            }
             assertEquals(providerId, created.providerId)
             assertEquals("local", created.providerType)
             assertTrue(!created.hasApiKey)
 
-            val probe = catalog.probeProvider(providerId)
+            val probe = catalogStep("probe-provider") {
+                catalog.probeProvider(providerId)
+            }
             assertTrue(probe.connectionReachable)
             assertEquals(true, probe.configuredModelAvailable)
             assertTrue(probe.modelIds.contains(modelId))
 
-            val selection = catalog.setConversationModel(
-                conversationId = conversationId,
-                providerId = providerId,
-                modelId = modelId
-            )
+            val selection = catalogStep("select-conversation-model") {
+                catalog.setConversationModel(
+                    conversationId = conversationId,
+                    providerId = providerId,
+                    modelId = modelId
+                )
+            }
             assertTrue(selection.selected)
             assertEquals(providerId, selection.providerId)
             assertEquals(modelId, selection.modelId)
@@ -133,7 +168,9 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertEquals(messageText, localHistory[0].content)
             assertEquals(result.text, localHistory[1].content)
 
-            val restoredSelection = catalog.getConversationModel(conversationId)
+            val restoredSelection = catalogStep("restore-conversation-model") {
+                catalog.getConversationModel(conversationId)
+            }
             assertTrue(restoredSelection.selected)
             assertEquals(providerId, restoredSelection.providerId)
             assertEquals(modelId, restoredSelection.modelId)
