@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, feature/galaxy-lila-core-chat-client, feature/galaxy-lila-provider-settings, feature/galaxy-lila-comfyui-full-integration ]
   pull_request:
-    branches: [ main, feature/lila-encrypted-provider-registry ]
+    branches: [ main, feature/lila-encrypted-provider-registry, feature/galaxy-lila-provider-settings ]
 
 jobs:
   test:
