@@ -213,7 +213,7 @@ jobs:
             > "$RUNNER_TEMP/lila-android-e2e-server.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/lila-android-e2e-server.pid"
           for attempt in $(seq 1 45); do
-            if curl -kfsS https://127.0.0.1:8443/openapi.json >/dev/null; then exit 0; fi
+            if curl --max-time 5 -kfsS https://127.0.0.1:8443/ready >/dev/null; then exit 0; fi
             sleep 2
           done
           cat "$RUNNER_TEMP/lila-android-e2e-server.log"
@@ -265,6 +265,7 @@ jobs:
           rm -f "$RUNNER_TEMP/lila-android-e2e/config.json" \
             "$RUNNER_TEMP/lila-android-e2e/ca.key" \
             "$RUNNER_TEMP/lila-android-e2e/server.key"
+          rm -rf "$RUNNER_TEMP/lila-android-e2e-private"
           docker rm -f lila-live-ollama lila-live-redis 2>/dev/null || true
 
   build:
