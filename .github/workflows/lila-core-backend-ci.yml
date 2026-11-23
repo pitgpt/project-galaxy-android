@@ -12,6 +12,7 @@ on:
       - feature/lila-core-durable-history-memory
       - feature/lila-core-openai-compatible-composition
       - feature/lila-provider-model-discovery
+      - feature/lila-encrypted-provider-registry
       - feature/galaxy-lila-core-chat-client
     paths:
       - "backend/**"
@@ -19,6 +20,7 @@ on:
   pull_request:
     branches:
       - "feature/lila-core-*"
+      - "feature/lila-provider-*"
     paths:
       - "backend/**"
 
@@ -46,7 +48,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Prepare non-secret Compose validation environment
+      - name: Prepare ephemeral Compose secret validation environment
         run: |
           cp .env.example .env
           test_key="$(python -c 'import secrets; print(secrets.token_hex(32))')"
@@ -58,6 +60,10 @@ jobs:
         run: |
           docker compose config --quiet
           docker compose build backend
+
+      - name: Verify Docker Compose secrets reach Lila config as files
+        run: |
+          docker compose run --rm --no-deps --entrypoint python backend -c "from galaxy_backend.config import Settings; s = Settings.from_env(); assert s.lila_storage_is_configured; assert s.lila_storage_encryption_key is not None; assert s.lila_provider_api_key is None"
 
       - name: Verify Lila named volume survives container recreation
         run: |

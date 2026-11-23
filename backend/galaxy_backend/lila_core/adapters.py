@@ -16,6 +16,10 @@ class ModelProviderRejected(RuntimeError):
     """A provider definitively rejected a request before generating a response."""
 
 
+class ModelProviderConnectionUnavailable(ModelProviderRejected):
+    """TCP connection failed before an HTTP request could reach the provider."""
+
+
 class ModelAdapter(Protocol):
     """Async interface implemented by cloud or local model providers.
 

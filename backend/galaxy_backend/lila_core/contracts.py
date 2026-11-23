@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 
 Emotion = Literal[
@@ -87,6 +87,24 @@ class CoreTurnResponse(BaseModel):
 
 
 
+class IdempotentTurnStatusResponse(BaseModel):
+    """Owner-scoped status and optional replay of one committed idempotent turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: str = Field(min_length=1, max_length=128)
+    status: Literal["pending", "completed"]
+    response: CoreTurnResponse | None = None
+
+    @model_validator(mode="after")
+    def validate_response_matches_status(self):
+        if (self.status == "completed") != (self.response is not None):
+            raise ValueError("completed turn status must include exactly one response")
+        if self.response is not None and self.response.conversation_id != self.conversation_id:
+            raise ValueError("turn response belongs to another conversation")
+        return self
+
+
 class ConversationHistoryItem(BaseModel):
     """One decrypted message returned by the authenticated history endpoint."""
 
@@ -122,3 +140,162 @@ class ProviderModelDiscoveryResponse(BaseModel):
     model_discovery_supported: bool
     model_ids: list[str] = Field(default_factory=list, max_length=100)
     chat_completion_verified: Literal[False] = False
+
+
+
+class ProviderConnectionTestResponse(BaseModel):
+    """Safe result of a non-generative owner-managed provider connection test."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    configured_model_id: str = Field(min_length=1, max_length=256)
+    connection_reachable: bool
+    model_discovery_supported: bool
+    configured_model_available: bool | None = None
+    model_ids: list[str] = Field(default_factory=list, max_length=100)
+    chat_completion_verified: Literal[False] = False
+
+
+class ProviderChatTestResponse(BaseModel):
+    """Result of an explicit, billable chat-completion smoke test."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=256)
+    chat_completion_verified: Literal[True] = True
+    response_characters: int = Field(ge=1, le=12_000)
+
+
+class ProviderCreateRequest(BaseModel):
+    """Create an owner-scoped provider without returning its endpoint or secret."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    provider_type: Literal["cloud", "local"]
+    base_url: str = Field(min_length=1, max_length=2048)
+    model_id: str = Field(min_length=1, max_length=256)
+    api_key: SecretStr | None = Field(default=None)
+    timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    capabilities: list[Literal["chat"]] = Field(default_factory=lambda: ["chat"], min_length=1, max_length=1)
+    enabled: bool = True
+
+    @field_validator("provider_id")
+    @classmethod
+    def validate_provider_id(cls, value: str) -> str:
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
+            raise ValueError("provider_id must be a short stable identifier")
+        return value
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("api_key must not be empty")
+        return value
+
+    @field_validator("model_id")
+    @classmethod
+    def validate_model_id(cls, value: str) -> str:
+        if not value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("model_id is invalid")
+        return value
+
+
+class ProviderUpdateRequest(BaseModel):
+    """Replace provider settings; preserve the key unless explicitly changed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_type: Literal["cloud", "local"]
+    base_url: str = Field(min_length=1, max_length=2048)
+    model_id: str = Field(min_length=1, max_length=256)
+    api_key: SecretStr | None = Field(default=None)
+    clear_api_key: bool = False
+    timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    capabilities: list[Literal["chat"]] = Field(default_factory=lambda: ["chat"], min_length=1, max_length=1)
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_key_update(self):
+        if self.clear_api_key and self.api_key is not None:
+            raise ValueError("api_key and clear_api_key cannot be used together")
+        return self
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("api_key must not be empty")
+        return value
+
+    @field_validator("model_id")
+    @classmethod
+    def validate_model_id(cls, value: str) -> str:
+        if not value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("model_id is invalid")
+        return value
+
+
+class ProviderSummary(BaseModel):
+    """Safe provider metadata; endpoint URL and credentials are never returned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    provider_type: Literal["cloud", "local"]
+    model_id: str = Field(min_length=1, max_length=256)
+    capabilities: list[Literal["chat"]]
+    timeout_seconds: float = Field(ge=1.0, le=120.0)
+    enabled: bool
+    has_api_key: bool
+
+
+class ProviderListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    providers: list[ProviderSummary] = Field(default_factory=list, max_length=20)
+
+
+class ProviderDeleteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deleted: Literal[True] = True
+
+
+class ConversationModelSelectionRequest(BaseModel):
+    """Select one owner-managed provider/model for a conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=256)
+
+    @field_validator("provider_id")
+    @classmethod
+    def validate_provider_id(cls, value: str) -> str:
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
+            raise ValueError("provider_id must be a short stable identifier")
+        return value
+
+    @field_validator("model_id")
+    @classmethod
+    def validate_model_id(cls, value: str) -> str:
+        if not value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("model_id is invalid")
+        return value
+
+
+class ConversationModelSelectionResponse(BaseModel):
+    """Non-secret model selection restored by every client of the conversation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: str = Field(min_length=1, max_length=128)
+    selected: bool
+    provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    model_id: str | None = Field(default=None, min_length=1, max_length=256)

@@ -6,7 +6,10 @@ from pydantic import ValidationError
 from galaxy_backend.lila_core.context import AssembledContext, ContextAssembler
 from galaxy_backend.lila_core.contracts import CoreTurnRequest, CoreTurnResponse
 from galaxy_backend.lila_core.memory import ConversationMessage, MemorySnippet
-from galaxy_backend.lila_core.adapters import ModelProviderRejected
+from galaxy_backend.lila_core.adapters import (
+    ModelProviderConnectionUnavailable,
+    ModelProviderRejected,
+)
 from galaxy_backend.lila_core.service import CoreTurnService, ModelAdapterContractError
 
 
@@ -263,6 +266,43 @@ async def test_definitive_provider_rejection_releases_idempotency_reservation():
         )
 
     assert history.reservations == set()
+
+
+@pytest.mark.asyncio
+async def test_pre_send_connection_failure_releases_reservation_and_allows_safe_retry():
+    history = FakeHistoryReader()
+
+    class ConnectThenSuccessAdapter:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate(self, context):
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelProviderConnectionUnavailable("provider could not be reached")
+            return CoreTurnResponse(
+                conversation_id=context.conversation_id,
+                text="Ответ после восстановления соединения",
+                provider_id="cloud-primary",
+                model_id="model-a",
+            )
+
+    adapter = ConnectThenSuccessAdapter()
+    service, _, _, _ = build_service(history=history, adapter=adapter)
+    request = CoreTurnRequest(conversation_id="conversation-1", message="Привет")
+    key = "00000000-0000-4000-8000-000000000128"
+
+    with pytest.raises(ModelProviderConnectionUnavailable):
+        await service.handle(request, principal_id="user-1", idempotency_key=key)
+
+    assert history.reservations == set()
+
+    response = await service.handle(request, principal_id="user-1", idempotency_key=key)
+
+    assert response.text == "Ответ после восстановления соединения"
+    assert adapter.calls == 2
+    assert history.reservations == set()
+    assert history.model_identities == [("cloud-primary", "model-a")]
 
 
 @pytest.mark.asyncio
