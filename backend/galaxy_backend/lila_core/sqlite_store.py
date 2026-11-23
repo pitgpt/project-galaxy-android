@@ -1358,7 +1358,7 @@ class SqliteLilaStore:
         provider_key: str,
         nonce: bytes,
         ciphertext: bytes,
-    ) -> dict[str, str]:
+    ) -> dict[str, str | None]:
         plaintext = bytearray(
             self._decrypt(
                 nonce,
@@ -1375,7 +1375,21 @@ class SqliteLilaStore:
             self._validate_model_selection(provider_id, model_id)
             if self._resource_key("provider", provider_id, 64) != provider_key:
                 raise TypeError("provider identifier does not match its authenticated index")
-            return {"provider_id": provider_id, "model_id": model_id}
+            result: dict[str, str | None] = {
+                "provider_id": provider_id,
+                "model_id": model_id,
+            }
+            fallback_provider_id = payload.get("fallback_provider_id")
+            fallback_model_id = payload.get("fallback_model_id")
+            if (fallback_provider_id is None) != (fallback_model_id is None):
+                raise TypeError("fallback provider and model must be stored together")
+            if fallback_provider_id is not None:
+                self._validate_model_selection(fallback_provider_id, fallback_model_id)
+                if fallback_provider_id == provider_id:
+                    raise TypeError("fallback provider must differ from primary provider")
+                result["fallback_provider_id"] = fallback_provider_id
+                result["fallback_model_id"] = fallback_model_id
+            return result
         except LilaStoreIntegrityError:
             raise
         except Exception:
@@ -1392,16 +1406,34 @@ class SqliteLilaStore:
         conversation_id: str,
         provider_id: str,
         model_id: str,
+        fallback_provider_id: str | None = None,
+        fallback_model_id: str | None = None,
     ) -> None:
-        """Persist an explicit owner-scoped provider/model selection for one conversation."""
+        """Persist an encrypted owner-scoped primary and optional fallback selection."""
         self._validate_model_selection(provider_id, model_id)
+        if (fallback_provider_id is None) != (fallback_model_id is None):
+            raise ValueError("fallback provider and model must be configured together")
+        if fallback_provider_id is not None:
+            self._validate_model_selection(fallback_provider_id, fallback_model_id)
+            if fallback_provider_id == provider_id:
+                raise ValueError("fallback must use a different provider")
         await self.initialize()
         owner_key = self._owner_key(principal_id)
         conversation_key = self._resource_key("conversation", conversation_id, 128)
         provider_key = self._resource_key("provider", provider_id, 64)
+        fallback_provider_key = (
+            self._resource_key("provider", fallback_provider_id, 64)
+            if fallback_provider_id is not None else None
+        )
+        selection_payload = {"provider_id": provider_id, "model_id": model_id}
+        if fallback_provider_id is not None:
+            selection_payload.update({
+                "fallback_provider_id": fallback_provider_id,
+                "fallback_model_id": fallback_model_id,
+            })
         payload = bytearray(
             json.dumps(
-                {"provider_id": provider_id, "model_id": model_id},
+                selection_payload,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -1418,6 +1450,7 @@ class SqliteLilaStore:
             owner_key,
             conversation_key,
             provider_key,
+            fallback_provider_key,
             nonce,
             ciphertext,
         )
@@ -1427,6 +1460,7 @@ class SqliteLilaStore:
         owner_key: str,
         conversation_key: str,
         provider_key: str,
+        fallback_provider_key: str | None,
         nonce: bytes,
         ciphertext: bytes,
     ) -> None:
@@ -1445,6 +1479,25 @@ class SqliteLilaStore:
                 )
                 if not provider["enabled"]:
                     raise ProviderDisabled("Provider is disabled")
+                if fallback_provider_key is not None:
+                    if fallback_provider_key == provider_key:
+                        raise ValueError("fallback must use a different provider")
+                    fallback_row = connection.execute(
+                        "SELECT nonce, ciphertext FROM lila_providers WHERE owner_key=? AND provider_key=?",
+                        (owner_key, fallback_provider_key),
+                    ).fetchone()
+                    if fallback_row is None:
+                        raise ProviderNotFound("Fallback provider not found for owner")
+                    fallback_provider = self._decode_provider(
+                        owner_key,
+                        fallback_provider_key,
+                        fallback_row["nonce"],
+                        fallback_row["ciphertext"],
+                    )
+                    if not fallback_provider["enabled"]:
+                        raise ProviderDisabled("Fallback provider is disabled")
+                    if "chat" not in fallback_provider.get("capabilities", []):
+                        raise ValueError("Fallback provider does not support chat")
                 now = int(time.time() * 1000)
                 connection.execute(
                     """INSERT INTO lila_conversation_models(
@@ -1471,7 +1524,7 @@ class SqliteLilaStore:
         *,
         principal_id: str,
         conversation_id: str,
-    ) -> dict[str, str] | None:
+    ) -> dict[str, str | None] | None:
         await self.initialize()
         owner_key = self._owner_key(principal_id)
         conversation_key = self._resource_key("conversation", conversation_id, 128)
