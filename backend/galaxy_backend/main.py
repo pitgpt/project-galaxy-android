@@ -45,6 +45,7 @@ from .lila_core.service import CoreTurnService, ModelAdapterContractError
 from .lila_core.provider_routing import (
     OwnerScopedModelAdapterResolver,
     ProviderSelectionRequired,
+    SelectedFallbackProviderUnavailable,
     SelectedProviderUnavailable,
     create_provider_model_adapter,
 )
@@ -983,6 +984,8 @@ def create_app(
             selected=True,
             provider_id=selection["provider_id"],
             model_id=selection["model_id"],
+            fallback_provider_id=selection.get("fallback_provider_id"),
+            fallback_model_id=selection.get("fallback_model_id"),
         )
 
     @app.put(
@@ -1068,12 +1071,87 @@ def create_app(
                 status_code=422,
                 detail="The selected model is not available from this provider",
             )
+
+        if payload.fallback_provider_id is not None:
+            fallback_model_id = payload.fallback_model_id
+            if fallback_model_id is None:
+                raise HTTPException(status_code=422, detail="Fallback model is required")
+            try:
+                fallback_record = await registry.get_provider(
+                    principal_id=user_id,
+                    provider_id=payload.fallback_provider_id,
+                )
+            except Exception:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Lila fallback provider catalog is temporarily unavailable",
+                    headers={"Retry-After": "5"},
+                ) from None
+            if fallback_record is None:
+                raise HTTPException(status_code=404, detail="Lila fallback provider not found")
+            if not fallback_record.get("enabled"):
+                raise HTTPException(status_code=409, detail="Lila fallback provider is disabled")
+            if "chat" not in fallback_record.get("capabilities", []):
+                raise HTTPException(status_code=422, detail="Lila fallback provider does not support chat")
+            try:
+                fallback_type = str(fallback_record["provider_type"])
+                fallback_url = str(fallback_record["base_url"])
+                fallback_timeout = float(fallback_record["timeout_seconds"])
+                validate_provider_endpoint(fallback_type, fallback_url)
+                fallback_config = OpenAICompatibleConfig(
+                    provider_id=payload.fallback_provider_id,
+                    base_url=fallback_url,
+                    model_id=fallback_model_id,
+                    api_key=fallback_record.get("api_key"),
+                    timeout_seconds=fallback_timeout,
+                    system_prompt=request.app.state.settings.lila_system_prompt,
+                )
+                fallback_client = request.app.state.lila_provider_http_client_factory(
+                    fallback_type,
+                    fallback_timeout,
+                )
+                async with fallback_client:
+                    fallback_adapter = create_provider_model_adapter(
+                        fallback_client, fallback_type, fallback_config
+                    )
+                    fallback_discovered = await fallback_adapter.discover_models()
+            except ModelProviderConfigurationError as exc:
+                raise HTTPException(status_code=502, detail=exc.public_detail) from None
+            except ModelProviderUnavailable:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Lila fallback model endpoint is temporarily unavailable",
+                    headers={"Retry-After": "5"},
+                ) from None
+            except ModelAdapterContractError:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Lila fallback provider returned an invalid model catalog",
+                ) from None
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Stored Lila fallback provider configuration is invalid",
+                ) from None
+            except Exception:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Lila fallback model selection is temporarily unavailable",
+                    headers={"Retry-After": "5"},
+                ) from None
+            if fallback_discovered is not None and fallback_model_id not in fallback_discovered:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The selected fallback model is not available from this provider",
+                )
         try:
             await store.set_conversation_model(
                 principal_id=user_id,
                 conversation_id=conversation_id,
                 provider_id=payload.provider_id,
                 model_id=payload.model_id,
+                fallback_provider_id=payload.fallback_provider_id,
+                fallback_model_id=payload.fallback_model_id,
             )
         except ProviderNotFound:
             raise HTTPException(status_code=404, detail="Lila provider not found") from None
@@ -1093,6 +1171,8 @@ def create_app(
             selected=True,
             provider_id=payload.provider_id,
             model_id=payload.model_id,
+            fallback_provider_id=payload.fallback_provider_id,
+            fallback_model_id=payload.fallback_model_id,
         )
 
     @app.post(
@@ -1255,6 +1335,11 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Select a model provider for this conversation before sending a message.",
+            ) from None
+        except SelectedFallbackProviderUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The primary provider failed before generation and the configured fallback is unavailable; choose another provider or disable fallback.",
             ) from None
         except SelectedProviderUnavailable:
             raise HTTPException(
