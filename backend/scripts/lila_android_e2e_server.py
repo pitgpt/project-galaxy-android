@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
-from time import time
+from threading import Lock, Thread
+from time import monotonic, time
 from urllib.parse import urlsplit
 
 import jwt
@@ -15,6 +16,62 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from galaxy_backend.config import Settings
 from galaxy_backend.main import create_app
+
+
+MAX_DIAGNOSTIC_BYTES = 16 * 1024
+
+
+def _safe_route_template(request) -> str:
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    if isinstance(template, str) and template.startswith("/v1/lila/") and len(template) <= 128:
+        return template
+    return "/unmatched"
+
+
+def _diagnostic_category(status: int, exception: Exception | None = None) -> str:
+    if exception is not None:
+        if isinstance(exception, ssl.SSLError):
+            return "tls_error"
+        if isinstance(exception, TimeoutError):
+            return "timeout"
+        if isinstance(exception, ConnectionError):
+            return "connection_error"
+        if isinstance(exception, OSError):
+            return "io_error"
+        return "internal_error"
+    if status in (401, 403):
+        return "authentication"
+    if status == 404:
+        return "not_found"
+    if status == 422:
+        return "validation"
+    if status == 429:
+        return "rate_limited"
+    if status >= 500:
+        return "server_error"
+    if status >= 400:
+        return "client_error"
+    return "ok"
+
+
+def _append_bounded_diagnostic(path: Path, lock: Lock, record: dict[str, object]) -> None:
+    encoded = (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\\n").encode("utf-8")
+    with lock:
+        try:
+            current_size = path.stat().st_size
+        except FileNotFoundError:
+            current_size = 0
+        if current_size + len(encoded) > MAX_DIAGNOSTIC_BYTES:
+            return
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.chmod(path, 0o600)
+            with os.fdopen(descriptor, "ab", closefd=False) as output:
+                output.write(encoded)
+                output.flush()
+        finally:
+            os.close(descriptor)
 
 
 class _JwksHandler(BaseHTTPRequestHandler):
@@ -43,6 +100,11 @@ def main() -> None:
     tls_key = os.environ["LILA_ANDROID_E2E_TLS_KEY"]
     config_path = Path(os.environ["LILA_ANDROID_E2E_CONFIG_PATH"])
     runner_temp = Path(os.environ["RUNNER_TEMP"])
+    diagnostics_path = runner_temp / "lila-android-e2e" / "requests.jsonl"
+    diagnostics_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    diagnostics_path.write_bytes(b"")
+    os.chmod(diagnostics_path, 0o600)
+    diagnostics_lock = Lock()
 
     parsed = urlsplit(ollama_url)
     if (
@@ -127,6 +189,42 @@ def main() -> None:
         os.fsync(output.fileno())
 
     app = create_app(settings=settings)
+
+    @app.middleware("http")
+    async def safe_e2e_request_diagnostics(request, call_next):
+        request_id = request.headers.get("X-Request-ID", "").strip()
+        if (
+            not request_id
+            or len(request_id) > 128
+            or any(ord(character) < 33 or ord(character) > 126 for character in request_id)
+        ):
+            request_id = uuid.uuid4().hex
+        started = monotonic()
+        status_code = 500
+        category = "internal_error"
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            category = _diagnostic_category(status_code)
+            response.headers["X-Request-ID"] = request_id
+            return response
+        except Exception as exception:
+            category = _diagnostic_category(status_code, exception)
+            raise
+        finally:
+            _append_bounded_diagnostic(
+                diagnostics_path,
+                diagnostics_lock,
+                {
+                    "request_id": request_id,
+                    "method": request.method,
+                    "route": _safe_route_template(request),
+                    "status": status_code,
+                    "category": category,
+                    "duration_ms": round((monotonic() - started) * 1000, 2),
+                },
+            )
+
     try:
         uvicorn.run(
             app,
