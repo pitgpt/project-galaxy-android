@@ -10,6 +10,7 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import java.util.UUID
 
 data class LilaProviderSummary(
     val providerId: String,
@@ -57,7 +58,8 @@ class HttpLilaProviderCatalog(
     private val readTimeoutMillis: Int = 20_000,
     private val connectionFactory: (URL) -> HttpURLConnection = {
         it.openConnection() as HttpURLConnection
-    }
+    },
+    private val requestIdProvider: () -> String = { UUID.randomUUID().toString() }
 ) {
     private val normalizedBaseUrl = baseUrl.trim().trimEnd('/')
     private val parsedUri: URI? = runCatching { URI(normalizedBaseUrl) }.getOrNull()
@@ -278,6 +280,10 @@ class HttpLilaProviderCatalog(
             connection.doInput = true
             connection.doOutput = body != null
             connection.setRequestProperty("Accept", "application/json")
+            val requestId = requestIdProvider().takeIf { value ->
+                value.length in 1..128 && value.all { it.code in 33..126 }
+            } ?: UUID.randomUUID().toString()
+            connection.setRequestProperty("X-Request-ID", requestId)
             connection.setRequestProperty("Authorization", "Bearer $token")
             if (body != null) {
                 requestBytes = body.toString().toByteArray(Charsets.UTF_8)
