@@ -66,6 +66,39 @@ class ImageGenerationPanelTest {
     }
 
     @Test
+    fun recoveryDoesNotLeakAnotherOwnersRequestForTheSameCharacter() {
+        val olderSelected = request(
+            "owner-a-old",
+            "character-a",
+            10L,
+            conversationId = "owner-a:conversation"
+        )
+        val newerOtherOwner = request(
+            "owner-b-new",
+            "character-a",
+            30L,
+            conversationId = "owner-b:conversation"
+        )
+        val newestSelected = request(
+            "owner-a-new",
+            "character-a",
+            20L,
+            conversationId = "owner-a:conversation"
+        )
+
+        val restored = latestRecoverableImageGenerationRequest(
+            characterId = "character-a",
+            conversationId = "owner-a:conversation",
+            requests = listOf(olderSelected, newerOtherOwner, newestSelected),
+            jobs = emptyList()
+        )
+
+        assertEquals(newestSelected, restored?.request)
+        assertNull(restored?.job)
+        assertTrue(restored?.canResumeSafely == true)
+    }
+
+    @Test
     fun preparedOrOrphanRequestCanBeResumedSafely() {
         val saved = request("prepared", "character-a", 10L)
         val restored = latestRecoverableImageGenerationRequest(
@@ -118,10 +151,15 @@ class ImageGenerationPanelTest {
         assertArrayEquals(ByteArray(plaintext.size), plaintext)
     }
 
-    private fun request(id: String, characterId: String, createdAt: Long) =
+    private fun request(
+        id: String,
+        characterId: String,
+        createdAt: Long,
+        conversationId: String = characterId
+    ) =
         ImageGenerationRequest(
             id = id,
-            conversationId = characterId,
+            conversationId = conversationId,
             characterId = characterId,
             prompt = "private prompt",
             createdAtEpochMillis = createdAt
