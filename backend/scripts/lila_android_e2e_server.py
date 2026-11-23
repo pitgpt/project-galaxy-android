@@ -56,7 +56,7 @@ def _diagnostic_category(status: int, exception: Exception | None = None) -> str
 
 
 def _append_bounded_diagnostic(path: Path, lock: Lock, record: dict[str, object]) -> None:
-    encoded = (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\\n").encode("utf-8")
+    encoded = (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
     with lock:
         try:
             current_size = path.stat().st_size
