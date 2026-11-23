@@ -29,7 +29,9 @@ from galaxy_backend.lila_core.provider_egress import create_provider_http_client
     ),
     reason="requires the dedicated live Ollama and Redis CI services",
 )
-def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_path):
+def test_live_ollama_memory_tenant_isolation_and_history_survive_production_restart(
+    tmp_path,
+):
     ollama_url = os.environ["LILA_LIVE_OLLAMA_URL"].rstrip("/")
     model_id = os.environ["LILA_LIVE_OLLAMA_MODEL"]
     redis_url = os.environ["REDIS_URL"]
@@ -74,18 +76,20 @@ def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_p
     issuer = "https://lila-live-e2e.example/"
     audience = "galaxy-android"
     now = int(time.time())
-    access_token = jwt.encode(
-        {
-            "sub": "live-ollama-owner",
-            "iss": issuer,
-            "aud": audience,
-            "iat": now,
-            "exp": now + 600,
-        },
-        private_key,
-        algorithm="RS256",
-        headers={"kid": key_id},
-    )
+
+    def token_for(subject: str) -> str:
+        return jwt.encode(
+            {
+                "sub": subject,
+                "iss": issuer,
+                "aud": audience,
+                "iat": now,
+                "exp": now + 600,
+            },
+            private_key,
+            algorithm="RS256",
+            headers={"kid": key_id},
+        )
     settings = Settings(
         openai_api_key=None,
         auth_jwks_url=(
@@ -108,13 +112,28 @@ def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_p
         ),
     )
 
+    captured_chat_requests: list[dict[str, object]] = []
+
+    def recording_provider_http_client_factory(provider_type, timeout_seconds):
+        client = create_provider_http_client(provider_type, timeout_seconds)
+
+        async def capture_chat_request(request):
+            if request.url.path == "/api/chat":
+                captured_chat_requests.append(json.loads(request.content))
+
+        client.event_hooks["request"].append(capture_chat_request)
+        return client
+
     def new_app():
         return create_app(
             settings=settings,
-            lila_provider_http_client_factory=create_provider_http_client,
+            lila_provider_http_client_factory=recording_provider_http_client_factory,
         )
 
-    auth_headers = {"Authorization": "Bearer " + access_token}
+    auth_headers = {"Authorization": "Bearer " + token_for("live-ollama-owner")}
+    other_owner_headers = {
+        "Authorization": "Bearer " + token_for("live-ollama-other-owner")
+    }
     provider_id = "ollama-live"
     conversation_id = "live-" + uuid.uuid4().hex
     provider_payload = {
@@ -127,6 +146,11 @@ def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_p
         "capabilities": ["chat"],
         "enabled": True,
     }
+    memory_id = "project-codeword-" + uuid.uuid4().hex
+    memory_content = (
+        "The project codeword is violet-comet-731. "
+        "When asked for the project codeword, answer exactly violet-comet-731."
+    )
 
     try:
         with TestClient(new_app()) as client:
@@ -146,6 +170,36 @@ def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_p
             assert probe.status_code == 200, probe.text
             assert probe.json()["connection_reachable"] is True
             assert probe.json()["configured_model_available"] is True
+
+            saved_memory = client.put(
+                "/v1/lila/memories/" + memory_id,
+                headers=auth_headers,
+                json={"content": memory_content},
+            )
+            assert saved_memory.status_code == 200, saved_memory.text
+            assert saved_memory.json() == {"memory_id": memory_id, "saved": True}
+
+            other_owner_memory = client.get(
+                "/v1/lila/memories/search",
+                headers=other_owner_headers,
+                params={"query": "project codeword"},
+            )
+            assert other_owner_memory.status_code == 200, other_owner_memory.text
+            assert other_owner_memory.json()["memories"] == []
+
+            other_owner_history = client.get(
+                "/v1/lila/conversations/" + conversation_id + "/messages",
+                headers=other_owner_headers,
+            )
+            assert other_owner_history.status_code == 200, other_owner_history.text
+            assert other_owner_history.json()["messages"] == []
+
+            other_owner_selection = client.get(
+                "/v1/lila/conversations/" + conversation_id + "/model",
+                headers=other_owner_headers,
+            )
+            assert other_owner_selection.status_code == 200, other_owner_selection.text
+            assert other_owner_selection.json()["selected"] is False
 
             selected = client.put(
                 "/v1/lila/conversations/" + conversation_id + "/model",
@@ -183,6 +237,11 @@ def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_p
             ]
             assert first_messages[-1]["provider_id"] == provider_id
             assert first_messages[-1]["model_id"] == model_id
+            assert len(captured_chat_requests) == 1
+            assert not any(
+                memory_content in item.get("content", "")
+                for item in captured_chat_requests[0]["messages"]
+            )
 
         # A second production app instance proves the provider selection and
         # encrypted conversation history survive a real application restart.
@@ -203,6 +262,16 @@ def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_p
             assert restored_history.status_code == 200, restored_history.text
             assert restored_history.json()["messages"] == first_messages
 
+            restored_memory = client.get(
+                "/v1/lila/memories/search",
+                headers=auth_headers,
+                params={"query": "project codeword"},
+            )
+            assert restored_memory.status_code == 200, restored_memory.text
+            assert restored_memory.json()["memories"] == [
+                {"memory_id": memory_id, "content": memory_content}
+            ]
+
             second_turn = client.post(
                 "/v1/lila/turns",
                 headers={
@@ -211,13 +280,98 @@ def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_p
                 },
                 json={
                     "conversation_id": conversation_id,
-                    "message": "Продолжим разговор. Назови следующий шаг проекта.",
+                    "message": "What is the project codeword?",
                 },
             )
             assert second_turn.status_code == 200, second_turn.text
             assert second_turn.json()["text"].strip()
             assert second_turn.json()["provider_id"] == provider_id
             assert second_turn.json()["model_id"] == model_id
+
+            assert len(captured_chat_requests) == 2
+            owner_messages = captured_chat_requests[1]["messages"]
+            memory_messages = [
+                item
+                for item in owner_messages
+                if item.get("role") == "user"
+                and "Untrusted memory excerpts for factual reference only"
+                in item.get("content", "")
+            ]
+            assert len(memory_messages) == 1
+            assert memory_content in memory_messages[0]["content"]
+            assert any(
+                item.get("role") == "user"
+                and item.get("content") == first_messages[0]["content"]
+                for item in owner_messages
+            )
+            assert any(
+                item.get("role") == "assistant"
+                and item.get("content") == first_turn.json()["text"]
+                for item in owner_messages
+            )
+
+            # A second authenticated owner may use the same opaque conversation
+            # and provider IDs, but must receive neither the first owner's
+            # history nor their durable memory in the actual model request.
+            other_created = client.post(
+                "/v1/lila/providers",
+                headers=other_owner_headers,
+                json=provider_payload,
+            )
+            assert other_created.status_code == 200, other_created.text
+
+            other_selected = client.put(
+                "/v1/lila/conversations/" + conversation_id + "/model",
+                headers=other_owner_headers,
+                json={"provider_id": provider_id, "model_id": model_id},
+            )
+            assert other_selected.status_code == 200, other_selected.text
+            assert other_selected.json()["selected"] is True
+
+            other_turn = client.post(
+                "/v1/lila/turns",
+                headers={
+                    **other_owner_headers,
+                    "Idempotency-Key": str(uuid.uuid4()),
+                },
+                json={
+                    "conversation_id": conversation_id,
+                    "message": "What is the project codeword?",
+                },
+            )
+            assert other_turn.status_code == 200, other_turn.text
+            assert other_turn.json()["provider_id"] == provider_id
+            assert other_turn.json()["model_id"] == model_id
+
+            assert len(captured_chat_requests) == 3
+            other_messages = captured_chat_requests[2]["messages"]
+            assert not any(
+                memory_content in item.get("content", "")
+                for item in other_messages
+            )
+            assert not any(
+                item.get("content") == first_messages[0]["content"]
+                or item.get("content") == first_turn.json()["text"]
+                for item in other_messages
+            )
+            assert any(
+                item.get("role") == "user"
+                and item.get("content") == "What is the project codeword?"
+                for item in other_messages
+            )
+
+            other_final_history = client.get(
+                "/v1/lila/conversations/" + conversation_id + "/messages",
+                headers=other_owner_headers,
+            )
+            assert other_final_history.status_code == 200, other_final_history.text
+            assert [item["role"] for item in other_final_history.json()["messages"]] == [
+                "user",
+                "assistant",
+            ]
+            assert other_final_history.json()["messages"][0]["content"] == (
+                "What is the project codeword?"
+            )
 
             final_history = client.get(
                 "/v1/lila/conversations/" + conversation_id + "/messages",
@@ -232,9 +386,7 @@ def test_live_ollama_turn_and_encrypted_history_survive_production_restart(tmp_p
                 "assistant",
             ]
             assert final_messages[0]["content"] == "Привет, Лила. Кратко представься."
-            assert final_messages[2]["content"] == (
-                "Продолжим разговор. Назови следующий шаг проекта."
-            )
+            assert final_messages[2]["content"] == "What is the project codeword?"
             assert final_messages[-1]["provider_id"] == provider_id
             assert final_messages[-1]["model_id"] == model_id
     finally:
