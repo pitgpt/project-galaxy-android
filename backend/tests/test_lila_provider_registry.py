@@ -800,6 +800,8 @@ def test_conversation_model_api_validates_discovery_and_restores_selection(tmp_p
         "selected": True,
         "provider_id": "cloud-main",
         "model_id": "model-b",
+        "fallback_provider_id": None,
+        "fallback_model_id": None,
     }
     assert restored.status_code == 200
     assert restored.json() == selected.json()
@@ -1508,6 +1510,10 @@ def test_turn_result_status_is_owner_and_conversation_scoped_and_replays_complet
             "avatar_events": [],
             "provider_id": "cloud-primary",
             "model_id": "model-a",
+            "fallback_used": False,
+            "fallback_from_provider_id": None,
+            "fallback_from_model_id": None,
+            "fallback_reason": None,
         },
     }
     assert "private status request" not in completed.text
