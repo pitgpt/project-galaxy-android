@@ -169,6 +169,86 @@ function Test-ConversationIdDerivation {
     }
 }
 
+function Read-BoundedResponseText {
+    param(
+        [Parameter(Mandatory = $true)][System.IO.Stream]$Stream,
+        [long]$ContentLength = -1,
+        [ValidateRange(1, 4194304)]
+        [int]$MaxResponseBytes = 1048576
+    )
+
+    $buffer = New-Object byte[] 8192
+    $memoryStream = [System.IO.MemoryStream]::new()
+    $internalBuffer = $null
+    try {
+        if ($ContentLength -gt $MaxResponseBytes) {
+            return [pscustomobject]@{ Text = $null; TooLarge = $true }
+        }
+
+        while ($true) {
+            $remaining = [long]$MaxResponseBytes - $memoryStream.Length
+            $readLimit = [int][Math]::Min([long]$buffer.Length, $remaining + 1)
+            $read = $Stream.Read($buffer, 0, $readLimit)
+            if ($read -le 0) {
+                break
+            }
+            if ($read -gt $remaining) {
+                return [pscustomobject]@{ Text = $null; TooLarge = $true }
+            }
+            $memoryStream.Write($buffer, 0, $read)
+        }
+
+        $internalBuffer = [byte[]]$memoryStream.GetBuffer()
+        $text = [Text.Encoding]::UTF8.GetString(
+            $internalBuffer,
+            0,
+            [int]$memoryStream.Length
+        )
+        return [pscustomobject]@{ Text = $text; TooLarge = $false }
+    }
+    finally {
+        [Array]::Clear($buffer, 0, $buffer.Length)
+        if ($null -ne $memoryStream) {
+            $internalBuffer = [byte[]]$memoryStream.GetBuffer()
+            if ($internalBuffer.Length -gt 0) {
+                [Array]::Clear($internalBuffer, 0, $internalBuffer.Length)
+            }
+            $memoryStream.Dispose()
+        }
+    }
+}
+
+function Test-BoundedResponseRead {
+    $exactBytes = [Text.Encoding]::UTF8.GetBytes('1234')
+    $oversizedBytes = [Text.Encoding]::UTF8.GetBytes('12345')
+    $exactStream = [System.IO.MemoryStream]::new($exactBytes, $false)
+    $declaredOversizedStream = [System.IO.MemoryStream]::new($oversizedBytes, $false)
+    $chunkedOversizedStream = [System.IO.MemoryStream]::new($oversizedBytes, $false)
+    try {
+        $exact = Read-BoundedResponseText -Stream $exactStream -ContentLength 4 -MaxResponseBytes 4
+        if ($exact.TooLarge -or $exact.Text -ne '1234') {
+            throw 'The bounded response reader rejected a body at the exact limit.'
+        }
+
+        $declaredOversized = Read-BoundedResponseText -Stream $declaredOversizedStream -ContentLength 5 -MaxResponseBytes 4
+        if (-not $declaredOversized.TooLarge -or $declaredOversizedStream.Position -ne 0) {
+            throw 'The bounded response reader did not reject an oversized Content-Length before reading.'
+        }
+
+        $chunkedOversized = Read-BoundedResponseText -Stream $chunkedOversizedStream -ContentLength -1 -MaxResponseBytes 4
+        if (-not $chunkedOversized.TooLarge -or $chunkedOversizedStream.Position -ne 5) {
+            throw 'The bounded response reader did not stop after the limit plus one byte.'
+        }
+    }
+    finally {
+        $exactStream.Dispose()
+        $declaredOversizedStream.Dispose()
+        $chunkedOversizedStream.Dispose()
+        [Array]::Clear($exactBytes, 0, $exactBytes.Length)
+        [Array]::Clear($oversizedBytes, 0, $oversizedBytes.Length)
+    }
+}
+
 function Invoke-LilaApi {
     param(
         [Parameter(Mandatory = $true)]
@@ -177,12 +257,17 @@ function Invoke-LilaApi {
         [Parameter(Mandatory = $true)]
         [string]$Path,
         [object]$Body,
-        [hashtable]$ExtraHeaders = @{}
+        [hashtable]$ExtraHeaders = @{},
+        [ValidateRange(1, 4194304)]
+        [int]$MaxResponseBytes = 1048576
     )
 
     $request = $null
     $response = $null
+    $responseStream = $null
     $json = $null
+    $responseText = $null
+    $data = $null
     try {
         $uri = [Uri]::new($script:BackendBaseUrl + $Path)
         $request = [System.Net.Http.HttpRequestMessage]::new(
@@ -213,17 +298,10 @@ function Invoke-LilaApi {
             $json = $null
         }
 
-        $response = $script:HttpClient.SendAsync($request).GetAwaiter().GetResult()
-        $responseText = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-        $data = $null
-        if (-not [string]::IsNullOrWhiteSpace($responseText)) {
-            try {
-                $data = ConvertFrom-Json -InputObject $responseText -ErrorAction Stop
-            }
-            catch {
-                $data = $null
-            }
-        }
+        $response = $script:HttpClient.SendAsync(
+            $request,
+            [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
+        ).GetAwaiter().GetResult()
 
         $headers = @{}
         foreach ($header in $response.Headers) {
@@ -233,11 +311,41 @@ function Invoke-LilaApi {
             $headers[$header.Key] = [string]::Join(',', [string[]]$header.Value)
         }
 
+        $contentLength = -1
+        if ($null -ne $response.Content.Headers.ContentLength) {
+            $contentLength = [long]$response.Content.Headers.ContentLength
+        }
+        $responseStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $bounded = Read-BoundedResponseText -Stream $responseStream -ContentLength $contentLength -MaxResponseBytes $MaxResponseBytes
+
+        if ($bounded.TooLarge) {
+            return [pscustomobject]@{
+                StatusCode = [int]$response.StatusCode
+                Data = $null
+                Headers = $headers
+                TransportError = $false
+                ResponseTooLarge = $true
+                ResponseLimitBytes = $MaxResponseBytes
+            }
+        }
+
+        $responseText = $bounded.Text
+        if (-not [string]::IsNullOrWhiteSpace($responseText)) {
+            try {
+                $data = ConvertFrom-Json -InputObject $responseText -ErrorAction Stop
+            }
+            catch {
+                $data = $null
+            }
+        }
+
         return [pscustomobject]@{
             StatusCode = [int]$response.StatusCode
             Data = $data
             Headers = $headers
             TransportError = $false
+            ResponseTooLarge = $false
+            ResponseLimitBytes = $MaxResponseBytes
         }
     }
     catch {
@@ -246,10 +354,17 @@ function Invoke-LilaApi {
             Data = $null
             Headers = @{}
             TransportError = $true
+            ResponseTooLarge = $false
+            ResponseLimitBytes = $MaxResponseBytes
         }
     }
     finally {
         $json = $null
+        $responseText = $null
+        $data = $null
+        if ($null -ne $responseStream) {
+            $responseStream.Dispose()
+        }
         if ($null -ne $response) {
             $response.Dispose()
         }
@@ -279,6 +394,9 @@ function Assert-LilaSuccess {
     if ($Result.TransportError) {
         throw "$Operation could not reach the HTTPS backend. No request body or credentials were printed."
     }
+    if ($Result.ResponseTooLarge) {
+        throw "$Operation response exceeded the $($Result.ResponseLimitBytes)-byte safety limit; the body was not parsed."
+    }
     if ($Result.StatusCode -lt 200 -or $Result.StatusCode -ge 300) {
         $detail = Get-SafeApiDetail -Result $Result
         throw "$Operation failed (HTTP $($Result.StatusCode)): $detail"
@@ -299,7 +417,7 @@ function Get-TurnStatus {
         '/turns/' + $IdempotencyKey
     $result = Invoke-LilaApi -Method GET -Path $path
 
-    if ($result.TransportError) {
+    if ($result.TransportError -or $result.ResponseTooLarge) {
         return [pscustomobject]@{ Kind = 'unavailable'; Response = $null }
     }
     if ($result.StatusCode -eq 404) {
@@ -332,9 +450,20 @@ function Send-LilaTurnSafely {
     $headers = @{ 'Idempotency-Key' = $IdempotencyKey }
     $first = Invoke-LilaApi -Method POST -Path $path -Body $body -ExtraHeaders $headers
 
-    if (-not $first.TransportError -and
+    if (-not $first.TransportError -and -not $first.ResponseTooLarge -and
         $first.StatusCode -ge 200 -and $first.StatusCode -lt 300) {
         return $first.Data
+    }
+
+    if ($first.ResponseTooLarge) {
+        $status = Get-TurnStatus -ConversationId $ConversationId -IdempotencyKey $IdempotencyKey
+        if ($status.Kind -eq 'completed') {
+            return $status.Response
+        }
+        if ($status.Kind -eq 'pending') {
+            throw 'The turn response exceeded the local size limit and the turn is still pending. Do not resend it.'
+        }
+        throw 'The turn response exceeded the local size limit and its outcome is not confirmed. Do not resend it.'
     }
 
     $retrySafe = $false
@@ -362,12 +491,12 @@ function Send-LilaTurnSafely {
         }
         if ($retrySafe -or $first.TransportError) {
             $retry = Invoke-LilaApi -Method POST -Path $path -Body $body -ExtraHeaders $headers
-            if (-not $retry.TransportError -and
+            if (-not $retry.TransportError -and -not $retry.ResponseTooLarge -and
                 $retry.StatusCode -ge 200 -and $retry.StatusCode -lt 300) {
                 return $retry.Data
             }
 
-            if ($retry.TransportError -or
+            if ($retry.TransportError -or $retry.ResponseTooLarge -or
                 $retry.StatusCode -eq 409 -or
                 ($retry.Headers.ContainsKey('X-Lila-Outcome-Unknown') -and
                  $retry.Headers['X-Lila-Outcome-Unknown'] -eq 'true')) {
@@ -396,8 +525,10 @@ function ConvertTo-EncodedPathSegment {
 
 # Verify the deterministic ID algorithm against a fixed vector before using credentials.
 Test-ConversationIdDerivation
+Test-BoundedResponseRead
 if ($SelfTest) {
     Write-Host 'Galaxy Android conversation-ID compatibility: PASS'
+    Write-Host 'Bounded HTTP response reader: PASS'
     exit 0
 }
 
