@@ -3,6 +3,7 @@ package com.pitgpt.galaxy.ui
 import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -41,6 +43,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -52,6 +56,7 @@ import com.pitgpt.galaxy.GalaxyApplication
 import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
+import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import com.pitgpt.galaxy.data.remote.GalaxyApiException
 import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
@@ -67,6 +72,13 @@ private val Muted = Color(0xFF9AA8C5)
 private val Ice = Color(0xFFB8D9FF)
 private const val CHARACTER_ID = "galaxy.default"
 internal const val PENDING_LILA_MESSAGE_PREFIX = "lila-pending-"
+
+private data class ConversationTimelineEntry(
+    val key: String,
+    val createdAtEpochMillis: Long,
+    val message: ConversationMessage? = null,
+    val image: StoredGeneratedImage? = null
+)
 
 @Composable
 fun GalaxyHome() {
@@ -382,8 +394,12 @@ fun GalaxyHome() {
     } else if (showComfyUiSettings) {
         ComfyUiSettingsScreen(store = app.providerStore, onBack = { showComfyUiSettings = false })
     } else if (showChat) {
+        val conversationId = conversationOwnerKey?.let { ownerKey ->
+            getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
+        } ?: conversationStorageKey(conversationOwnerKey, activeCharacterId)
         ConversationScreen(
             app = app,
+            conversationId = conversationId,
             characterId = activeCharacterId,
             characterName = characterName,
             messages = messages,
@@ -638,6 +654,7 @@ private fun HomeScreen(
 @Composable
 private fun ConversationScreen(
     app: GalaxyApplication,
+    conversationId: String,
     characterId: String,
     characterName: String,
     messages: List<ConversationMessage>,
@@ -655,8 +672,45 @@ private fun ConversationScreen(
     var sendError by remember { mutableStateOf<String?>(null) }
     var showImageGeneration by remember { mutableStateOf(false) }
     var imageGenerationSubmitting by remember { mutableStateOf(false) }
+    var generatedImages by remember(conversationId) {
+        mutableStateOf<List<StoredGeneratedImage>>(emptyList())
+    }
+    var imageHistoryRefreshKey by remember(conversationId) { mutableStateOf(0) }
+    var imageHistoryLoadError by remember(conversationId) { mutableStateOf(false) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+
+    LaunchedEffect(app, conversationId, imageHistoryRefreshKey) {
+        try {
+            generatedImages = app.generatedImages.listForConversation(conversationId)
+            imageHistoryLoadError = false
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            imageHistoryLoadError = true
+        }
+    }
+
+    val timeline = buildList {
+        messages.forEach { message ->
+            add(
+                ConversationTimelineEntry(
+                    key = "message:" + message.id,
+                    createdAtEpochMillis = message.createdAtEpochMillis,
+                    message = message
+                )
+            )
+        }
+        generatedImages.forEach { image ->
+            add(
+                ConversationTimelineEntry(
+                    key = "image:" + image.assetId,
+                    createdAtEpochMillis = image.createdAtEpochMillis,
+                    image = image
+                )
+            )
+        }
+    }.sortedWith(compareBy<ConversationTimelineEntry> { it.createdAtEpochMillis }.thenBy { it.key })
 
     fun submitDraft() {
         val value = draft.trim()
@@ -675,8 +729,8 @@ private fun ConversationScreen(
             }
         }
     }
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(timeline.size) {
+        if (timeline.isNotEmpty()) listState.animateScrollToItem(timeline.lastIndex)
     }
     Box(
         Modifier.fillMaxSize().background(
@@ -689,7 +743,7 @@ private fun ConversationScreen(
                 TextButton(
                     onClick = { showImageGeneration = !showImageGeneration },
                     enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting)
-                ) { Text(if (showImageGeneration) "К ЧАТУ" else "ОБРАЗ", color = Ice, fontSize = 9.sp) }
+                ) { Text(if (showImageGeneration) "СКРЫТЬ ОБРАЗ" else "ОБРАЗ", color = Ice, fontSize = 9.sp) }
                 Spacer(Modifier.weight(1f))
                 Column(horizontalAlignment = Alignment.End) {
                     Text(characterName, color = Color.White, fontSize = 18.sp,
@@ -710,17 +764,28 @@ private fun ConversationScreen(
                 Spacer(Modifier.height(8.dp))
             }
             if (showImageGeneration) {
-                CharacterScopedGenerationPanel(characterId) {
+                CharacterScopedGenerationPanel(conversationId) {
                     ImageGenerationPanel(
                         app = app,
                         characterId = characterId,
-                        modifier = Modifier.weight(1f),
-                        onSubmittingChanged = { imageGenerationSubmitting = it }
+                        conversationId = conversationId,
+                        modifier = Modifier.weight(0.42f),
+                        onSubmittingChanged = { imageGenerationSubmitting = it },
+                        onImagePersisted = { imageHistoryRefreshKey++ }
                     )
                 }
-            } else if (loadError != null) {
+            }
+            if (imageHistoryLoadError) {
+                Text(
+                    "Не удалось загрузить историю изображений из защищённого хранилища.",
+                    color = Color(0xFFE9BD70),
+                    fontSize = 10.sp
+                )
+            }
+            val chatWeight = if (showImageGeneration) 0.58f else 1f
+            if (loadError != null) {
                 Column(
-                    Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
+                    Modifier.fillMaxWidth().weight(chatWeight).padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -731,13 +796,13 @@ private fun ConversationScreen(
                         textAlign = TextAlign.Center)
                     TextButton(onClick = onRetryLoad) { Text("ПОВТОРИТЬ ЗАГРУЗКУ", color = Ice) }
                 }
-            } else if (isLoading && messages.isEmpty()) {
-                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            } else if (isLoading && timeline.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(chatWeight), contentAlignment = Alignment.Center) {
                     Text("Загружаю историю…", color = Muted, fontSize = 14.sp)
                 }
-            } else if (messages.isEmpty()) {
+            } else if (timeline.isEmpty()) {
                 Column(
-                    Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
+                    Modifier.fillMaxWidth().weight(chatWeight).padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -757,65 +822,74 @@ private fun ConversationScreen(
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    modifier = Modifier.weight(chatWeight).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     reverseLayout = false
                 ) {
-                    items(messages, key = { it.id }) { message ->
-                        val isUser = message.role == MessageRole.USER
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-                        ) {
-                            Column(
-                                Modifier.fillMaxWidth(0.86f)
-                                    .clip(RoundedCornerShape(18.dp))
-                                    .background(if (isUser) Color(0xFF354779) else Color(0xFF202A46))
-                                    .padding(horizontal = 14.dp, vertical = 11.dp)
-                            ) {
-                                val pendingDelivery = isUser &&
-                                    message.id.startsWith(PENDING_LILA_MESSAGE_PREFIX)
-                                Text(
-                                    when {
-                                        pendingDelivery -> "ТЫ · ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ"
-                                        isUser -> "ТЫ"
-                                        else -> characterName.uppercase()
-                                    },
-                                    color = if (pendingDelivery) Color(0xFFE9BD70) else Ice,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp
-                                )
-                                if (pendingDelivery) {
-                                    Spacer(Modifier.height(3.dp))
-                                    Text(
-                                        "Сообщение сохранено на устройстве. Результат отправки ещё не подтверждён.",
-                                        color = Color(0xFFE9BD70),
-                                        fontSize = 10.sp,
-                                        lineHeight = 14.sp
-                                    )
-                                    TextButton(
-                                        onClick = {
-                                            draft = message.content
-                                            sendError = null
-                                        }
+                    items(timeline, key = { it.key }) { entry ->
+                        when {
+                            entry.message != null -> {
+                                val message = entry.message
+                                val isUser = message.role == MessageRole.USER
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                                ) {
+                                    Column(
+                                        Modifier.fillMaxWidth(0.86f)
+                                            .clip(RoundedCornerShape(18.dp))
+                                            .background(if (isUser) Color(0xFF354779) else Color(0xFF202A46))
+                                            .padding(horizontal = 14.dp, vertical = 11.dp)
                                     ) {
+                                        val pendingDelivery = isUser &&
+                                            message.id.startsWith(PENDING_LILA_MESSAGE_PREFIX)
                                         Text(
-                                            "ПОВТОРИТЬ ЭТО СООБЩЕНИЕ",
-                                            color = Color(0xFFE9BD70),
-                                            fontSize = 9.sp
+                                            when {
+                                                pendingDelivery -> "ТЫ · ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ"
+                                                isUser -> "ТЫ"
+                                                else -> characterName.uppercase()
+                                            },
+                                            color = if (pendingDelivery) Color(0xFFE9BD70) else Ice,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            letterSpacing = 1.sp
                                         )
+                                        if (pendingDelivery) {
+                                            Spacer(Modifier.height(3.dp))
+                                            Text(
+                                                "Сообщение сохранено на устройстве. Результат отправки ещё не подтверждён.",
+                                                color = Color(0xFFE9BD70),
+                                                fontSize = 10.sp,
+                                                lineHeight = 14.sp
+                                            )
+                                            TextButton(
+                                                onClick = {
+                                                    draft = message.content
+                                                    sendError = null
+                                                }
+                                            ) {
+                                                Text(
+                                                    "ПОВТОРИТЬ ЭТО СООБЩЕНИЕ",
+                                                    color = Color(0xFFE9BD70),
+                                                    fontSize = 9.sp
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.height(5.dp))
+                                        Text(message.content, color = Color.White, fontSize = 15.sp,
+                                            lineHeight = 21.sp)
                                     }
                                 }
-                                Spacer(Modifier.height(5.dp))
-                                Text(message.content, color = Color.White, fontSize = 15.sp,
-                                    lineHeight = 21.sp)
                             }
+                            entry.image != null -> GeneratedImageTimelineBubble(
+                                app = app,
+                                image = entry.image,
+                                characterName = characterName
+                            )
                         }
                     }
                 }
-            }
-            Spacer(Modifier.height(12.dp))
+            }            Spacer(Modifier.height(12.dp))
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
                     .background(Color(0xFF1A2440)).padding(6.dp),
@@ -856,6 +930,69 @@ private fun ConversationScreen(
                 Text(error, color = Color(0xFFFF9B9B), fontSize = 11.sp,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
             }
+        }
+    }
+}
+
+@Composable
+private fun GeneratedImageTimelineBubble(
+    app: GalaxyApplication,
+    image: StoredGeneratedImage,
+    characterName: String
+) {
+    var bitmap by remember(image.assetId) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(image.assetId) { mutableStateOf(true) }
+    var isUnavailable by remember(image.assetId) { mutableStateOf(false) }
+
+    LaunchedEffect(app, image.assetId) {
+        try {
+            val plaintext = app.generatedImages.read(image.assetId)
+            bitmap = decodeGeneratedImageAndClearBytes(plaintext)
+            isUnavailable = bitmap == null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            isUnavailable = true
+        } finally {
+            isLoading = false
+        }
+    }
+
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(
+            Modifier.fillMaxWidth(0.86f)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF202A46))
+                .padding(horizontal = 14.dp, vertical = 11.dp)
+        ) {
+            Text(
+                "${characterName.uppercase()} · ИЗОБРАЖЕНИЕ",
+                color = Ice,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(Modifier.height(7.dp))
+            when {
+                bitmap != null -> Image(
+                    bitmap = requireNotNull(bitmap),
+                    contentDescription = "Сгенерированное изображение",
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                    contentScale = ContentScale.Fit
+                )
+                isLoading -> Text("Загружаю сохранённое изображение…", color = Muted, fontSize = 12.sp)
+                isUnavailable -> Text(
+                    "Метаданные изображения сохранены, но файл сейчас недоступен.",
+                    color = Color(0xFFE9BD70),
+                    fontSize = 11.sp
+                )
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "${image.width} × ${image.height} · ${image.mimeType}",
+                color = Muted,
+                fontSize = 9.sp
+            )
         }
     }
 }
