@@ -84,7 +84,10 @@ def main() -> None:
     )
 
     provider_id = "ollama-android-" + uuid.uuid4().hex[:12]
-    database_path = runner_temp / "lila-android-e2e.sqlite3"
+    database_directory = runner_temp / "lila-android-e2e-private"
+    database_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(database_directory, 0o700)
+    database_path = database_directory / "lila-android-e2e.sqlite3"
     settings = Settings(
         openai_api_key=None,
         auth_jwks_url=(
