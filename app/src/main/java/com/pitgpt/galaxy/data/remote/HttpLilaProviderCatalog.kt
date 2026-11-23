@@ -6,11 +6,17 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URL
+import java.net.UnknownHostException
 import java.util.UUID
+import javax.net.ssl.SSLException
 
 data class LilaProviderSummary(
     val providerId: String,
@@ -46,6 +52,13 @@ data class LilaConversationModelSelection(
     val modelId: String?
 )
 
+data class LilaRequestDiagnostic(
+    val requestId: String,
+    val operation: String,
+    val category: String,
+    val httpStatus: Int?
+)
+
 /**
  * Authenticated client for the owner-scoped Lila provider registry.
  * API keys are sent only to the configured Galaxy backend and are never
@@ -59,7 +72,8 @@ class HttpLilaProviderCatalog(
     private val connectionFactory: (URL) -> HttpURLConnection = {
         it.openConnection() as HttpURLConnection
     },
-    private val requestIdProvider: () -> String = { UUID.randomUUID().toString() }
+    private val requestIdProvider: () -> String = { UUID.randomUUID().toString() },
+    private val diagnosticObserver: (LilaRequestDiagnostic) -> Unit = {}
 ) {
     private val normalizedBaseUrl = baseUrl.trim().trimEnd('/')
     private val parsedUri: URI? = runCatching { URI(normalizedBaseUrl) }.getOrNull()
@@ -263,14 +277,23 @@ class HttpLilaProviderCatalog(
             throw GalaxyApiException(null, "Не удалось проверить авторизацию Galaxy.")
         } ?: throw GalaxyApiException(401, "Войди в аккаунт Galaxy для управления провайдерами.")
 
+        val requestId = requestIdProvider().takeIf { value ->
+            value.length in 1..128 && value.all { it.code in 33..126 }
+        } ?: UUID.randomUUID().toString()
+        val operation = diagnosticOperation(method, path)
         val connection = try {
             connectionFactory(URL(normalizedBaseUrl + path))
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
+            reportDiagnostic(
+                LilaRequestDiagnostic(requestId, operation, diagnosticCategory(exception), null)
+            )
             throw GalaxyApiException(null, "Не удалось подключиться к сервису Galaxy.")
         }
         var requestBytes: ByteArray? = null
+        var responseStatus: Int? = null
+        var diagnosticReported = false
         try {
             connection.requestMethod = method
             connection.instanceFollowRedirects = false
@@ -280,9 +303,6 @@ class HttpLilaProviderCatalog(
             connection.doInput = true
             connection.doOutput = body != null
             connection.setRequestProperty("Accept", "application/json")
-            val requestId = requestIdProvider().takeIf { value ->
-                value.length in 1..128 && value.all { it.code in 33..126 }
-            } ?: UUID.randomUUID().toString()
             connection.setRequestProperty("X-Request-ID", requestId)
             connection.setRequestProperty("Authorization", "Bearer $token")
             if (body != null) {
@@ -292,6 +312,7 @@ class HttpLilaProviderCatalog(
                 connection.executeCancellable { connection.outputStream.use { output -> output.write(requestBytes) } }
             }
             val status = connection.executeCancellable { connection.responseCode }
+            responseStatus = status
             if (status !in 200..299) {
                 val retrySafe = connection.getHeaderField("X-Lila-Retry-Safe")
                     ?.equals("true", ignoreCase = true) == true
@@ -302,6 +323,8 @@ class HttpLilaProviderCatalog(
                     outcomeUnknown -> "Провайдер мог получить тестовый запрос. Повтор может снова расходовать токены."
                     else -> safeMessageFor(status)
                 }
+                reportDiagnostic(LilaRequestDiagnostic(requestId, operation, "http", status))
+                diagnosticReported = true
                 throw GalaxyApiException(status, message)
             }
             val responseText = connection.executeCancellable { readBounded(connection.inputStream) }
@@ -311,15 +334,60 @@ class HttpLilaProviderCatalog(
                 throw GalaxyApiException(null, "Сервис Lila вернул некорректный JSON.")
             }
         } catch (exception: GalaxyApiException) {
+            if (!diagnosticReported) {
+                reportDiagnostic(
+                    LilaRequestDiagnostic(
+                        requestId,
+                        operation,
+                        if (exception.httpStatus != null) "http" else "invalid_response",
+                        responseStatus ?: exception.httpStatus
+                    )
+                )
+            }
             throw exception
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
+            if (!diagnosticReported) {
+                reportDiagnostic(
+                    LilaRequestDiagnostic(
+                        requestId,
+                        operation,
+                        diagnosticCategory(exception),
+                        responseStatus
+                    )
+                )
+            }
             throw GalaxyApiException(null, "Не удалось выполнить запрос к Lila Core.")
         } finally {
             requestBytes?.fill(0)
             connection.disconnect()
         }
+    }
+
+    private fun reportDiagnostic(diagnostic: LilaRequestDiagnostic) {
+        runCatching { diagnosticObserver(diagnostic) }
+    }
+
+    private fun diagnosticOperation(method: String, path: String): String = when {
+        method == "POST" && path == "/v1/lila/providers" -> "create-provider"
+        method == "POST" && Regex("/v1/lila/providers/[^/]+/probe").matches(path) ->
+            "probe-provider"
+        method == "PUT" && Regex("/v1/lila/conversations/[^/]+/model").matches(path) ->
+            "select-conversation-model"
+        method == "GET" && Regex("/v1/lila/conversations/[^/]+/model").matches(path) ->
+            "get-conversation-model"
+        else -> "other"
+    }
+
+    private fun diagnosticCategory(exception: Exception): String = when (exception) {
+        is SSLException -> "tls"
+        is UnknownHostException -> "dns"
+        is SocketTimeoutException -> "timeout"
+        is ConnectException -> "connection"
+        is SocketException -> "socket"
+        is IOException -> "io"
+        else -> "other"
     }
 
     private fun parseProvider(payload: JSONObject): LilaProviderSummary {
