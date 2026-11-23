@@ -39,7 +39,8 @@ param(
     [ValidateRange(1, 120)]
     [int]$TimeoutSeconds = 90,
     [string]$Message = 'Проверка связи: ответь по-русски одной короткой фразой и представься как Лила.',
-    [switch]$UpdateExisting
+    [switch]$UpdateExisting,
+    [switch]$SelfTest
 )
 
 Set-StrictMode -Version Latest
@@ -395,6 +396,10 @@ function ConvertTo-EncodedPathSegment {
 
 # Verify the deterministic ID algorithm against a fixed vector before using credentials.
 Test-ConversationIdDerivation
+if ($SelfTest) {
+    Write-Host 'Galaxy Android conversation-ID compatibility: PASS'
+    exit 0
+}
 
 if ([string]::IsNullOrWhiteSpace($BackendBaseUrl)) {
     $BackendBaseUrl = Read-Host 'Lila backend HTTPS base URL (for example https://lila.example.com)'
