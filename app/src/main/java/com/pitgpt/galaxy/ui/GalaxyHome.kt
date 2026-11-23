@@ -889,7 +889,8 @@ private fun ConversationScreen(
                         }
                     }
                 }
-            }            Spacer(Modifier.height(12.dp))
+            }
+            Spacer(Modifier.height(12.dp))
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp))
                     .background(Color(0xFF1A2440)).padding(6.dp),
