@@ -8,8 +8,15 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from galaxy_backend.config import Settings
+from galaxy_backend.lila_core.adapters import ModelProviderConnectionUnavailable
+from galaxy_backend.lila_core.context import AssembledContext
 from galaxy_backend.lila_core.contracts import CoreTurnResponse
 from galaxy_backend.lila_core.memory import MemorySnippet
+from galaxy_backend.lila_core.openai_compatible import ModelProviderUnavailable
+from galaxy_backend.lila_core.provider_routing import (
+    OwnerScopedModelAdapterResolver,
+    SelectedFallbackProviderUnavailable,
+)
 from galaxy_backend.lila_core.sqlite_store import (
     LilaStoreIntegrityError,
     ProviderAlreadyExists,
@@ -677,18 +684,35 @@ def test_conversation_model_selection_is_encrypted_owner_scoped_and_survives_res
         ),
         create_only=True,
     ))
+    run(first.save_provider(
+        principal_id="private-owner-a",
+        provider=make_provider(
+            provider_id="cloud-backup",
+            base_url="https://backup.vendor.net/v1",
+            model_id="backup-model",
+            api_key="backup-provider-secret",
+        ),
+        create_only=True,
+    ))
     run(first.set_conversation_model(
         principal_id="private-owner-a",
         conversation_id="private-conversation-a",
         provider_id="cloud-main",
         model_id="model-b",
+        fallback_provider_id="cloud-backup",
+        fallback_model_id="backup-model",
     ))
 
     second = SqliteLilaStore(path, KEY)
     assert run(second.get_conversation_model(
         principal_id="private-owner-a",
         conversation_id="private-conversation-a",
-    )) == {"provider_id": "cloud-main", "model_id": "model-b"}
+    )) == {
+        "provider_id": "cloud-main",
+        "model_id": "model-b",
+        "fallback_provider_id": "cloud-backup",
+        "fallback_model_id": "backup-model",
+    }
     assert run(second.get_conversation_model(
         principal_id="private-owner-b",
         conversation_id="private-conversation-a",
@@ -712,6 +736,9 @@ def test_conversation_model_selection_is_encrypted_owner_scoped_and_survives_res
         b"private-conversation-a",
         b"cloud-main",
         b"model-b",
+        b"cloud-backup",
+        b"backup-model",
+        b"backup-provider-secret",
     ):
         assert value not in database_bytes
 
@@ -1778,3 +1805,274 @@ def test_memory_api_rejects_blank_content_and_obeys_per_user_rate_limit(tmp_path
 
     assert invalid.status_code == 422
     assert rate_limited.status_code == 429
+
+
+
+def test_conversation_model_api_persists_and_restores_explicit_fallback(tmp_path):
+    factory_calls = []
+
+    async def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        if request.url.host == "backup.vendor.net":
+            return httpx.Response(200, json={"data": [{"id": "backup-model"}]})
+        return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    primary_payload = make_provider()
+    backup_payload = make_provider(
+        provider_id="cloud-backup",
+        base_url="https://backup.vendor.net/v1",
+        model_id="backup-model",
+        api_key="backup-secret",
+    )
+    with client:
+        primary = client.post("/v1/lila/providers", headers=auth(), json=primary_payload)
+        backup = client.post("/v1/lila/providers", headers=auth(), json=backup_payload)
+        selected = client.put(
+            "/v1/lila/conversations/conversation-fallback/model",
+            headers=auth(),
+            json={
+                "provider_id": "cloud-main",
+                "model_id": "model-a",
+                "fallback_provider_id": "cloud-backup",
+                "fallback_model_id": "backup-model",
+            },
+        )
+        restored = client.get(
+            "/v1/lila/conversations/conversation-fallback/model",
+            headers=auth(),
+        )
+        invalid_same_provider = client.put(
+            "/v1/lila/conversations/conversation-invalid/model",
+            headers=auth(),
+            json={
+                "provider_id": "cloud-main",
+                "model_id": "model-a",
+                "fallback_provider_id": "cloud-main",
+                "fallback_model_id": "model-a",
+            },
+        )
+
+    assert primary.status_code == 200
+    assert backup.status_code == 200
+    assert selected.status_code == 200
+    expected = {
+        "conversation_id": "conversation-fallback",
+        "selected": True,
+        "provider_id": "cloud-main",
+        "model_id": "model-a",
+        "fallback_provider_id": "cloud-backup",
+        "fallback_model_id": "backup-model",
+    }
+    assert selected.json() == expected
+    assert restored.json() == expected
+    assert invalid_same_provider.status_code == 422
+    assert factory_calls == [("cloud", 30.0), ("cloud", 30.0)]
+
+
+def _fallback_provider(provider_id, host, model_id):
+    return {
+        "provider_id": provider_id,
+        "provider_type": "cloud",
+        "base_url": f"https://{host}/v1",
+        "model_id": model_id,
+        "api_key": None,
+        "timeout_seconds": 5.0,
+        "capabilities": ["chat"],
+        "enabled": True,
+    }
+
+
+class _FallbackRegistry:
+    def __init__(self, records):
+        self.records = records
+
+    async def get_provider(self, *, principal_id, provider_id):
+        return self.records.get(provider_id)
+
+    async def list_providers(self, *, principal_id):
+        return list(self.records.values())
+
+
+class _FallbackSelectionStore:
+    def __init__(self, selection):
+        self.selection = selection
+
+    async def get_conversation_model(self, *, principal_id, conversation_id):
+        return self.selection
+
+
+def _fallback_resolver(records, selection, handler):
+    return OwnerScopedModelAdapterResolver(
+        registry=_FallbackRegistry(records),
+        selection_store=_FallbackSelectionStore(selection),
+        default_adapter=None,
+        system_prompt="You are Lila.",
+        http_client_factory=lambda provider_type, timeout: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=timeout,
+        ),
+    )
+
+
+def _fallback_context():
+    return AssembledContext(conversation_id="conversation-1", messages=())
+
+
+def test_explicit_fallback_runs_only_after_pre_send_connection_failure():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "primary.example.com":
+            raise httpx.ConnectError("private transport detail", request=request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Ответ резервной модели"}}]},
+        )
+
+    resolver = _fallback_resolver(
+        {
+            "primary": _fallback_provider("primary", "primary.example.com", "primary-model"),
+            "backup": _fallback_provider("backup", "backup.example.com", "backup-model"),
+        },
+        {
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "fallback_provider_id": "backup",
+            "fallback_model_id": "backup-model",
+        },
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    result = run(execute())
+    assert result.text == "Ответ резервной модели"
+    assert result.provider_id == "backup"
+    assert result.model_id == "backup-model"
+    assert result.fallback_used is True
+    assert result.fallback_from_provider_id == "primary"
+    assert result.fallback_from_model_id == "primary-model"
+    assert result.fallback_reason == "primary_connection_unavailable"
+    assert calls == ["primary.example.com", "backup.example.com"]
+
+
+def test_ambiguous_primary_http_failure_never_triggers_fallback():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(503, json={"error": "private provider detail"})
+
+    resolver = _fallback_resolver(
+        {
+            "primary": _fallback_provider("primary", "primary.example.com", "primary-model"),
+            "backup": _fallback_provider("backup", "backup.example.com", "backup-model"),
+        },
+        {
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "fallback_provider_id": "backup",
+            "fallback_model_id": "backup-model",
+        },
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    with pytest.raises(ModelProviderUnavailable):
+        run(execute())
+    assert calls == ["primary.example.com"]
+
+
+def test_missing_primary_uses_only_the_explicit_owner_fallback():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Ответ резервной модели"}}]},
+        )
+
+    resolver = _fallback_resolver(
+        {"backup": _fallback_provider("backup", "backup.example.com", "backup-model")},
+        {
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "fallback_provider_id": "backup",
+            "fallback_model_id": "backup-model",
+        },
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    result = run(execute())
+    assert result.fallback_used is True
+    assert result.fallback_reason == "primary_provider_unavailable"
+    assert result.provider_id == "backup"
+    assert calls == ["backup.example.com"]
+
+
+def test_primary_connection_failure_without_configured_fallback_does_not_choose_another_provider():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        raise httpx.ConnectError("offline", request=request)
+
+    resolver = _fallback_resolver(
+        {
+            "primary": _fallback_provider("primary", "primary.example.com", "primary-model"),
+            "other": _fallback_provider("other", "other.example.com", "other-model"),
+        },
+        {"provider_id": "primary", "model_id": "primary-model"},
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    with pytest.raises(ModelProviderConnectionUnavailable):
+        run(execute())
+    assert calls == ["primary.example.com"]
+
+
+def test_primary_connection_failure_with_missing_configured_fallback_is_explicit():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        raise httpx.ConnectError("offline", request=request)
+
+    resolver = _fallback_resolver(
+        {"primary": _fallback_provider("primary", "primary.example.com", "primary-model")},
+        {
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "fallback_provider_id": "backup",
+            "fallback_model_id": "backup-model",
+        },
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    with pytest.raises(SelectedFallbackProviderUnavailable):
+        run(execute())
+    assert calls == ["primary.example.com"]
