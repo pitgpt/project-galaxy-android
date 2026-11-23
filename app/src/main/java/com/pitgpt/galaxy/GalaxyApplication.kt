@@ -4,6 +4,7 @@ import android.app.Application
 import com.pitgpt.galaxy.core.repository.CharacterRepository
 import com.pitgpt.galaxy.core.repository.ConversationRepository
 import com.pitgpt.galaxy.core.repository.MemoryRepository
+import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
 import com.pitgpt.galaxy.core.usecase.InitializeGalaxy
 import com.pitgpt.galaxy.data.auth.EncryptedGalaxyBackendConfigStore
 import com.pitgpt.galaxy.data.auth.GalaxyBackendConfiguration
@@ -18,6 +19,16 @@ import com.pitgpt.galaxy.data.remote.HttpRealtimeSessionProvider
 import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
 import com.pitgpt.galaxy.data.repository.RoomConversationRepository
 import com.pitgpt.galaxy.data.repository.RoomMemoryRepository
+import com.pitgpt.galaxy.data.repository.RoomGeneratedImageRepository
+import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
+import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
+import com.pitgpt.galaxy.data.providers.ProviderSettingsIo
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiConnectionConfig
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntimeFactory
+import com.pitgpt.galaxy.data.providers.comfyui.RoomComfyUiJobStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 
 /** Application-level composition root for Galaxy's local data and authentication layers. */
 class GalaxyApplication : Application() {
@@ -30,6 +41,12 @@ class GalaxyApplication : Application() {
      * image metadata remains a separate Room concern.
      */
     val mediaStore: EncryptedMediaStore by lazy { EncryptedMediaStore.fromContext(this) }
+    val providerStore: EncryptedProviderStore by lazy { EncryptedProviderStore(this) }
+    private val providerSettingsIo by lazy { ProviderSettingsIo(providerStore) }
+    val generatedImages by lazy { RoomGeneratedImageRepository(database.generatedImageDao(), mediaStore) }
+    val imageGenerationRequests: ImageGenerationRequestStore by lazy { RoomImageGenerationRequestStore(database.imageGenerationRequestDao()) }
+    val comfyUiJobStore: ComfyUiJobStore by lazy { RoomComfyUiJobStore(database.comfyUiJobDao()) }
+    private val comfyUiRuntimeFactory by lazy { ComfyUiRuntimeFactory(comfyUiJobStore, generatedImages) }
     private lateinit var backendConfigStore: EncryptedGalaxyBackendConfigStore
     private var activeBackendConfiguration: GalaxyBackendConfiguration? = null
 
@@ -91,6 +108,12 @@ class GalaxyApplication : Application() {
         currentLilaTurnProvider = HttpLilaTurnProvider(apiBaseUrl, currentAuth)
         currentLilaProviderCatalog = HttpLilaProviderCatalog(apiBaseUrl, currentAuth)
     }
+
+    fun createComfyUiRuntime(config: ComfyUiConnectionConfig, template: ComfyUiWorkflowTemplate, clientId: String): ComfyUiRuntime =
+        comfyUiRuntimeFactory.create(config, template, clientId)
+
+    suspend fun createComfyUiRuntimeFromSavedSettings(clientId: String): ComfyUiRuntime =
+        comfyUiRuntimeFactory.createFromProviderSettings(providerSettingsIo.load(), clientId)
 
     fun realtimeSessionProvider(tokenProvider: GalaxyAccessTokenProvider): HttpRealtimeSessionProvider {
         val apiBaseUrl = activeBackendConfiguration?.galaxyApiBaseUrl

@@ -1,0 +1,100 @@
+package com.pitgpt.galaxy.data.providers.comfyui
+
+import androidx.room.Room
+import com.pitgpt.galaxy.data.local.GalaxyDatabase
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+
+@RunWith(RobolectricTestRunner::class)
+class RoomComfyUiJobStoreTest {
+    private lateinit var database: GalaxyDatabase
+    private lateinit var store: RoomComfyUiJobStore
+
+    @Before
+    fun setUp() {
+        val context = RuntimeEnvironment.getApplication()
+        database = Room.inMemoryDatabaseBuilder(context, GalaxyDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        store = RoomComfyUiJobStore(database.comfyUiJobDao())
+    }
+
+    @After
+    fun tearDown() {
+        database.close()
+    }
+
+    @Test
+    fun storesAndReadsOnlyJobCorrelation() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-123",
+            requestId = "request-456",
+            createdAtEpochMillis = 1234L
+        )
+
+        store.put(record)
+
+        assertEquals(record, store.get("prompt-123"))
+        assertNull(store.get("unknown-prompt"))
+        assertEquals(listOf(record), store.all())
+    }
+
+    @Test
+    fun cancellationFlagIsPersistedOnlyAfterSubmissionStarts() = runBlocking {
+        store.put(ComfyUiJobRecord("prompt-123", "request-456", 1234L))
+        assertTrue(store.markSubmissionStarted("prompt-123"))
+
+        store.markCancelled("prompt-123")
+
+        val saved = store.get("prompt-123")
+        assertTrue(saved!!.cancelled)
+        assertEquals("request-456", saved.requestId)
+    }
+
+    @Test
+    fun submissionStartedCanBeClaimedOnlyOnce() = runBlocking {
+        store.put(ComfyUiJobRecord("prompt-claim", "request-claim", 1234L))
+
+        val claims = coroutineScope {
+            (1..2).map { async { store.markSubmissionStarted("prompt-claim") } }.awaitAll()
+        }
+
+        assertEquals(1, claims.count { it })
+        assertTrue(store.get("prompt-claim")!!.submissionStarted)
+    }
+
+    @Test
+    fun deleteRemovesOnlyTheSelectedSubmissionIntent() = runBlocking {
+        store.put(ComfyUiJobRecord("prompt-1", "request-1", 1L))
+        store.put(ComfyUiJobRecord("prompt-2", "request-2", 2L))
+
+        store.delete("prompt-1")
+
+        assertNull(store.get("prompt-1"))
+        assertEquals(listOf(ComfyUiJobRecord("prompt-2", "request-2", 2L)), store.all())
+    }
+
+    @Test
+    fun duplicatePromptIdIsRejectedRatherThanOverwritten() = runBlocking {
+        store.put(ComfyUiJobRecord("prompt-123", "request-456", 1234L))
+
+        val failure = runCatching {
+            store.put(ComfyUiJobRecord("prompt-123", "request-other", 9999L))
+        }.exceptionOrNull()
+
+        assertTrue(failure != null)
+        assertFalse(store.get("prompt-123")!!.requestId == "request-other")
+    }
+}

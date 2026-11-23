@@ -14,7 +14,95 @@ object GalaxyDatabaseFactory {
         }
     }
 
-    private val encryptor = PlaintextDatabaseEncryptor()
+    internal val MIGRATION_2_3 = object : Migration(2, 3) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS comfyui_jobs (
+                    promptId TEXT NOT NULL PRIMARY KEY,
+                    requestId TEXT NOT NULL,
+                    createdAtEpochMillis INTEGER NOT NULL,
+                    cancelled INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_comfyui_jobs_requestId ON comfyui_jobs(requestId)"
+            )
+        }
+    }
+
+    internal val MIGRATION_4_5 = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE comfyui_jobs ADD COLUMN submissionStarted INTEGER NOT NULL DEFAULT 0"
+            )
+            // Version-4 rows were inserted only after ComfyUI returned a prompt ID.
+            // Treat those legacy rows as already submitted so upgrades never re-enqueue them.
+            db.execSQL("UPDATE comfyui_jobs SET submissionStarted = 1")
+        }
+    }
+
+    internal val MIGRATION_3_4 = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS generated_images (
+                    assetId TEXT NOT NULL PRIMARY KEY,
+                    requestId TEXT NOT NULL,
+                    conversationId TEXT NOT NULL,
+                    characterId TEXT NOT NULL,
+                    mimeType TEXT NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    byteSize INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    createdAtEpochMillis INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_generated_images_conversationId_createdAtEpochMillis ON generated_images(conversationId, createdAtEpochMillis)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_generated_images_characterId_createdAtEpochMillis ON generated_images(characterId, createdAtEpochMillis)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_generated_images_requestId ON generated_images(requestId)"
+            )
+        }
+    }
+
+    internal val MIGRATION_5_6 = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS image_generation_requests (
+                    requestId TEXT NOT NULL PRIMARY KEY,
+                    conversationId TEXT NOT NULL,
+                    characterId TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    negativePrompt TEXT,
+                    preferredMimeType TEXT,
+                    workflowId TEXT,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    seed INTEGER,
+                    referenceAssetIdsJson TEXT NOT NULL,
+                    createdAtEpochMillis INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_image_generation_requests_conversationId_createdAtEpochMillis ON image_generation_requests(conversationId, createdAtEpochMillis)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_image_generation_requests_characterId_createdAtEpochMillis ON image_generation_requests(characterId, createdAtEpochMillis)"
+            )
+        }
+    }
+
+    private val encryptor
 
     @Volatile
     private var instance: GalaxyDatabase? = null
@@ -74,7 +162,7 @@ object GalaxyDatabaseFactory {
                         DATABASE_NAME
                     )
                         .openHelperFactory(ZeroizingSqlCipherOpenHelperFactory(passphraseProvider))
-                        .addMigrations(MIGRATION_1_2)
+                        .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                         .build()
                 },
                 openDatabase = { database -> database.openHelper.writableDatabase },

@@ -82,6 +82,7 @@ fun GalaxyHome() {
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
     var showProviders by remember { mutableStateOf(false) }
+    var showComfyUiSettings by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
     var showEditCharacter by remember { mutableStateOf(false) }
@@ -378,8 +379,12 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showComfyUiSettings) {
+        ComfyUiSettingsScreen(store = app.providerStore, onBack = { showComfyUiSettings = false })
     } else if (showChat) {
         ConversationScreen(
+            app = app,
+            characterId = activeCharacterId,
             characterName = characterName,
             messages = messages,
             activeModelLabel = activeModelLabel,
@@ -476,7 +481,8 @@ fun GalaxyHome() {
             onOpenChat = { showChat = true },
             onOpenProfile = { showProfile = true },
             onOpenCharacters = { showCharacters = true },
-            onOpenProviders = { showProviders = true }
+            onOpenProviders = { showProviders = true },
+            onOpenComfyUi = { showComfyUiSettings = true }
         )
     }
 }
@@ -493,7 +499,8 @@ private fun HomeScreen(
     onOpenChat: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenCharacters: () -> Unit,
-    onOpenProviders: () -> Unit
+    onOpenProviders: () -> Unit,
+    onOpenComfyUi: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -605,6 +612,15 @@ private fun HomeScreen(
             }
             Spacer(Modifier.height(10.dp))
             Button(
+                onClick = onOpenComfyUi,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("COMFYUI · ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth().height(54.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
@@ -621,6 +637,8 @@ private fun HomeScreen(
 
 @Composable
 private fun ConversationScreen(
+    app: GalaxyApplication,
+    characterId: String,
     characterName: String,
     messages: List<ConversationMessage>,
     activeModelLabel: String?,
@@ -635,6 +653,8 @@ private fun ConversationScreen(
     var draft by remember { mutableStateOf("") }
     var isSending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
+    var showImageGeneration by remember { mutableStateOf(false) }
+    var imageGenerationSubmitting by remember { mutableStateOf(false) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
@@ -665,7 +685,11 @@ private fun ConversationScreen(
     ) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("‹  НАЗАД", color = Ice) }
+                TextButton(onClick = onBack, enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting)) { Text("‹  НАЗАД", color = Ice) }
+                TextButton(
+                    onClick = { showImageGeneration = !showImageGeneration },
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting)
+                ) { Text(if (showImageGeneration) "К ЧАТУ" else "ОБРАЗ", color = Ice, fontSize = 9.sp) }
                 Spacer(Modifier.weight(1f))
                 Column(horizontalAlignment = Alignment.End) {
                     Text(characterName, color = Color.White, fontSize = 18.sp,
@@ -685,7 +709,16 @@ private fun ConversationScreen(
                 Text(it, color = Color(0xFFE9BD70), fontSize = 11.sp, lineHeight = 16.sp)
                 Spacer(Modifier.height(8.dp))
             }
-            if (loadError != null) {
+            if (showImageGeneration) {
+                CharacterScopedGenerationPanel(characterId) {
+                    ImageGenerationPanel(
+                        app = app,
+                        characterId = characterId,
+                        modifier = Modifier.weight(1f),
+                        onSubmittingChanged = { imageGenerationSubmitting = it }
+                    )
+                }
+            } else if (loadError != null) {
                 Column(
                     Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.Center,
