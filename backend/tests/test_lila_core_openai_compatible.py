@@ -370,7 +370,7 @@ def test_local_openai_compatible_runtimes_generate_through_the_shared_chat_contr
 
     response = asyncio.run(scenario())
     assert response.text == f"Ответ от {runtime}"
-    assert response.provider_id == "provider-test"
+    assert response.provider_id == "local-dev"
     assert response.model_id == "qwen-local"
     assert captured["url"] == expected_url
     assert captured["authorization"] is None
