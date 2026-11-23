@@ -144,6 +144,7 @@ class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
         // against the reopened SQLCipher-backed stores rather than in-memory fakes.
         val restored = loadLatestRecoverableImageGenerationRequest(
             characterId = generationRequest.characterId,
+            conversationId = generationRequest.conversationId,
             requestStore = reopenedRequests,
             jobStore = reopenedStore
         )
