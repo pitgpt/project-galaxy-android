@@ -221,6 +221,8 @@ jobs:
           exit 1
       - name: Run Android client against live Lila Core on API 33
         if: env.RUN_LILA_ANDROID_E2E == 'true'
+        env:
+          ANDROID_I_WANT_MY_TCG: "yes"
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
         with:
           api-level: 33
