@@ -71,5 +71,36 @@ gradle connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.cl
 test_status=$?
 set -e
 
+if [ "$test_status" -eq 0 ]; then
+  python - "$RUNNER_TEMP/lila-android-e2e/provider-requests.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+records = [
+    json.loads(line)
+    for line in path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+if any(set(item) != {"method", "port", "path"} for item in records):
+    raise SystemExit("Provider route diagnostics contain unexpected fields")
+native_chat = any(
+    item.get("port") == 11434 and item.get("path") == "/api/chat"
+    for item in records
+)
+openai_chat = any(
+    item.get("port") == 1234 and item.get("path") == "/v1/chat/completions"
+    for item in records
+)
+if not native_chat or not openai_chat:
+    raise SystemExit(
+        "Live provider routing did not reach both independent Ollama runtimes "
+        "(native 11434 and OpenAI-compatible 1234)"
+    )
+print("Verified live model requests reached independent Ollama ports 11434 and 1234")
+PY
+fi
+
 adb shell rm -f /data/local/tmp/lila-android-e2e.json || true
 exit "$test_status"

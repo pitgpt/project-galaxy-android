@@ -38,6 +38,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
         val characterId = requiredString(config, "character_id")
         val providerId = requiredString(config, "provider_id")
         val providerBaseUrl = requiredString(config, "provider_base_url")
+        val secondProviderBaseUrl = requiredString(config, "second_provider_base_url")
         val modelId = requiredString(config, "model_id")
         val conversationId = stableLilaConversationId(ownerKey, characterId)
         val storageCharacterId = "owner:$ownerKey:$characterId"
@@ -74,7 +75,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
         }
         val app = InstrumentationRegistry.getInstrumentation()
             .targetContext.applicationContext as GalaxyApplication
-        val openAiProviderId = "$providerId-openai"
+        val openAiProviderId = requiredString(config, "openai_provider_id")
 
         try {
             val created = catalogStep("create-provider") {
@@ -169,13 +170,14 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertEquals(messageText, localHistory[0].content)
             assertEquals(result.text, localHistory[1].content)
 
-            // Exercise the same local Ollama runtime through its OpenAI-compatible /v1 API.
-            // The resolver must select OpenAICompatibleModelAdapter for this path, not native /api/chat.
+            // Switch to a second, independently running Ollama process through its
+            // OpenAI-compatible /v1 API. The resolver must route to the second host port,
+            // not reuse the first provider's native /api/chat endpoint.
             val openAiProvider = catalogStep("create-openai-compatible-provider") {
                 catalog.createProvider(
                     providerId = openAiProviderId,
                     providerType = "local",
-                    baseUrl = providerBaseUrl.trimEnd('/') + "/v1",
+                    baseUrl = secondProviderBaseUrl,
                     modelId = modelId,
                     apiKey = null,
                     timeoutSeconds = 120.0

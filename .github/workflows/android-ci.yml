@@ -135,10 +135,12 @@ jobs:
           done
           echo "Redis did not become ready" >&2
           exit 1
-      - name: Start Ollama and pull the bounded CPU model
+      - name: Start two isolated Ollama runtimes and pull the bounded CPU model
         run: |
+          docker volume create lila-live-ollama-models >/dev/null
           docker run -d --name lila-live-ollama \
             -p 127.0.0.1:11434:11434 \
+            -v lila-live-ollama-models:/root/.ollama \
             -e OLLAMA_HOST=0.0.0.0:11434 \
             -e OLLAMA_KEEP_ALIVE=5m \
             ollama/ollama:0.33.2
@@ -151,6 +153,24 @@ jobs:
           curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
           docker exec lila-live-ollama ollama pull qwen2.5:0.5b
           docker exec lila-live-ollama ollama list
+
+          # A second independent server process exposes the OpenAI-compatible
+          # endpoint on LM Studio's standard local port. It shares only the
+          # pulled model store, not the HTTP runtime or process.
+          docker run -d --name lila-live-ollama-openai \
+            -p 127.0.0.1:1234:11434 \
+            -v lila-live-ollama-models:/root/.ollama \
+            -e OLLAMA_HOST=0.0.0.0:11434 \
+            -e OLLAMA_KEEP_ALIVE=5m \
+            ollama/ollama:0.33.2
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:1234/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:1234/api/tags | python -c 'import json,sys; tags=json.load(sys.stdin).get("models",[]); assert any(item.get("name")=="qwen2.5:0.5b" for item in tags), "second Ollama runtime cannot see the bounded model"'
+          docker exec lila-live-ollama-openai ollama list
       - name: Run authenticated production-composition model E2E
         working-directory: backend
         env:
@@ -205,6 +225,7 @@ jobs:
           ANDROID_I_WANT_MY_TCG: "yes"
           PYTHONPATH: ${{ github.workspace }}/backend
           LILA_LIVE_OLLAMA_URL: http://127.0.0.1:11434
+          LILA_LIVE_OLLAMA_SECOND_URL: http://127.0.0.1:1234/v1
           LILA_LIVE_OLLAMA_MODEL: qwen2.5:0.5b
           REDIS_URL: redis://127.0.0.1:6379/15
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
@@ -220,7 +241,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lila-android-core-request-diagnostics
-          path: ${{ runner.temp }}/lila-android-e2e/requests.jsonl
+          path: |
+            ${{ runner.temp }}/lila-android-e2e/requests.jsonl
+            ${{ runner.temp }}/lila-android-e2e/provider-requests.jsonl
           if-no-files-found: ignore
           retention-days: 3
       - name: Remove ephemeral runtime services and Android E2E credentials
@@ -233,9 +256,11 @@ jobs:
           rm -f "$RUNNER_TEMP/lila-android-e2e/config.json" \
             "$RUNNER_TEMP/lila-android-e2e/ca.key" \
             "$RUNNER_TEMP/lila-android-e2e/server.key" \
-            "$RUNNER_TEMP/lila-android-e2e/requests.jsonl"
+            "$RUNNER_TEMP/lila-android-e2e/requests.jsonl" \
+            "$RUNNER_TEMP/lila-android-e2e/provider-requests.jsonl"
           rm -rf "$RUNNER_TEMP/lila-android-e2e-private"
-          docker rm -f lila-live-ollama lila-live-redis 2>/dev/null || true
+          docker rm -f lila-live-ollama-openai lila-live-ollama lila-live-redis 2>/dev/null || true
+          docker volume rm lila-live-ollama-models 2>/dev/null || true
 
   build:
     needs: [test, backend-test, instrumented-test, windows-e2e-script, live-ollama-e2e]

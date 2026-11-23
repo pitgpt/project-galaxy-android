@@ -15,6 +15,7 @@ import uvicorn
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from galaxy_backend.config import Settings
+from galaxy_backend.lila_core.provider_egress import create_provider_http_client
 from galaxy_backend.main import create_app
 
 
@@ -94,6 +95,7 @@ class _JwksHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     ollama_url = os.environ["LILA_LIVE_OLLAMA_URL"].rstrip("/")
+    second_provider_url = os.environ["LILA_LIVE_OLLAMA_SECOND_URL"].rstrip("/")
     model_id = os.environ["LILA_LIVE_OLLAMA_MODEL"]
     redis_url = os.environ["REDIS_URL"]
     tls_cert = os.environ["LILA_ANDROID_E2E_TLS_CERT"]
@@ -101,10 +103,14 @@ def main() -> None:
     config_path = Path(os.environ["LILA_ANDROID_E2E_CONFIG_PATH"])
     runner_temp = Path(os.environ["RUNNER_TEMP"])
     diagnostics_path = runner_temp / "lila-android-e2e" / "requests.jsonl"
+    provider_requests_path = runner_temp / "lila-android-e2e" / "provider-requests.jsonl"
     diagnostics_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     diagnostics_path.write_bytes(b"")
+    provider_requests_path.write_bytes(b"")
     os.chmod(diagnostics_path, 0o600)
+    os.chmod(provider_requests_path, 0o600)
     diagnostics_lock = Lock()
+    provider_diagnostics_lock = Lock()
 
     parsed = urlsplit(ollama_url)
     if (
@@ -115,7 +121,17 @@ def main() -> None:
         parsed.query,
         parsed.fragment,
     ) != ("http", "127.0.0.1", 11434, "", "", ""):
-        raise RuntimeError("The Android E2E model endpoint must be the isolated local Ollama service")
+        raise RuntimeError("The Android E2E native model endpoint must be the isolated local Ollama service")
+    parsed_second = urlsplit(second_provider_url)
+    if (
+        parsed_second.scheme,
+        parsed_second.hostname,
+        parsed_second.port,
+        parsed_second.path,
+        parsed_second.query,
+        parsed_second.fragment,
+    ) != ("http", "127.0.0.1", 1234, "/v1", "", ""):
+        raise RuntimeError("The Android E2E OpenAI-compatible endpoint must use the isolated second Ollama service")
     if not model_id.strip() or not Path(tls_cert).is_file() or not Path(tls_key).is_file():
         raise RuntimeError("The Android E2E runtime configuration is incomplete")
 
@@ -146,6 +162,7 @@ def main() -> None:
     )
 
     provider_id = "ollama-android-" + uuid.uuid4().hex[:12]
+    openai_provider_id = "ollama-openai-android-" + uuid.uuid4().hex[:12]
     database_directory = runner_temp / "lila-android-e2e-private"
     database_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(database_directory, 0o700)
@@ -180,6 +197,8 @@ def main() -> None:
         "character_id": "galaxy.default",
         "provider_id": provider_id,
         "provider_base_url": ollama_url,
+        "openai_provider_id": openai_provider_id,
+        "second_provider_base_url": second_provider_url,
         "model_id": model_id,
     }
     descriptor = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -188,7 +207,29 @@ def main() -> None:
         output.flush()
         os.fsync(output.fileno())
 
-    app = create_app(settings=settings)
+    def recording_provider_http_client_factory(provider_type, timeout_seconds):
+        client = create_provider_http_client(provider_type, timeout_seconds)
+
+        async def record_provider_request(request):
+            # Route metadata only: never capture headers, request bodies, prompts,
+            # provider responses, or credentials.
+            _append_bounded_diagnostic(
+                provider_requests_path,
+                provider_diagnostics_lock,
+                {
+                    "method": request.method,
+                    "port": request.url.port,
+                    "path": request.url.path,
+                },
+            )
+
+        client.event_hooks["request"].append(record_provider_request)
+        return client
+
+    app = create_app(
+        settings=settings,
+        lila_provider_http_client_factory=recording_provider_http_client_factory,
+    )
 
     @app.middleware("http")
     async def safe_e2e_request_diagnostics(request, call_next):
