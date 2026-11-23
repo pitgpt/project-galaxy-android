@@ -1631,3 +1631,150 @@ def test_native_ollama_probe_test_chat_and_turn_use_native_api_and_replay_once(t
         principal_id="owner-a",
         conversation_id="conversation-ollama",
     )) == {"provider_id": "ollama-local", "model_id": "qwen3:8b"}
+
+
+def test_authenticated_memory_api_upsert_search_and_delete_are_owner_scoped(tmp_path):
+    client, _ = make_client(tmp_path)
+    memory_id = "preferred-language"
+    content = "The user prefers Russian language and concise replies."
+
+    with client:
+        unauthenticated = client.put(
+            f"/v1/lila/memories/{memory_id}",
+            json={"content": content},
+        )
+        saved = client.put(
+            f"/v1/lila/memories/{memory_id}",
+            headers=auth("a"),
+            json={"content": content},
+        )
+        owner_a = client.get(
+            "/v1/lila/memories/search",
+            headers=auth("a"),
+            params={"query": "Russian language"},
+        )
+        owner_b = client.get(
+            "/v1/lila/memories/search",
+            headers=auth("b"),
+            params={"query": "Russian language"},
+        )
+        wrong_owner_delete = client.delete(
+            f"/v1/lila/memories/{memory_id}",
+            headers=auth("b"),
+        )
+        still_present = client.get(
+            "/v1/lila/memories/search",
+            headers=auth("a"),
+            params={"query": "Russian language"},
+        )
+        deleted = client.delete(
+            f"/v1/lila/memories/{memory_id}",
+            headers=auth("a"),
+        )
+        after_delete = client.get(
+            "/v1/lila/memories/search",
+            headers=auth("a"),
+            params={"query": "Russian language"},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert saved.status_code == 200
+    assert saved.json() == {"memory_id": memory_id, "saved": True}
+    assert owner_a.status_code == 200
+    assert owner_a.json()["memories"] == [
+        {"memory_id": memory_id, "content": content}
+    ]
+    assert owner_b.status_code == 200
+    assert owner_b.json()["memories"] == []
+    assert wrong_owner_delete.status_code == 200
+    assert wrong_owner_delete.json() == {"memory_id": memory_id, "deleted": False}
+    assert still_present.json()["memories"] == owner_a.json()["memories"]
+    assert deleted.json() == {"memory_id": memory_id, "deleted": True}
+    assert after_delete.json()["memories"] == []
+
+
+def test_saved_owner_memory_is_assembled_into_the_real_core_turn(tmp_path):
+    outbound = []
+
+    async def handler(request):
+        if request.method == "GET" and request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        body = json.loads(request.content)
+        outbound.append(body)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Ответ с учётом памяти"}}]},
+        )
+
+    factory_calls = []
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    content = "The user prefers Russian language and concise replies."
+
+    with client:
+        saved = client.put(
+            "/v1/lila/memories/preferred-language",
+            headers=auth("a"),
+            json={"content": content},
+        )
+        provider = client.post(
+            "/v1/lila/providers",
+            headers=auth("a"),
+            json=create_payload(),
+        )
+        selected = client.put(
+            "/v1/lila/conversations/memory-chat/model",
+            headers=auth("a"),
+            json={"provider_id": "cloud-main", "model_id": "model-a"},
+        )
+        turn = client.post(
+            "/v1/lila/turns",
+            headers=auth("a"),
+            json={
+                "conversation_id": "memory-chat",
+                "message": "Which language should you use?",
+            },
+        )
+
+    assert saved.status_code == provider.status_code == selected.status_code == 200
+    assert turn.status_code == 200
+    assert turn.json()["text"] == "Ответ с учётом памяти"
+    assert turn.json()["provider_id"] == "cloud-main"
+    assert turn.json()["model_id"] == "model-a"
+    assert len(outbound) == 1
+    memory_message = next(
+        message
+        for message in outbound[0]["messages"]
+        if "Untrusted memory excerpts" in message["content"]
+    )
+    assert content in memory_message["content"]
+    assert "provider-secret-value" not in turn.text
+    assert len(factory_calls) == 2
+
+
+def test_memory_api_rejects_blank_content_and_obeys_per_user_rate_limit(tmp_path):
+    limited = RecordingLimiter(
+        error=HTTPException(
+            status_code=429,
+            detail="rate limit",
+            headers={"Retry-After": "60"},
+        )
+    )
+    client, _ = make_client(tmp_path, limited)
+
+    with client:
+        invalid = client.put(
+            "/v1/lila/memories/blank",
+            headers=auth("a"),
+            json={"content": "   "},
+        )
+        rate_limited = client.put(
+            "/v1/lila/memories/valid",
+            headers=auth("a"),
+            json={"content": "A valid memory"},
+        )
+
+    assert invalid.status_code == 422
+    assert rate_limited.status_code == 429

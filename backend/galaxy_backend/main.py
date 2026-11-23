@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .lila_core.contracts import (
     ConversationHistoryPage,
@@ -37,6 +37,7 @@ from .lila_core.memory import (
     ConversationMessage,
     IdempotencyKeyConflict,
     IdempotentTurnInProgress,
+    MemorySnippet,
 )
 from .lila_core.provider_registry import validate_provider_endpoint
 from .lila_core.provider_egress import create_provider_http_client
@@ -93,6 +94,41 @@ class CreateSessionResponse(BaseModel):
     session_id: str
 
 
+class LilaMemoryContentRequest(BaseModel):
+    """Owner-authenticated memory content; the identifier stays in the URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("content")
+    @classmethod
+    def reject_blank_memory(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("memory content must contain non-whitespace characters")
+        return value
+
+
+class LilaMemoryUpsertResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: str = Field(min_length=1, max_length=128)
+    saved: bool = True
+
+
+class LilaMemoryDeleteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: str = Field(min_length=1, max_length=128)
+    deleted: bool
+
+
+class LilaMemorySearchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memories: list[MemorySnippet] = Field(default_factory=list, max_length=20)
+
+
 def create_app(
     settings: Settings | None = None,
     http_client: httpx.AsyncClient | None = None,
@@ -106,6 +142,8 @@ def create_app(
     lila_provider_registry: Any | None = None,
     lila_provider_http_client_factory: Any | None = None,
     lila_store: Any | None = None,
+    lila_memory_reader: Any | None = None,
+    lila_memory_writer: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -176,6 +214,8 @@ def create_app(
 
         app.state.lila_store = lila_store
         app.state.lila_history_reader = lila_history_reader
+        app.state.lila_memory_reader = lila_memory_reader or lila_store
+        app.state.lila_memory_writer = lila_memory_writer or lila_store
         app.state.lila_provider_adapter = lila_provider_adapter
         app.state.lila_provider_registry = lila_provider_registry
         if (
@@ -201,6 +241,8 @@ def create_app(
             await store.initialize()
             app.state.lila_store = store
             app.state.lila_history_reader = lila_history_reader or store
+            app.state.lila_memory_reader = lila_memory_reader or store
+            app.state.lila_memory_writer = lila_memory_writer or store
             if app.state.lila_provider_registry is None:
                 app.state.lila_provider_registry = store
 
@@ -250,6 +292,8 @@ def create_app(
     app.state.lila_core_service = lila_core_service
     app.state.lila_store = lila_store
     app.state.lila_history_reader = lila_history_reader
+    app.state.lila_memory_reader = lila_memory_reader or lila_store
+    app.state.lila_memory_writer = lila_memory_writer or lila_store
     app.state.lila_provider_adapter = lila_provider_adapter
     app.state.lila_provider_registry = lila_provider_registry
     app.state.lila_provider_http_client_factory = (
@@ -343,6 +387,121 @@ def create_app(
             messages=[message.model_dump() for message in messages],
             next_before_sequence=next_cursor,
         )
+
+    async def require_lila_memory_component(
+        request: Request,
+        user_id: str,
+        *,
+        writer: bool,
+    ):
+        component = (
+            request.app.state.lila_memory_writer
+            if writer
+            else request.app.state.lila_memory_reader
+        )
+        if component is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila memory storage is not configured",
+            )
+        try:
+            await request.app.state.lila_turn_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila memory service is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        return component
+
+    @app.put(
+        "/v1/lila/memories/{memory_id}",
+        response_model=LilaMemoryUpsertResponse,
+    )
+    async def upsert_lila_memory(
+        memory_id: str,
+        payload: LilaMemoryContentRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        writer = await require_lila_memory_component(request, user_id, writer=True)
+        try:
+            memory = MemorySnippet(memory_id=memory_id, content=payload.content)
+        except ValidationError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Lila memory record is invalid",
+            ) from None
+        try:
+            await writer.save_memory(principal_id=user_id, memory=memory)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila memory storage is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        return LilaMemoryUpsertResponse(memory_id=memory.memory_id, saved=True)
+
+    @app.get(
+        "/v1/lila/memories/search",
+        response_model=LilaMemorySearchResponse,
+    )
+    async def search_lila_memories(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+        query: str = Query(min_length=1, max_length=512),
+        limit: int = Query(default=8, ge=1, le=20),
+    ):
+        reader = await require_lila_memory_component(request, user_id, writer=False)
+        if not query.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Lila memory search query is invalid",
+            )
+        try:
+            records = await reader.search_relevant_memories(
+                principal_id=user_id,
+                query=query,
+                limit=limit,
+            )
+            memories = [MemorySnippet.model_validate(record) for record in records]
+            return LilaMemorySearchResponse(memories=memories)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila memory search is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.delete(
+        "/v1/lila/memories/{memory_id}",
+        response_model=LilaMemoryDeleteResponse,
+    )
+    async def delete_lila_memory(
+        memory_id: str,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        writer = await require_lila_memory_component(request, user_id, writer=True)
+        if not memory_id.strip() or len(memory_id) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Lila memory identifier is invalid",
+            )
+        try:
+            deleted = await writer.delete_memory(
+                principal_id=user_id,
+                memory_id=memory_id,
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila memory storage is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        return LilaMemoryDeleteResponse(memory_id=memory_id, deleted=bool(deleted))
 
     async def require_lila_provider_registry(request: Request, user_id: str):
         registry = request.app.state.lila_provider_registry
