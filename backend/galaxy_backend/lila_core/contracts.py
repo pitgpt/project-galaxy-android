@@ -74,7 +74,7 @@ AvatarEvent = Annotated[
 
 
 class CoreTurnResponse(BaseModel):
-    """Assistant output plus non-secret model identity and declarative UI events."""
+    """Assistant output plus actual provider identity and explicit fallback disclosure."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -84,6 +84,32 @@ class CoreTurnResponse(BaseModel):
     avatar_events: list[AvatarEvent] = Field(default_factory=list)
     provider_id: str | None = Field(default=None, min_length=1, max_length=64)
     model_id: str | None = Field(default=None, min_length=1, max_length=256)
+    fallback_used: bool = False
+    fallback_from_provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    fallback_from_model_id: str | None = Field(default=None, min_length=1, max_length=256)
+    fallback_reason: Literal[
+        "primary_connection_unavailable",
+        "primary_provider_unavailable",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_fallback_disclosure(self):
+        metadata = (
+            self.fallback_from_provider_id,
+            self.fallback_from_model_id,
+            self.fallback_reason,
+        )
+        if self.fallback_used:
+            if (
+                self.provider_id is None
+                or self.model_id is None
+                or any(value is None for value in metadata)
+                or self.provider_id == self.fallback_from_provider_id
+            ):
+                raise ValueError("fallback response must identify both actual and primary models")
+        elif any(value is not None for value in metadata):
+            raise ValueError("fallback metadata is only valid when fallback_used is true")
+        return self
 
 
 
@@ -267,31 +293,45 @@ class ProviderDeleteResponse(BaseModel):
 
 
 class ConversationModelSelectionRequest(BaseModel):
-    """Select one owner-managed provider/model for a conversation."""
+    """Select a primary provider and an optional, explicitly disclosed fallback."""
 
     model_config = ConfigDict(extra="forbid")
 
     provider_id: str = Field(min_length=1, max_length=64)
     model_id: str = Field(min_length=1, max_length=256)
+    fallback_provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    fallback_model_id: str | None = Field(default=None, min_length=1, max_length=256)
 
-    @field_validator("provider_id")
+    @field_validator("provider_id", "fallback_provider_id")
     @classmethod
-    def validate_provider_id(cls, value: str) -> str:
+    def validate_provider_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         import re
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
             raise ValueError("provider_id must be a short stable identifier")
         return value
 
-    @field_validator("model_id")
+    @field_validator("model_id", "fallback_model_id")
     @classmethod
-    def validate_model_id(cls, value: str) -> str:
+    def validate_model_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
             raise ValueError("model_id is invalid")
         return value
 
+    @model_validator(mode="after")
+    def validate_fallback_pair(self):
+        if (self.fallback_provider_id is None) != (self.fallback_model_id is None):
+            raise ValueError("fallback provider and model must be configured together")
+        if self.fallback_provider_id == self.provider_id and self.fallback_provider_id is not None:
+            raise ValueError("fallback must use a different provider")
+        return self
+
 
 class ConversationModelSelectionResponse(BaseModel):
-    """Non-secret model selection restored by every client of the conversation."""
+    """Non-secret owner-scoped primary and optional fallback selection."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -299,3 +339,5 @@ class ConversationModelSelectionResponse(BaseModel):
     selected: bool
     provider_id: str | None = Field(default=None, min_length=1, max_length=64)
     model_id: str | None = Field(default=None, min_length=1, max_length=256)
+    fallback_provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    fallback_model_id: str | None = Field(default=None, min_length=1, max_length=256)
