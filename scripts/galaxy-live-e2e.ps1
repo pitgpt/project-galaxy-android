@@ -366,7 +366,10 @@ function Send-LilaTurnSafely {
                 return $retry.Data
             }
 
-            if ($retry.TransportError) {
+            if ($retry.TransportError -or
+                $retry.StatusCode -eq 409 -or
+                ($retry.Headers.ContainsKey('X-Lila-Outcome-Unknown') -and
+                 $retry.Headers['X-Lila-Outcome-Unknown'] -eq 'true')) {
                 $afterRetry = Get-TurnStatus -ConversationId $ConversationId -IdempotencyKey $IdempotencyKey
                 if ($afterRetry.Kind -eq 'completed') {
                     return $afterRetry.Response
@@ -411,15 +414,24 @@ if ($backendUri.Scheme -ne 'https' -or
 }
 $script:BackendBaseUrl = $backendUri.AbsoluteUri.TrimEnd('/')
 
-if ($ProviderType -eq 'cloud') {
-    if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl) -or
-        ([Uri]::IsWellFormedUriString($ProviderBaseUrl, [UriKind]::Absolute) -and
-         ([Uri]$ProviderBaseUrl).Scheme -ne 'https')) {
-        throw 'Cloud provider endpoints must use HTTPS.'
-    }
-}
 if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl)) {
     throw 'ProviderBaseUrl is required.'
+}
+try {
+    $providerUri = [Uri]::new($ProviderBaseUrl)
+}
+catch {
+    throw 'ProviderBaseUrl must be a valid absolute HTTP(S) URL.'
+}
+if (-not $providerUri.IsAbsoluteUri -or
+    $providerUri.Scheme -notin @('http', 'https') -or
+    -not [string]::IsNullOrWhiteSpace($providerUri.UserInfo) -or
+    -not [string]::IsNullOrWhiteSpace($providerUri.Query) -or
+    -not [string]::IsNullOrWhiteSpace($providerUri.Fragment)) {
+    throw 'ProviderBaseUrl must be an absolute HTTP(S) URL without credentials, query, or fragment.'
+}
+if ($ProviderType -eq 'cloud' -and $providerUri.Scheme -ne 'https') {
+    throw 'Cloud provider endpoints must use HTTPS.'
 }
 if ([string]::IsNullOrWhiteSpace($Message) -or $Message.Length -gt 12000) {
     throw 'Message must contain 1 to 12000 characters.'
@@ -433,8 +445,6 @@ $script:HttpClient = [System.Net.Http.HttpClient]::new($handler)
 $script:HttpClient.Timeout = [TimeSpan]::FromSeconds(160)
 $script:AccessToken = $null
 $providerApiKey = $null
-$providerCreatedThisRun = $false
-$providerConfigured = $false
 
 try {
     $script:AccessToken = Read-SecretText -Prompt 'Paste the Supabase access token for the same account used in Galaxy'
@@ -530,7 +540,6 @@ try {
         $createBody.provider_id = $ProviderId
         $saveResult = Invoke-LilaApi -Method POST -Path '/v1/lila/providers' -Body $createBody
         [void](Assert-LilaSuccess -Result $saveResult -Operation 'Provider creation')
-        $providerCreatedThisRun = $true
     }
 
     $providerPath = '/v1/lila/providers/' + (ConvertTo-EncodedPathSegment -Value $ProviderId)
@@ -548,7 +557,7 @@ try {
             $ModelId = Read-Host 'Enter the exact model ID to use'
         }
         else {
-            $ModelId = Read-Host 'Model discovery is unavailable; enter the exact model ID configured in the runtime'
+            $ModelId = Read-Host 'No usable model list was returned; enter the exact model ID configured in the runtime'
         }
     }
     if ([string]::IsNullOrWhiteSpace($ModelId) -or $ModelId.Length -gt 256) {
@@ -565,7 +574,6 @@ try {
     }
     $updateFinalResult = Invoke-LilaApi -Method PUT -Path $providerPath -Body $providerBody
     [void](Assert-LilaSuccess -Result $updateFinalResult -Operation 'Final provider model update')
-    $providerConfigured = $true
 
     $selectionBody = @{
         provider_id = $ProviderId
@@ -622,6 +630,8 @@ try {
 finally {
     $script:AccessToken = $null
     $providerApiKey = $null
+    $providerBody = $null
+    $createBody = $null
     $ownerId = $null
     $ownerKey = $null
     if ($null -ne $script:HttpClient) {
