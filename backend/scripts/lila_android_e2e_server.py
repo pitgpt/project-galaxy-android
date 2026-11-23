@@ -174,7 +174,7 @@ def main() -> None:
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_payload = {
-        "base_url": "https://10.0.2.2:8443",
+        "base_url": "https://127.0.0.1:8443",
         "access_token": access_token,
         "owner_key": owner_key,
         "character_id": "galaxy.default",
