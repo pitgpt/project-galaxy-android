@@ -94,8 +94,18 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  windows-e2e-script:
+    name: Windows live E2E script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Parse script and verify Android conversation ID vector
+        shell: pwsh
+        run: ./scripts/galaxy-live-e2e.ps1 -SelfTest
+
   build:
-    needs: [test, backend-test, instrumented-test]
+    needs: [test, backend-test, instrumented-test, windows-e2e-script]
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
