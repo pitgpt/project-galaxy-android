@@ -338,6 +338,46 @@ def test_model_discovery_uses_common_local_openai_compatible_contract(
     assert captured["authorization"] is None
 
 
+@pytest.mark.parametrize(
+    ("runtime", "base_url", "expected_url"),
+    [
+        ("LM Studio", "http://127.0.0.1:1234/v1", "http://127.0.0.1:1234/v1/chat/completions"),
+        ("Ollama OpenAI-compatible API", "http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1/chat/completions"),
+        ("llama.cpp server OpenAI-compatible API", "http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1/chat/completions"),
+    ],
+)
+def test_local_openai_compatible_runtimes_generate_through_the_shared_chat_contract(
+    runtime, base_url, expected_url
+):
+    captured = {}
+
+    async def handler(request):
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": f"Ответ от {runtime}"}}]},
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(
+                client,
+                make_config(base_url=base_url, api_key=None, model_id="qwen-local"),
+            )
+            return await adapter.generate(make_context())
+
+    response = asyncio.run(scenario())
+    assert response.text == f"Ответ от {runtime}"
+    assert response.provider_id == "provider-test"
+    assert response.model_id == "qwen-local"
+    assert captured["url"] == expected_url
+    assert captured["authorization"] is None
+    assert captured["body"]["model"] == "qwen-local"
+    assert captured["body"]["messages"]
+
+
 @pytest.mark.parametrize("status_code", [404, 405])
 def test_model_discovery_reports_unsupported_route_without_generation(status_code):
     captured = []
