@@ -69,10 +69,11 @@ internal data class RecoverableImageGenerationRequest(
 internal fun latestRecoverableImageGenerationRequest(
     characterId: String,
     requests: List<ImageGenerationRequest>,
-    jobs: List<ComfyUiJobRecord>
+    jobs: List<ComfyUiJobRecord>,
+    conversationId: String = characterId
 ): RecoverableImageGenerationRequest? {
     val latest = requests.asSequence()
-        .filter { it.characterId == characterId }
+        .filter { it.characterId == characterId && it.conversationId == conversationId }
         .maxWithOrNull(compareBy<ImageGenerationRequest> { it.createdAtEpochMillis }.thenBy { it.id })
         ?: return null
     return RecoverableImageGenerationRequest(
@@ -88,13 +89,20 @@ internal fun latestRecoverableImageGenerationRequest(
 internal suspend fun loadLatestRecoverableImageGenerationRequest(
     characterId: String,
     requestStore: ImageGenerationRequestStore,
-    jobStore: ComfyUiJobStore
+    jobStore: ComfyUiJobStore,
+    conversationId: String = characterId
 ): RecoverableImageGenerationRequest? {
-    val latest = requestStore.latestForCharacter(characterId) ?: return null
+    // Character IDs are shared across signed-in owners; restore only within the stable
+    // owner-scoped Lila conversation. The request table remains encrypted by SQLCipher.
+    val latest = requestStore.all().asSequence()
+        .filter { it.characterId == characterId && it.conversationId == conversationId }
+        .maxWithOrNull(compareBy<ImageGenerationRequest> { it.createdAtEpochMillis }.thenBy { it.id })
+        ?: return null
     return latestRecoverableImageGenerationRequest(
         characterId = characterId,
         requests = listOf(latest),
-        jobs = jobStore.all()
+        jobs = jobStore.all(),
+        conversationId = conversationId
     )
 }
 
@@ -162,10 +170,12 @@ internal suspend fun decodeGeneratedImageAndClearBytes(
  */
 @Composable
 internal fun CharacterScopedGenerationPanel(
-    characterId: String,
+    conversationId: String,
     content: @Composable () -> Unit
 ) {
-    key(characterId) { content() }
+    // Reset transient Compose state when the authenticated owner/conversation changes,
+    // even if the selected character ID is the same.
+    key(conversationId) { content() }
 }
 
 @Composable
@@ -173,7 +183,9 @@ internal fun ImageGenerationPanel(
     app: GalaxyApplication,
     characterId: String,
     modifier: Modifier = Modifier,
-    onSubmittingChanged: (Boolean) -> Unit
+    onSubmittingChanged: (Boolean) -> Unit,
+    conversationId: String = characterId,
+    onImagePersisted: (com.pitgpt.galaxy.core.model.StoredGeneratedImage) -> Unit = {}
 ) {
     var runtime by remember { mutableStateOf<ComfyUiRuntime?>(null) }
     var setupError by remember { mutableStateOf<String?>(null) }
@@ -206,12 +218,13 @@ internal fun ImageGenerationPanel(
         }
     }
 
-    LaunchedEffect(app, characterId) {
+    LaunchedEffect(app, characterId, conversationId) {
         if (request != null || isRestoring) return@LaunchedEffect
         isRestoring = true
         try {
             val restored = loadLatestRecoverableImageGenerationRequest(
                 characterId = characterId,
+                conversationId = conversationId,
                 requestStore = app.imageGenerationRequests,
                 jobStore = app.comfyUiJobStore
             )
@@ -250,6 +263,7 @@ internal fun ImageGenerationPanel(
                         isPersisting = true
                         try {
                             val stored = activeRuntime.persistCompletedResult(activeRequest, activeJobId)
+                            onImagePersisted(stored)
                             val plaintext = app.generatedImages.read(stored.assetId)
                             val decoded = decodeGeneratedImageAndClearBytes(plaintext)
                             image = decoded
@@ -316,7 +330,7 @@ internal fun ImageGenerationPanel(
                 val requestToSubmit = try {
                     ImageGenerationRequest(
                         id = UUID.randomUUID().toString(),
-                        conversationId = characterId,
+                        conversationId = conversationId,
                         characterId = characterId,
                         prompt = prompt.trim(),
                         preferredMimeType = "image/png",
