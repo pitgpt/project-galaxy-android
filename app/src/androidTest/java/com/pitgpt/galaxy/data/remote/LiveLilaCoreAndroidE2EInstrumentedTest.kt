@@ -24,7 +24,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class LiveLilaCoreAndroidE2EInstrumentedTest {
     @Test
-    fun authenticatedAndroidClientSendsRealModelTurnAndCommitsSqlCipherHistory() = runBlocking {
+    fun authenticatedAndroidClientSwitchesProvidersAndCommitsSqlCipherHistory() = runBlocking {
         val arguments = InstrumentationRegistry.getArguments()
         assumeTrue(
             "The dedicated live Android/Core job did not enable this test",
@@ -74,6 +74,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
         }
         val app = InstrumentationRegistry.getInstrumentation()
             .targetContext.applicationContext as GalaxyApplication
+        val openAiProviderId = "$providerId-openai"
 
         try {
             val created = catalogStep("create-provider") {
@@ -168,11 +169,101 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertEquals(messageText, localHistory[0].content)
             assertEquals(result.text, localHistory[1].content)
 
+            // Exercise the same local Ollama runtime through its OpenAI-compatible /v1 API.
+            // The resolver must select OpenAICompatibleModelAdapter for this path, not native /api/chat.
+            val openAiProvider = catalogStep("create-openai-compatible-provider") {
+                catalog.createProvider(
+                    providerId = openAiProviderId,
+                    providerType = "local",
+                    baseUrl = providerBaseUrl.trimEnd('/') + "/v1",
+                    modelId = modelId,
+                    apiKey = null,
+                    timeoutSeconds = 120.0
+                )
+            }
+            assertEquals(openAiProviderId, openAiProvider.providerId)
+            assertEquals("local", openAiProvider.providerType)
+            assertTrue(!openAiProvider.hasApiKey)
+
+            val openAiProbe = catalogStep("probe-openai-compatible-provider") {
+                catalog.probeProvider(openAiProviderId)
+            }
+            assertTrue(openAiProbe.connectionReachable)
+            assertEquals(true, openAiProbe.configuredModelAvailable)
+            assertTrue(openAiProbe.modelIds.contains(modelId))
+
+            val switchedSelection = catalogStep("switch-conversation-model") {
+                catalog.setConversationModel(
+                    conversationId = conversationId,
+                    providerId = openAiProviderId,
+                    modelId = modelId
+                )
+            }
+            assertTrue(switchedSelection.selected)
+            assertEquals(openAiProviderId, switchedSelection.providerId)
+            assertEquals(modelId, switchedSelection.modelId)
+
+            val secondMessage = "Продолжи тот же разговор и кратко подтверди переключение модели."
+            val secondIdempotencyKey = UUID.randomUUID().toString()
+            val secondCreatedAt = System.currentTimeMillis()
+            val secondPendingId = "lila-pending-$secondIdempotencyKey"
+            app.conversations.append(
+                ConversationMessage(
+                    id = secondPendingId,
+                    characterId = storageCharacterId,
+                    role = MessageRole.USER,
+                    content = secondMessage,
+                    createdAtEpochMillis = secondCreatedAt
+                )
+            )
+            val secondResult = turnProvider.sendTurn(
+                conversationId = conversationId,
+                message = secondMessage,
+                idempotencyKey = secondIdempotencyKey
+            )
+            assertEquals(conversationId, secondResult.conversationId)
+            assertEquals(openAiProviderId, secondResult.providerId)
+            assertEquals(modelId, secondResult.modelId)
+            assertTrue(secondResult.text.isNotBlank())
+
+            val switchedRemoteHistory = turnProvider.loadAllHistory(conversationId)
+            assertEquals(4, switchedRemoteHistory.size)
+            assertEquals(listOf("user", "assistant", "user", "assistant"), switchedRemoteHistory.map { it.role })
+            assertEquals(messageText, switchedRemoteHistory[0].content)
+            assertEquals(result.text, switchedRemoteHistory[1].content)
+            assertEquals(providerId, switchedRemoteHistory[1].providerId)
+            assertEquals(modelId, switchedRemoteHistory[1].modelId)
+            assertEquals(secondMessage, switchedRemoteHistory[2].content)
+            assertEquals(secondResult.text, switchedRemoteHistory[3].content)
+            assertEquals(openAiProviderId, switchedRemoteHistory[3].providerId)
+            assertEquals(modelId, switchedRemoteHistory[3].modelId)
+
+            app.conversations.commitPendingTurn(
+                pendingMessageId = secondPendingId,
+                userMessage = ConversationMessage(
+                    id = "lila-$conversationId-user-$secondIdempotencyKey",
+                    characterId = storageCharacterId,
+                    role = MessageRole.USER,
+                    content = secondMessage,
+                    createdAtEpochMillis = secondCreatedAt
+                ),
+                assistantMessage = ConversationMessage(
+                    id = "lila-$conversationId-assistant-$secondIdempotencyKey",
+                    characterId = storageCharacterId,
+                    role = MessageRole.CHARACTER,
+                    content = secondResult.text,
+                    createdAtEpochMillis = System.currentTimeMillis()
+                )
+            )
+            val switchedLocalHistory = app.conversations.getForCharacter(storageCharacterId)
+            assertEquals(4, switchedLocalHistory.size)
+            assertEquals(secondMessage, switchedLocalHistory[2].content)
+            assertEquals(secondResult.text, switchedLocalHistory[3].content)
             val restoredSelection = catalogStep("restore-conversation-model") {
                 catalog.getConversationModel(conversationId)
             }
             assertTrue(restoredSelection.selected)
-            assertEquals(providerId, restoredSelection.providerId)
+            assertEquals(openAiProviderId, restoredSelection.providerId)
             assertEquals(modelId, restoredSelection.modelId)
 
             val integrity = app.database.openHelper.writableDatabase
@@ -185,6 +276,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             // The owner and provider are unique to this CI invocation. Remove only
             // this test's local conversation and provider; the backend DB is ephemeral.
             runCatching { app.conversations.clearForCharacter(storageCharacterId) }
+            runCatching { catalog.deleteProvider(openAiProviderId) }
             runCatching { catalog.deleteProvider(providerId) }
         }
     }
