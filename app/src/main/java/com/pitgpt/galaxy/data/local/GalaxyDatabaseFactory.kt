@@ -102,7 +102,7 @@ object GalaxyDatabaseFactory {
         }
     }
 
-    private val encryptor
+    private val encryptor = PlaintextDatabaseEncryptor()
 
     @Volatile
     private var instance: GalaxyDatabase? = null
