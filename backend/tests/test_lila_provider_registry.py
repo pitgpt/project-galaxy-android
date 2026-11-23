@@ -1928,7 +1928,7 @@ def test_explicit_fallback_runs_only_after_pre_send_connection_failure():
 
     async def handler(request):
         calls.append(request.url.host)
-        if request.url.host == "primary.example.com":
+        if request.url.host == "primary.vendor.net":
             raise httpx.ConnectError("private transport detail", request=request)
         return httpx.Response(
             200,
@@ -1937,8 +1937,8 @@ def test_explicit_fallback_runs_only_after_pre_send_connection_failure():
 
     resolver = _fallback_resolver(
         {
-            "primary": _fallback_provider("primary", "primary.example.com", "primary-model"),
-            "backup": _fallback_provider("backup", "backup.example.com", "backup-model"),
+            "primary": _fallback_provider("primary", "primary.vendor.net", "primary-model"),
+            "backup": _fallback_provider("backup", "backup.vendor.net", "backup-model"),
         },
         {
             "provider_id": "primary",
@@ -1961,7 +1961,7 @@ def test_explicit_fallback_runs_only_after_pre_send_connection_failure():
     assert result.fallback_from_provider_id == "primary"
     assert result.fallback_from_model_id == "primary-model"
     assert result.fallback_reason == "primary_connection_unavailable"
-    assert calls == ["primary.example.com", "backup.example.com"]
+    assert calls == ["primary.vendor.net", "backup.vendor.net"]
 
 
 def test_ambiguous_primary_http_failure_never_triggers_fallback():
@@ -1973,8 +1973,8 @@ def test_ambiguous_primary_http_failure_never_triggers_fallback():
 
     resolver = _fallback_resolver(
         {
-            "primary": _fallback_provider("primary", "primary.example.com", "primary-model"),
-            "backup": _fallback_provider("backup", "backup.example.com", "backup-model"),
+            "primary": _fallback_provider("primary", "primary.vendor.net", "primary-model"),
+            "backup": _fallback_provider("backup", "backup.vendor.net", "backup-model"),
         },
         {
             "provider_id": "primary",
@@ -1991,7 +1991,7 @@ def test_ambiguous_primary_http_failure_never_triggers_fallback():
 
     with pytest.raises(ModelProviderUnavailable):
         run(execute())
-    assert calls == ["primary.example.com"]
+    assert calls == ["primary.vendor.net"]
 
 
 def test_missing_primary_uses_only_the_explicit_owner_fallback():
@@ -2005,7 +2005,7 @@ def test_missing_primary_uses_only_the_explicit_owner_fallback():
         )
 
     resolver = _fallback_resolver(
-        {"backup": _fallback_provider("backup", "backup.example.com", "backup-model")},
+        {"backup": _fallback_provider("backup", "backup.vendor.net", "backup-model")},
         {
             "provider_id": "primary",
             "model_id": "primary-model",
@@ -2023,7 +2023,7 @@ def test_missing_primary_uses_only_the_explicit_owner_fallback():
     assert result.fallback_used is True
     assert result.fallback_reason == "primary_provider_unavailable"
     assert result.provider_id == "backup"
-    assert calls == ["backup.example.com"]
+    assert calls == ["backup.vendor.net"]
 
 
 def test_primary_connection_failure_without_configured_fallback_does_not_choose_another_provider():
@@ -2035,8 +2035,8 @@ def test_primary_connection_failure_without_configured_fallback_does_not_choose_
 
     resolver = _fallback_resolver(
         {
-            "primary": _fallback_provider("primary", "primary.example.com", "primary-model"),
-            "other": _fallback_provider("other", "other.example.com", "other-model"),
+            "primary": _fallback_provider("primary", "primary.vendor.net", "primary-model"),
+            "other": _fallback_provider("other", "other.vendor.net", "other-model"),
         },
         {"provider_id": "primary", "model_id": "primary-model"},
         handler,
@@ -2048,7 +2048,7 @@ def test_primary_connection_failure_without_configured_fallback_does_not_choose_
 
     with pytest.raises(ModelProviderConnectionUnavailable):
         run(execute())
-    assert calls == ["primary.example.com"]
+    assert calls == ["primary.vendor.net"]
 
 
 def test_primary_connection_failure_with_missing_configured_fallback_is_explicit():
@@ -2059,7 +2059,7 @@ def test_primary_connection_failure_with_missing_configured_fallback_is_explicit
         raise httpx.ConnectError("offline", request=request)
 
     resolver = _fallback_resolver(
-        {"primary": _fallback_provider("primary", "primary.example.com", "primary-model")},
+        {"primary": _fallback_provider("primary", "primary.vendor.net", "primary-model")},
         {
             "provider_id": "primary",
             "model_id": "primary-model",
@@ -2075,4 +2075,4 @@ def test_primary_connection_failure_with_missing_configured_fallback_is_explicit
 
     with pytest.raises(SelectedFallbackProviderUnavailable):
         run(execute())
-    assert calls == ["primary.example.com"]
+    assert calls == ["primary.vendor.net"]
