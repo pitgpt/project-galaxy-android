@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <!-- Supabase session ciphertext is device-bound to an Android Keystore key. -->
+    <!-- Device-bound credentials and encrypted local state cannot be restored on another device. -->
     <exclude domain="sharedpref" path="galaxy_secure_auth.xml" />
+    <exclude domain="sharedpref" path="galaxy_provider_vault.xml" />
+    <exclude domain="sharedpref" path="galaxy_database_key.xml" />
+    <exclude domain="sharedpref" path="galaxy_backend_config.xml" />
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="galaxy_media/" />
 </full-backup-content>

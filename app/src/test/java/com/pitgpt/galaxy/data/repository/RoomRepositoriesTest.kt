@@ -82,6 +82,27 @@ class RoomRepositoriesTest {
     }
 
     @Test
+    fun committedTurnAtomicallyReplacesItsPendingLocalMessage() = runBlocking {
+        val pending = ConversationMessage(
+            "lila-pending-key-1", "galaxy.default", MessageRole.USER, "hello", 10L
+        )
+        val user = ConversationMessage(
+            "sent-user-1", "galaxy.default", MessageRole.USER, "hello", 10L
+        )
+        val assistant = ConversationMessage(
+            "sent-assistant-1", "galaxy.default", MessageRole.CHARACTER, "world", 11L
+        )
+        conversations.append(pending)
+
+        conversations.commitPendingTurn(pending.id, user, assistant)
+
+        assertEquals(
+            listOf(user, assistant),
+            conversations.getForCharacter("galaxy.default")
+        )
+    }
+
+    @Test
     fun memoryIsIsolatedByScopeAndCharacterOwner() = runBlocking {
         val userMemory = MemoryItem(
             id = "user-1", scope = MemoryScope.USER, content = "User preference",

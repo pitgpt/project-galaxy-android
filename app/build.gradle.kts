@@ -10,7 +10,7 @@ val gitSha = System.getenv("GITHUB_SHA")?.take(7) ?: "local"
 val galaxyApiBaseUrl = providers.gradleProperty("galaxyApiBaseUrl").orElse(providers.environmentVariable("GALAXY_API_BASE_URL")).getOrElse("https://api.galaxy.invalid")
 val supabaseUrl = providers.gradleProperty("supabaseUrl").orElse(providers.environmentVariable("SUPABASE_URL")).getOrElse("")
 val supabasePublishableKey = providers.gradleProperty("supabasePublishableKey").orElse(providers.environmentVariable("SUPABASE_PUBLISHABLE_KEY")).getOrElse("")
-fun buildConfigString(value: String) = "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+fun buildConfigString(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 android {
     namespace = "com.pitgpt.galaxy"
@@ -21,6 +21,8 @@ android {
         targetSdk = 35
         versionCode = 4
         versionName = "0.4.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments["clearPackageData"] = "false"
         buildConfigField("String", "GIT_SHA", buildConfigString(gitSha))
         buildConfigField("String", "GALAXY_API_BASE_URL", buildConfigString(galaxyApiBaseUrl))
         buildConfigField("String", "SUPABASE_URL", buildConfigString(supabaseUrl))
@@ -36,6 +38,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     testOptions {
+        execution = "ANDROIDX_TEST_ORCHESTRATOR"
         unitTests.isIncludeAndroidResources = true
     }
 }
@@ -55,9 +58,18 @@ dependencies {
     val roomVersion = "2.7.0"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
+    implementation("androidx.sqlite:sqlite:2.7.0")
+    // Use the published Maven Central module metadata/POM so clean CI runners can
+    // resolve the AAR and its androidx.sqlite runtime dependency without relying
+    // on a previously warmed Gradle artifact cache.
+    implementation("net.zetetic:sqlcipher-android:4.20.0")
     ksp("androidx.room:room-compiler:$roomVersion")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
     testImplementation("org.robolectric:robolectric:4.14.1")
+
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestUtil("androidx.test:orchestrator:1.5.1")
 }
