@@ -120,6 +120,7 @@ class SqlCipherProcessDeathRecoveryInstrumentedTest {
             )
             val recovered = loadLatestRecoverableImageGenerationRequest(
                 characterId = request.characterId,
+                conversationId = request.conversationId,
                 requestStore = requestStore,
                 jobStore = jobStore
             )
