@@ -428,7 +428,8 @@ def test_authenticated_image_api_is_owner_scoped_and_never_returns_provider_secr
         summary = client.get("/v1/lila/image-providers/comfyui", headers=headers)
         assert summary.status_code == 200
         assert summary.json()["configured"] is True
-        assert "bearer_token" not in summary.text
+        assert summary.json().get("bearer_token") is None
+        assert "never-return-this-token" not in summary.text
         assert "base_url" not in summary.text
 
         created = client.post(
