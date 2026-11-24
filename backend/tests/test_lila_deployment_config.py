@@ -93,6 +93,8 @@ def test_env_example_does_not_store_lila_secrets():
     assert values["LILA_MODEL_ID"] == ""
     assert values["LILA_PROVIDER_API_KEY"] == ""
     assert values["LILA_STORAGE_ENCRYPTION_KEY"] == ""
+    assert values["OPENAI_API_KEY"] == ""
+    assert values["SAFETY_IDENTIFIER_HMAC_KEY"] == ""
     assert values["LILA_DATABASE_PATH"] == LILA_DATABASE_PATH
     assert values["AUTH_JWKS_URL"] == "https://YOUR_PROJECT_REF.supabase.co/auth/v1/.well-known/jwks.json"
     assert values["AUTH_ISSUER"] == "https://YOUR_PROJECT_REF.supabase.co/auth/v1"
@@ -199,3 +201,83 @@ def test_operator_provider_requires_encrypted_storage(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Lila configuration is incomplete"):
         Settings.from_env()
+
+def _set_minimal_development_settings_environment(monkeypatch):
+    monkeypatch.setenv("AUTH_JWKS_URL", "https://issuer.example/.well-known/jwks.json")
+    monkeypatch.setenv("AUTH_ISSUER", "https://issuer.example/")
+    monkeypatch.setenv("AUTH_AUDIENCE", "galaxy-android")
+    monkeypatch.setenv("GALAXY_ENVIRONMENT", "development")
+    for name in (
+        "LILA_DATABASE_PATH",
+        "LILA_STORAGE_ENCRYPTION_KEY",
+        "LILA_STORAGE_ENCRYPTION_KEY_FILE",
+        "LILA_PROVIDER_BASE_URL",
+        "LILA_MODEL_ID",
+        "LILA_PROVIDER_API_KEY",
+        "LILA_PROVIDER_API_KEY_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_settings_load_optional_realtime_secret_files_without_exposing_values(monkeypatch, tmp_path):
+    from galaxy_backend.config import Settings
+
+    openai_key = "openai-realtime-file-secret"
+    safety_key = "safety-hmac-file-secret-material"
+    openai_file = tmp_path / "openai-key"
+    safety_file = tmp_path / "safety-key"
+    openai_file.write_text(openai_key + "\\n", encoding="ascii")
+    safety_file.write_text(safety_key + "\\n", encoding="ascii")
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("SAFETY_IDENTIFIER_HMAC_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY_FILE", str(openai_file))
+    monkeypatch.setenv("SAFETY_IDENTIFIER_HMAC_KEY_FILE", str(safety_file))
+
+    settings = Settings.from_env()
+
+    assert settings.openai_api_key == openai_key
+    assert settings.safety_identifier_hmac_key == safety_key
+    assert openai_key not in repr(settings)
+    assert safety_key not in repr(settings)
+
+
+@pytest.mark.parametrize("name", ["OPENAI_API_KEY", "SAFETY_IDENTIFIER_HMAC_KEY"])
+def test_settings_reject_realtime_secret_value_and_file_ambiguity(monkeypatch, tmp_path, name):
+    from galaxy_backend.config import Settings
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    secret_file = tmp_path / (name.lower() + ".secret")
+    secret_file.write_text("file-secret", encoding="ascii")
+    monkeypatch.setenv(name, "direct-secret")
+    monkeypatch.setenv(name + "_FILE", str(secret_file))
+
+    with pytest.raises(RuntimeError, match=f"Set only one of {name}"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize("name", ["OPENAI_API_KEY", "SAFETY_IDENTIFIER_HMAC_KEY"])
+def test_settings_fail_closed_when_realtime_secret_file_is_missing(monkeypatch, tmp_path, name):
+    from galaxy_backend.config import Settings
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(name + "_FILE", str(tmp_path / (name.lower() + ".missing")))
+
+    with pytest.raises(RuntimeError, match=name + "_FILE could not be read"):
+        Settings.from_env()
+
+
+def test_settings_keep_direct_realtime_secret_environment_compatibility(monkeypatch):
+    from galaxy_backend.config import Settings
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "direct-openai-secret")
+    monkeypatch.setenv("SAFETY_IDENTIFIER_HMAC_KEY", "direct-safety-secret")
+
+    settings = Settings.from_env()
+
+    assert settings.openai_api_key == "direct-openai-secret"
+    assert settings.safety_identifier_hmac_key == "direct-safety-secret"
+

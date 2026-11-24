@@ -145,6 +145,10 @@ class Settings:
         lila_provider_api_key, _ = _read_secret_setting(
             "LILA_PROVIDER_API_KEY", max_bytes=4096
         )
+        openai_api_key, _ = _read_secret_setting("OPENAI_API_KEY", max_bytes=4096)
+        safety_identifier_hmac_key, _ = _read_secret_setting(
+            "SAFETY_IDENTIFIER_HMAC_KEY", max_bytes=4096
+        )
         lila_database_path = os.getenv("LILA_DATABASE_PATH") or None
         storage_key_text, storage_key_file_requested = _read_secret_setting(
             "LILA_STORAGE_ENCRYPTION_KEY", max_bytes=128
@@ -226,11 +230,11 @@ class Settings:
             raise RuntimeError("GALAXY_ALLOWED_CHARACTER_IDS must contain at least one character")
 
         return cls(
-            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
+            openai_api_key=openai_api_key,
             auth_jwks_url=os.environ["AUTH_JWKS_URL"],
             auth_issuer=os.environ["AUTH_ISSUER"],
             auth_audience=os.environ["AUTH_AUDIENCE"],
-            safety_identifier_hmac_key=os.getenv("SAFETY_IDENTIFIER_HMAC_KEY") or None,
+            safety_identifier_hmac_key=safety_identifier_hmac_key,
             allowed_voices=voices,
             allowed_character_ids=characters,
             realtime_model=os.getenv("REALTIME_MODEL", "gpt-realtime"),
