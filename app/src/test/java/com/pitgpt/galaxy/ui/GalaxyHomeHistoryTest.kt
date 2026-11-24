@@ -2,12 +2,105 @@ package com.pitgpt.galaxy.ui
 
 import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
+import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
+import com.pitgpt.galaxy.data.remote.LilaImageHistoryJob
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GalaxyHomeHistoryTest {
+
+    @Test
+    fun timelineMergesMessagesImagesAndCoreJobsInChronologicalOrder() {
+        val message = ConversationMessage(
+            id = "message-1",
+            characterId = "character-a",
+            role = MessageRole.USER,
+            content = "Create a portrait",
+            createdAtEpochMillis = 1_000L
+        )
+        val queued = imageJob("job-queued", "queued", 2_000L)
+        val completed = imageJob("job-completed", "completed", 3_000L)
+        val failed = imageJob("job-failed", "failed", 4_000L)
+        val storedImage = StoredGeneratedImage(
+            assetId = "asset-completed",
+            requestId = "request-completed",
+            conversationId = "conversation-a",
+            characterId = "character-a",
+            mimeType = "image/png",
+            width = 64,
+            height = 64,
+            byteSize = 128L,
+            sha256 = "a".repeat(64),
+            createdAtEpochMillis = 3_000L
+        )
+
+        val timeline = buildConversationTimeline(
+            messages = listOf(message),
+            images = listOf(storedImage),
+            imageJobs = listOf(queued, completed, failed),
+            requestIdsByJobId = mapOf("job-completed" to "request-completed")
+        )
+
+        assertEquals(
+            listOf(
+                "message:message-1",
+                "image-job:job-queued",
+                "image:asset-completed",
+                "image-job:job-failed"
+            ),
+            timeline.map { it.key }
+        )
+        assertEquals("queued", timeline[1].imageJob?.state)
+        assertEquals("failed", timeline[3].imageJob?.state)
+    }
+
+    @Test
+    fun completedCoreJobRemainsVisibleUntilItsEncryptedAssetIsImported() {
+        val completed = imageJob("job-without-local-asset", "completed", 3_000L)
+
+        val timeline = buildConversationTimeline(
+            messages = emptyList(),
+            images = emptyList(),
+            imageJobs = listOf(completed),
+            requestIdsByJobId = emptyMap()
+        )
+
+        assertEquals(listOf("image-job:job-without-local-asset"), timeline.map { it.key })
+        assertEquals("completed", timeline.single().imageJob?.state)
+    }
+
+    @Test
+    fun coreImageJobPollingStopsOnlyForTerminalStates() {
+        assertTrue(isActiveCoreImageJobState("prepared"))
+        assertTrue(isActiveCoreImageJobState("submission_unknown"))
+        assertTrue(isActiveCoreImageJobState("queued"))
+        assertTrue(isActiveCoreImageJobState("running"))
+        assertTrue(isActiveCoreImageJobState("result_pending"))
+        assertFalse(isActiveCoreImageJobState("completed"))
+        assertFalse(isActiveCoreImageJobState("failed"))
+        assertFalse(isActiveCoreImageJobState("cancelled"))
+        assertEquals("ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ", coreImageJobStatusLabel("submission_unknown"))
+    }
+
+    private fun imageJob(
+        jobId: String,
+        state: String,
+        createdAtEpochMillis: Long
+    ) = LilaImageHistoryJob(
+        jobId = jobId,
+        conversationId = "conversation-a",
+        prompt = "silver-haired heroine portrait",
+        negativePrompt = null,
+        width = 768,
+        height = 1024,
+        seed = 42L,
+        state = state,
+        createdAtEpochMillis = createdAtEpochMillis,
+        assetByteSize = if (state == "completed") 4096L else null
+    )
+
     @Test
     fun mergeDoesNotInferPendingTurnCompletionFromMatchingHistoryText() {
         val characterId = "owner:partition:galaxy.default"
