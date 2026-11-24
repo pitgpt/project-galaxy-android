@@ -549,7 +549,7 @@ class SqliteLilaImageStore:
         if not isinstance(image_bytes, bytes) or not 24 <= len(image_bytes) <= self._MAX_IMAGE_BYTES:
             raise ValueError("Generated image size is invalid")
         if (
-            image_bytes[:8] != b"\\x89PNG\\r\\n\\x1a\\n"
+            image_bytes[:8] != b"\x89PNG\r\n\x1a\n"
             or image_bytes[12:16] != b"IHDR"
             or int.from_bytes(image_bytes[16:20], "big") != width
             or int.from_bytes(image_bytes[20:24], "big") != height
