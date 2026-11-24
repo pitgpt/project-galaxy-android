@@ -60,9 +60,11 @@ import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import com.pitgpt.galaxy.data.remote.GalaxyApiException
 import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
+import com.pitgpt.galaxy.data.remote.LilaImageHistoryJob
 import com.pitgpt.galaxy.data.remote.LilaTurnStatus
 import com.pitgpt.galaxy.data.remote.stableLilaConversationId
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.UUID
@@ -73,12 +75,78 @@ private val Ice = Color(0xFFB8D9FF)
 private const val CHARACTER_ID = "galaxy.default"
 internal const val PENDING_LILA_MESSAGE_PREFIX = "lila-pending-"
 
-private data class ConversationTimelineEntry(
+internal data class ConversationTimelineEntry(
     val key: String,
     val createdAtEpochMillis: Long,
     val message: ConversationMessage? = null,
-    val image: StoredGeneratedImage? = null
+    val image: StoredGeneratedImage? = null,
+    val imageJob: LilaImageHistoryJob? = null
 )
+
+internal fun buildConversationTimeline(
+    messages: List<ConversationMessage>,
+    images: List<StoredGeneratedImage>,
+    imageJobs: List<LilaImageHistoryJob>,
+    requestIdsByJobId: Map<String, String>
+): List<ConversationTimelineEntry> {
+    val storedRequestIds = images.mapTo(mutableSetOf<String>()) { it.requestId }
+    return buildList {
+        messages.forEach { message ->
+            add(
+                ConversationTimelineEntry(
+                    key = "message:" + message.id,
+                    createdAtEpochMillis = message.createdAtEpochMillis,
+                    message = message
+                )
+            )
+        }
+        images.forEach { image ->
+            add(
+                ConversationTimelineEntry(
+                    key = "image:" + image.assetId,
+                    createdAtEpochMillis = image.createdAtEpochMillis,
+                    image = image
+                )
+            )
+        }
+        imageJobs.forEach { job ->
+            val requestId = requestIdsByJobId[job.jobId] ?: job.jobId
+            if (job.state != "completed" || requestId !in storedRequestIds) {
+                add(
+                    ConversationTimelineEntry(
+                        key = "image-job:" + job.jobId,
+                        createdAtEpochMillis = job.createdAtEpochMillis,
+                        imageJob = job
+                    )
+                )
+            }
+        }
+    }.sortedWith(compareBy<ConversationTimelineEntry> { it.createdAtEpochMillis }.thenBy { it.key })
+}
+
+internal fun isActiveCoreImageJobState(state: String): Boolean =
+    state in setOf(
+        "prepared",
+        "submitting",
+        "submission_unknown",
+        "queued",
+        "running",
+        "provider_completed",
+        "result_pending"
+    )
+
+internal fun coreImageJobStatusLabel(state: String): String = when (state) {
+    "prepared" -> "ПОДГОТОВКА"
+    "submitting" -> "ОТПРАВКА В COMFYUI"
+    "submission_unknown" -> "ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ"
+    "queued" -> "В ОЧЕРЕДИ"
+    "running" -> "ВЫПОЛНЯЕТСЯ"
+    "provider_completed", "result_pending" -> "СОХРАНЕНИЕ РЕЗУЛЬТАТА"
+    "completed" -> "ГОТОВО · РЕЗУЛЬТАТ В CORE"
+    "failed" -> "ОШИБКА ГЕНЕРАЦИИ"
+    "cancelled" -> "ОТМЕНЕНО"
+    else -> "СТАТУС НЕИЗВЕСТЕН"
+}
 
 @Composable
 fun GalaxyHome() {
@@ -405,6 +473,7 @@ fun GalaxyHome() {
             messages = messages,
             activeModelLabel = activeModelLabel,
             aiConfigured = app.lilaTurnProvider.isConfigured,
+            remoteImageHistoryEnabled = conversationOwnerKey != null && app.lilaTurnProvider.isConfigured,
             isLoading = isLoading,
             loadError = loadError,
             historySyncWarning = historySyncWarning,
@@ -686,6 +755,7 @@ private fun ConversationScreen(
     messages: List<ConversationMessage>,
     activeModelLabel: String?,
     aiConfigured: Boolean,
+    remoteImageHistoryEnabled: Boolean,
     isLoading: Boolean,
     loadError: String?,
     historySyncWarning: String?,
@@ -703,40 +773,67 @@ private fun ConversationScreen(
     }
     var imageHistoryRefreshKey by remember(conversationId) { mutableStateOf(0) }
     var imageHistoryLoadError by remember(conversationId) { mutableStateOf(false) }
+    var imageHistorySyncWarning by remember(conversationId) { mutableStateOf<String?>(null) }
+    var imageJobs by remember(conversationId) { mutableStateOf<List<LilaImageHistoryJob>>(emptyList()) }
+    var imageJobRequestIds by remember(conversationId) { mutableStateOf<Map<String, String>>(emptyMap()) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
-    LaunchedEffect(app, conversationId, imageHistoryRefreshKey) {
-        try {
-            generatedImages = app.generatedImages.listForConversation(conversationId)
-            imageHistoryLoadError = false
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            imageHistoryLoadError = true
+    LaunchedEffect(app, conversationId, imageHistoryRefreshKey, remoteImageHistoryEnabled, characterId) {
+        var shouldPoll = true
+        while (shouldPoll) {
+            try {
+                if (remoteImageHistoryEnabled) {
+                    val coreHistory = app.lilaCoreImageGenerationProvider.history(conversationId)
+                    val sync = syncCoreImageHistory(
+                        provider = app.lilaCoreImageGenerationProvider,
+                        conversationId = conversationId,
+                        characterId = characterId,
+                        requestStore = app.imageGenerationRequests,
+                        jobStore = app.comfyUiJobStore,
+                        images = app.generatedImages,
+                        history = coreHistory
+                    )
+                    imageJobs = coreHistory
+                    imageJobRequestIds = try {
+                        app.comfyUiJobStore.all().associate { it.promptId to it.requestId }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        emptyMap()
+                    }
+                    generatedImages = app.generatedImages.listForConversation(conversationId)
+                    imageHistorySyncWarning = if (sync.skippedAssets > 0) {
+                        "Часть результатов осталась в Lila Core: импорт ограничен 10 изображениями и 50 МиБ за синхронизацию."
+                    } else {
+                        null
+                    }
+                    imageHistoryLoadError = false
+                    shouldPoll = coreHistory.any { isActiveCoreImageJobState(it.state) }
+                } else {
+                    generatedImages = app.generatedImages.listForConversation(conversationId)
+                    imageJobs = emptyList()
+                    imageJobRequestIds = emptyMap()
+                    imageHistorySyncWarning = null
+                    imageHistoryLoadError = false
+                    shouldPoll = false
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                imageHistoryLoadError = true
+                shouldPoll = false
+            }
+            if (shouldPoll) delay(4_000)
         }
     }
 
-    val timeline = buildList {
-        messages.forEach { message ->
-            add(
-                ConversationTimelineEntry(
-                    key = "message:" + message.id,
-                    createdAtEpochMillis = message.createdAtEpochMillis,
-                    message = message
-                )
-            )
-        }
-        generatedImages.forEach { image ->
-            add(
-                ConversationTimelineEntry(
-                    key = "image:" + image.assetId,
-                    createdAtEpochMillis = image.createdAtEpochMillis,
-                    image = image
-                )
-            )
-        }
-    }.sortedWith(compareBy<ConversationTimelineEntry> { it.createdAtEpochMillis }.thenBy { it.key })
+    val timeline = buildConversationTimeline(
+        messages = messages,
+        images = generatedImages,
+        imageJobs = imageJobs,
+        requestIdsByJobId = imageJobRequestIds
+    )
 
     fun submitDraft() {
         val value = draft.trim()
@@ -797,16 +894,27 @@ private fun ConversationScreen(
                         conversationId = conversationId,
                         modifier = Modifier.weight(0.42f),
                         onSubmittingChanged = { imageGenerationSubmitting = it },
-                        onImagePersisted = { imageHistoryRefreshKey++ }
+                        onImagePersisted = { imageHistoryRefreshKey++ },
+                        onJobStateChanged = { imageHistoryRefreshKey++ }
                     )
                 }
             }
-            if (imageHistoryLoadError) {
-                Text(
-                    "Не удалось загрузить историю изображений из защищённого хранилища.",
-                    color = Color(0xFFE9BD70),
-                    fontSize = 10.sp
-                )
+            if (imageHistoryLoadError || imageHistorySyncWarning != null) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        if (imageHistoryLoadError) {
+                            "Не удалось синхронизировать историю генерации с Lila Core. Локальные изображения сохранены."
+                        } else {
+                            imageHistorySyncWarning.orEmpty()
+                        },
+                        color = Color(0xFFE9BD70),
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp
+                    )
+                    TextButton(onClick = { imageHistoryRefreshKey++ }) {
+                        Text("ПОВТОРИТЬ СИНХРОНИЗАЦИЮ", color = Color(0xFFE9BD70), fontSize = 9.sp)
+                    }
+                }
             }
             val chatWeight = if (showImageGeneration) 0.58f else 1f
             if (loadError != null) {
@@ -927,6 +1035,7 @@ private fun ConversationScreen(
                                 image = entry.image,
                                 characterName = characterName
                             )
+                            entry.imageJob != null -> ImageJobTimelineBubble(job = entry.imageJob)
                         }
                     }
                 }
@@ -971,6 +1080,64 @@ private fun ConversationScreen(
                 Spacer(Modifier.height(6.dp))
                 Text(error, color = Color(0xFFFF9B9B), fontSize = 11.sp,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImageJobTimelineBubble(job: LilaImageHistoryJob) {
+    val statusColor = when (job.state) {
+        "completed" -> Color(0xFF75E2BD)
+        "failed" -> Color(0xFFFF9B9B)
+        "cancelled" -> Muted
+        "running", "provider_completed", "result_pending" -> Ice
+        else -> Color(0xFFE9BD70)
+    }
+    val detail = when (job.state) {
+        "submission_unknown" ->
+            "Core не подтвердил приём задания. Повторная отправка заблокирована, чтобы не создать дубликат."
+        "completed" ->
+            "Результат сохранён в Lila Core и ожидает импорта в зашифрованное хранилище Galaxy."
+        "failed" ->
+            "Lila Core сохранил ошибку задания. Проверь workflow ComfyUI перед новой генерацией."
+        "cancelled" ->
+            "Задание отменено до начала выполнения."
+        else -> null
+    }
+
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(
+            Modifier.fillMaxWidth(0.86f)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF202A46))
+                .padding(horizontal = 14.dp, vertical = 11.dp)
+        ) {
+            Text(
+                "LILA · ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ",
+                color = Ice,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(Modifier.height(5.dp))
+            Text(
+                coreImageJobStatusLabel(job.state),
+                color = statusColor,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(5.dp))
+            Text(job.prompt, color = Color.White, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 4)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "${job.width} × ${job.height}" + (job.seed?.let { " · seed $it" } ?: ""),
+                color = Muted,
+                fontSize = 9.sp
+            )
+            detail?.let {
+                Spacer(Modifier.height(5.dp))
+                Text(it, color = statusColor, fontSize = 10.sp, lineHeight = 14.sp)
             }
         }
     }
