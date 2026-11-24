@@ -182,8 +182,19 @@ internal fun CharacterScopedGenerationPanel(
 
 internal data class CoreImageHistorySyncResult(
     val importedImages: List<com.pitgpt.galaxy.core.model.StoredGeneratedImage>,
-    val skippedAssets: Int
+    val skippedAssets: Int,
+    val failedJobs: Int = 0
 )
+
+internal fun coreImageHistorySyncWarning(result: CoreImageHistorySyncResult): String? = when {
+    result.failedJobs > 0 && result.skippedAssets > 0 ->
+        "Не удалось импортировать некоторые задания; ещё часть результатов осталась в Lila Core из-за лимита 10 изображений и 50 МиБ за синхронизацию."
+    result.failedJobs > 0 ->
+        "Не удалось импортировать некоторые задания из Lila Core. Результаты остаются на сервере; повтори синхронизацию."
+    result.skippedAssets > 0 ->
+        "Часть результатов осталась в Lila Core: импорт ограничен 10 изображениями и 50 МиБ за синхронизацию."
+    else -> null
+}
 
 internal fun coreHistoryRequest(
     job: LilaImageHistoryJob,
@@ -222,7 +233,8 @@ internal suspend fun syncCoreImageHistory(
     require(maxAssetBytes in 1L..250L * 1024 * 1024)
     val coreHistory = history ?: provider.history(conversationId)
     val imported = mutableListOf<com.pitgpt.galaxy.core.model.StoredGeneratedImage>()
-    var skipped = 0
+    var skippedAssets = 0
+    var failedJobs = 0
     var importedBytes = 0L
 
     for (job in coreHistory.sortedByDescending { it.createdAtEpochMillis }) {
@@ -264,7 +276,7 @@ internal suspend fun syncCoreImageHistory(
             if (job.state != "completed" || images.getForRequest(requestId) != null) continue
             val assetBytes = job.assetByteSize ?: continue
             if (imported.size >= maxAssetImports || assetBytes > maxAssetBytes - importedBytes) {
-                skipped++
+                skippedAssets++
                 continue
             }
 
@@ -273,10 +285,14 @@ internal suspend fun syncCoreImageHistory(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            skipped++
+            failedJobs++
         }
     }
-    return CoreImageHistorySyncResult(importedImages = imported, skippedAssets = skipped)
+    return CoreImageHistorySyncResult(
+        importedImages = imported,
+        skippedAssets = skippedAssets,
+        failedJobs = failedJobs
+    )
 }
 
 @Composable
