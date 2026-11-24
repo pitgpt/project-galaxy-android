@@ -15,6 +15,7 @@ import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.remote.GalaxyAccessTokenProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaTurnProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaProviderCatalog
+import com.pitgpt.galaxy.data.remote.LilaCoreImageGenerationProvider
 import com.pitgpt.galaxy.data.remote.HttpRealtimeSessionProvider
 import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
 import com.pitgpt.galaxy.data.repository.RoomConversationRepository
@@ -69,6 +70,10 @@ class GalaxyApplication : Application() {
 
     val lilaProviderCatalog: HttpLilaProviderCatalog
         get() = checkNotNull(currentLilaProviderCatalog) { "Galaxy application has not been initialized." }
+
+    /** Authenticated image adapter; ComfyUI credentials remain in the Core vault. */
+    val lilaCoreImageGenerationProvider: LilaCoreImageGenerationProvider
+        get() = LilaCoreImageGenerationProvider(lilaProviderCatalog, comfyUiJobStore)
 
     val hasBackendConfiguration: Boolean
         get() = activeBackendConfiguration != null

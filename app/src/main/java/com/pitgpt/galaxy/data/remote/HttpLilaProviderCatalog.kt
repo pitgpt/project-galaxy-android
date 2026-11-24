@@ -76,7 +76,7 @@ class HttpLilaProviderCatalog(
     },
     private val requestIdProvider: () -> String = { UUID.randomUUID().toString() },
     private val diagnosticObserver: (LilaRequestDiagnostic) -> Unit = {}
-) {
+) : LilaImageApiTransport {
     private val normalizedBaseUrl = baseUrl.trim().trimEnd('/')
     private val parsedUri: URI? = runCatching { URI(normalizedBaseUrl) }.getOrNull()
     private val host = parsedUri?.host?.lowercase()
@@ -272,10 +272,13 @@ class HttpLilaProviderCatalog(
         return body
     }
 
-    private suspend fun requestJson(
+    override suspend fun requestJson(
         method: String,
         path: String,
-        body: JSONObject? = null
+        body: JSONObject?,
+        idempotencyKey: String?,
+        maxResponseBytes: Int,
+        maxRequestBytes: Int
     ): JSONObject = withContext(Dispatchers.IO) {
         configurationError?.let { throw GalaxyApiException(null, it) }
         if (!isConfigured) {
@@ -289,6 +292,13 @@ class HttpLilaProviderCatalog(
             throw GalaxyApiException(null, "Не удалось проверить авторизацию Galaxy.")
         } ?: throw GalaxyApiException(401, "Войди в аккаунт Galaxy для управления провайдерами.")
 
+        require(maxResponseBytes in 1..MAX_IMAGE_JSON_RESPONSE_BYTES)
+        require(maxRequestBytes in 1..MAX_IMAGE_JSON_REQUEST_BYTES)
+        idempotencyKey?.let { key ->
+            try { UUID.fromString(key) } catch (_: IllegalArgumentException) {
+                throw GalaxyApiException(null, "Идентификатор запроса изображения некорректен.")
+            }
+        }
         val requestId = requestIdProvider().takeIf { value ->
             value.length in 1..128 && value.all { it.code in 33..126 }
         } ?: UUID.randomUUID().toString()
@@ -317,8 +327,14 @@ class HttpLilaProviderCatalog(
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("X-Request-ID", requestId)
             connection.setRequestProperty("Authorization", "Bearer $token")
+            idempotencyKey?.let { connection.setRequestProperty("Idempotency-Key", it) }
             if (body != null) {
                 requestBytes = body.toString().toByteArray(Charsets.UTF_8)
+                if (requestBytes.size > maxRequestBytes) {
+                    requestBytes.fill(0)
+                    requestBytes = null
+                    throw GalaxyApiException(null, "Запрос к Lila превышает допустимый размер.")
+                }
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 connection.setFixedLengthStreamingMode(requestBytes.size)
                 connection.executeCancellable { connection.outputStream.use { output -> output.write(requestBytes) } }
@@ -339,7 +355,7 @@ class HttpLilaProviderCatalog(
                 diagnosticReported = true
                 throw GalaxyApiException(status, message)
             }
-            val responseText = connection.executeCancellable { readBounded(connection.inputStream) }
+            val responseText = connection.executeCancellable { readBounded(connection.inputStream, maxResponseBytes) }
             if (responseText.isBlank()) JSONObject() else try {
                 JSONObject(responseText)
             } catch (exception: Exception) {
@@ -377,6 +393,91 @@ class HttpLilaProviderCatalog(
         }
     }
 
+    override suspend fun requestBinary(path: String, maxResponseBytes: Int, expectedContentType: String): LilaBinaryResponse =
+        withContext(Dispatchers.IO) {
+            require(maxResponseBytes in 1..MAX_BINARY_RESPONSE_BYTES)
+            require(expectedContentType.matches(Regex("[a-z0-9.+-]+/[a-z0-9.+-]+")))
+            configurationError?.let { throw GalaxyApiException(null, it) }
+            if (!isConfigured) throw GalaxyApiException(null, "Сервер Lila не настроен в этой сборке Galaxy.")
+            val token = try {
+                accessTokenProvider?.accessToken()?.takeIf { it.isNotBlank() }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (_: Exception) {
+                throw GalaxyApiException(null, "Не удалось проверить авторизацию Galaxy.")
+            } ?: throw GalaxyApiException(401, "Войди в аккаунт Galaxy для загрузки изображений.")
+            val requestId = requestIdProvider().takeIf { value ->
+                value.length in 1..128 && value.all { it.code in 33..126 }
+            } ?: UUID.randomUUID().toString()
+            val operation = diagnosticOperation("GET", path)
+            val connection = try {
+                connectionFactory(URL(normalizedBaseUrl + path))
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                reportDiagnostic(LilaRequestDiagnostic(requestId, operation, diagnosticCategory(exception), null))
+                throw GalaxyApiException(null, "Не удалось подключиться к сервису Galaxy.")
+            }
+            var responseStatus: Int? = null
+            var responseBytes: ByteArray? = null
+            var handedOff = false
+            var diagnosticReported = false
+            try {
+                connection.requestMethod = "GET"
+                connection.instanceFollowRedirects = false
+                connection.connectTimeout = connectTimeoutMillis
+                connection.readTimeout = readTimeoutMillis
+                connection.useCaches = false
+                connection.doInput = true
+                connection.doOutput = false
+                connection.setRequestProperty("Accept", expectedContentType)
+                connection.setRequestProperty("X-Request-ID", requestId)
+                connection.setRequestProperty("Authorization", "Bearer $token")
+                val status = connection.executeCancellable { connection.responseCode }
+                responseStatus = status
+                if (status !in 200..299) {
+                    reportDiagnostic(LilaRequestDiagnostic(requestId, operation, "http", status))
+                    diagnosticReported = true
+                    throw GalaxyApiException(status, safeMessageFor(status))
+                }
+                val contentType = connection.getHeaderField("Content-Type")
+                    ?.substringBefore(';')?.trim()?.lowercase()
+                    ?: throw GalaxyApiException(null, "Сервис Lila не указал формат изображения.")
+                if (contentType != expectedContentType.lowercase()) {
+                    throw GalaxyApiException(null, "Сервис Lila вернул неподдерживаемый формат изображения.")
+                }
+                val declaredLength = connection.getHeaderField("Content-Length")?.toLongOrNull()
+                if (declaredLength != null && (declaredLength < 0 || declaredLength > maxResponseBytes)) {
+                    throw GalaxyApiException(null, "Изображение Lila превышает допустимый размер.")
+                }
+                val bytes = connection.executeCancellable { readBoundedBytes(connection.inputStream, maxResponseBytes) }
+                responseBytes = bytes
+                if (declaredLength != null && declaredLength != bytes.size.toLong()) {
+                    throw GalaxyApiException(null, "Сервис Lila вернул неполный файл изображения.")
+                }
+                reportDiagnostic(LilaRequestDiagnostic(requestId, operation, "http", status))
+                diagnosticReported = true
+                handedOff = true
+                LilaBinaryResponse(contentType, bytes)
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: GalaxyApiException) {
+                if (!diagnosticReported) reportDiagnostic(
+                    LilaRequestDiagnostic(requestId, operation,
+                        if (exception.httpStatus != null) "http" else "invalid-response", responseStatus)
+                )
+                throw exception
+            } catch (exception: Exception) {
+                if (!diagnosticReported) reportDiagnostic(
+                    LilaRequestDiagnostic(requestId, operation, diagnosticCategory(exception), responseStatus)
+                )
+                throw GalaxyApiException(null, "Не удалось загрузить изображение из Lila Core.")
+            } finally {
+                if (!handedOff) responseBytes?.fill(0)
+                connection.disconnect()
+            }
+        }
+
     private fun reportDiagnostic(diagnostic: LilaRequestDiagnostic) {
         runCatching { diagnosticObserver(diagnostic) }
     }
@@ -389,6 +490,13 @@ class HttpLilaProviderCatalog(
             "select-conversation-model"
         method == "GET" && Regex("/v1/lila/conversations/[^/]+/model").matches(path) ->
             "get-conversation-model"
+        method == "POST" && path == "/v1/lila/images" -> "submit-image"
+        method == "GET" && Regex("/v1/lila/images/[0-9a-fA-F-]{36}").matches(path) -> "get-image-job"
+        method == "POST" && Regex("/v1/lila/images/[0-9a-fA-F-]{36}/cancel").matches(path) -> "cancel-image-job"
+        method == "GET" && Regex("/v1/lila/images/[0-9a-fA-F-]{36}/asset").matches(path) -> "download-image-asset"
+        method == "GET" && path == "/v1/lila/image-providers/comfyui" -> "get-image-provider"
+        method == "PUT" && path == "/v1/lila/image-providers/comfyui" -> "configure-image-provider"
+        method == "POST" && path == "/v1/lila/image-providers/comfyui/test" -> "test-image-provider"
         else -> "other"
     }
 
@@ -466,7 +574,7 @@ class HttpLilaProviderCatalog(
         return value
     }
 
-    private fun readBounded(input: InputStream): String {
+    private fun readBounded(input: InputStream, maxBytes: Int): String {
         val output = ZeroizingByteArrayOutputStream()
         val scratch = ByteArray(8 * 1024)
         try {
@@ -474,13 +582,34 @@ class HttpLilaProviderCatalog(
                 while (true) {
                     val count = stream.read(scratch)
                     if (count < 0) break
-                    if (output.size() + count > MAX_RESPONSE_BYTES) {
+                    if (output.size() + count > maxBytes) {
                         throw GalaxyApiException(null, "Ответ Lila превышает допустимый размер.")
                     }
                     output.write(scratch, 0, count)
                 }
             }
             return output.toUtf8String()
+        } finally {
+            scratch.fill(0)
+            output.wipe()
+        }
+    }
+
+    private fun readBoundedBytes(input: InputStream, maxBytes: Int): ByteArray {
+        val output = ZeroizingByteArrayOutputStream()
+        val scratch = ByteArray(8 * 1024)
+        try {
+            input.use { stream ->
+                while (true) {
+                    val count = stream.read(scratch)
+                    if (count < 0) break
+                    if (output.size() + count > maxBytes) {
+                        throw GalaxyApiException(null, "Изображение Lila превышает допустимый размер.")
+                    }
+                    output.write(scratch, 0, count)
+                }
+            }
+            return output.toByteArrayAndWipe()
         } finally {
             scratch.fill(0)
             output.wipe()
@@ -504,6 +633,7 @@ class HttpLilaProviderCatalog(
 
     private class ZeroizingByteArrayOutputStream : ByteArrayOutputStream() {
         fun toUtf8String(): String = String(buf, 0, count, Charsets.UTF_8)
+        fun toByteArrayAndWipe(): ByteArray = toByteArray().also { wipe() }
         fun wipe() {
             buf.fill(0)
             reset()
@@ -512,6 +642,9 @@ class HttpLilaProviderCatalog(
 
     private companion object {
         const val MAX_RESPONSE_BYTES = 128 * 1024
+        const val MAX_IMAGE_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
+        const val MAX_IMAGE_JSON_REQUEST_BYTES = 3 * 1024 * 1024
+        const val MAX_BINARY_RESPONSE_BYTES = 25 * 1024 * 1024
         const val MAX_PROVIDERS = 20
         const val MAX_MODELS = 100
         const val MAX_MODEL_ID_CHARS = 256
