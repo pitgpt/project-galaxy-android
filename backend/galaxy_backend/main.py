@@ -1332,6 +1332,9 @@ def create_app(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Lila image generation is not configured",
             )
+        return service
+
+    async def check_lila_image_rate_limit(request: Request, user_id: str):
         try:
             await request.app.state.lila_turn_rate_limiter.check(user_id)
         except HTTPException:
@@ -1342,7 +1345,6 @@ def create_app(
                 detail="Lila image service is temporarily unavailable",
                 headers={"Retry-After": "5"},
             ) from None
-        return service
 
     @app.get(
         "/v1/lila/image-providers/comfyui",
@@ -1372,6 +1374,7 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_rate_limit(request, user_id)
         try:
             return await service.configure_provider(principal_id=user_id, payload=payload)
         except ValueError:
@@ -1395,6 +1398,7 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_rate_limit(request, user_id)
         try:
             return await service.test_provider(principal_id=user_id)
         except ImageProviderNotConfigured:
@@ -1426,6 +1430,7 @@ def create_app(
         idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_rate_limit(request, user_id)
         try:
             return await service.submit(
                 principal_id=user_id,
