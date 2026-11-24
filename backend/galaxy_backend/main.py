@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 import uuid
@@ -94,6 +95,31 @@ VOICE_ID_ALIASES = {
     "voice.feminine_calm": "shimmer",
     "voice.neutral": "alloy",
 }
+
+
+MAX_REALTIME_SESSION_RESPONSE_BYTES = 16 * 1024
+
+
+async def _read_bounded_json_response(response: httpx.Response, max_bytes: int) -> Any:
+    """Read and parse a small upstream JSON response without unbounded buffering."""
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except (TypeError, ValueError):
+            raise ValueError("Unexpected provider response") from None
+        if declared_length < 0 or declared_length > max_bytes:
+            raise ValueError("Realtime provider response exceeds size limit")
+
+    raw = bytearray()
+    try:
+        async for chunk in response.aiter_bytes(chunk_size=4096):
+            if len(raw) + len(chunk) > max_bytes:
+                raise ValueError("Realtime provider response exceeds size limit")
+            raw.extend(chunk)
+        return json.loads(raw)
+    finally:
+        raw[:] = b"\\x00" * len(raw)
 
 
 SERVER_INSTRUCTIONS = (
@@ -1724,13 +1750,17 @@ def create_app(
         }
 
         try:
-            response = await request.app.state.http_client.post(
+            async with request.app.state.http_client.stream(
+                "POST",
                 "https://api.openai.com/v1/realtime/client_secrets",
                 json=provider_body,
                 headers=headers,
-            )
-            response.raise_for_status()
-            data = response.json()
+            ) as response:
+                response.raise_for_status()
+                data = await _read_bounded_json_response(
+                    response,
+                    MAX_REALTIME_SESSION_RESPONSE_BYTES,
+                )
             secret = data.get("value")
             expires_at = data.get("expires_at")
             provider_session_id = (data.get("session") or {}).get("id")
