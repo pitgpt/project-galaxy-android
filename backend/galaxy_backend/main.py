@@ -191,6 +191,7 @@ def create_app(
     lila_memory_writer: Any | None = None,
     lila_image_store: SqliteLilaImageStore | None = None,
     lila_image_service: LilaImageGenerationService | None = None,
+    lila_image_read_rate_limiter: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -257,6 +258,28 @@ def create_app(
             app.state.lila_turn_rate_limiter = InMemoryLilaTurnRateLimiter(
                 app.state.settings.lila_turns_per_minute,
                 app.state.settings.lila_turns_per_day,
+            )
+
+        if app.state.settings.environment == "production":
+            app.state.lila_image_read_rate_limiter = RedisLilaTurnRateLimiter(
+                app.state.redis,
+                app.state.settings.lila_image_reads_per_minute,
+                app.state.settings.lila_image_reads_per_day,
+                key_prefix="galaxy:lila:image-reads",
+            )
+        elif lila_image_read_rate_limiter is not None:
+            app.state.lila_image_read_rate_limiter = lila_image_read_rate_limiter
+        elif app.state.redis is not None:
+            app.state.lila_image_read_rate_limiter = RedisLilaTurnRateLimiter(
+                app.state.redis,
+                app.state.settings.lila_image_reads_per_minute,
+                app.state.settings.lila_image_reads_per_day,
+                key_prefix="galaxy:lila:image-reads",
+            )
+        else:
+            app.state.lila_image_read_rate_limiter = InMemoryLilaTurnRateLimiter(
+                app.state.settings.lila_image_reads_per_minute,
+                app.state.settings.lila_image_reads_per_day,
             )
 
         app.state.lila_store = lila_store
@@ -360,6 +383,7 @@ def create_app(
     app.state.lila_provider_registry = lila_provider_registry
     app.state.lila_image_store = lila_image_store
     app.state.lila_image_service = lila_image_service
+    app.state.lila_image_read_rate_limiter = lila_image_read_rate_limiter
     app.state.lila_provider_http_client_factory = (
         lila_provider_http_client_factory or create_provider_http_client
     )
@@ -1373,6 +1397,18 @@ def create_app(
                 headers={"Retry-After": "5"},
             ) from None
 
+    async def check_lila_image_read_rate_limit(request: Request, user_id: str):
+        try:
+            await request.app.state.lila_image_read_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image reads are temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
     @app.get(
         "/v1/lila/image-providers/comfyui",
         response_model=ImageProviderSummary,
@@ -1382,6 +1418,7 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
         try:
             return await service.provider_summary(principal_id=user_id)
         except Exception:
@@ -1518,6 +1555,7 @@ def create_app(
         cursor: str | None = Query(default=None, max_length=256),
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
         try:
             return await service.history(
                 principal_id=user_id,
@@ -1547,6 +1585,7 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
         try:
             return await service.get_job(principal_id=user_id, job_id=str(job_id))
         except ImageJobNotFound:
@@ -1568,6 +1607,7 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_rate_limit(request, user_id)
         try:
             return await service.cancel(principal_id=user_id, job_id=str(job_id))
         except ImageJobNotFound:
@@ -1591,6 +1631,7 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
         try:
             asset = await service.asset(principal_id=user_id, job_id=str(job_id))
         except ImageJobNotFound:

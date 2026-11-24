@@ -479,6 +479,15 @@ class NoopLimiter:
         return None
 
 
+class RejectingLimiter:
+    async def check(self, principal_id):
+        raise HTTPException(
+            status_code=429,
+            detail="Test rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
+
+
 class FakeHttpClient:
     async def aclose(self):
         return None
@@ -596,6 +605,62 @@ def test_authenticated_image_api_is_owner_scoped_and_never_returns_provider_secr
         assert asset.status_code == 200
         assert asset.headers["content-type"] == "image/png"
         assert asset.content == png_bytes()
+
+
+def test_image_read_routes_use_a_dedicated_owner_rate_limiter(tmp_path):
+    service, _store, _state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner-a", payload=provider_payload()))
+    job = run(service.submit(
+        principal_id="owner-a",
+        idempotency_key=str(uuid4()),
+        request=request_payload(),
+    ))
+    app = create_app(
+        settings=make_settings(),
+        http_client=FakeHttpClient(),
+        authenticator=FakeAuthenticator(),
+        lila_turn_rate_limiter=NoopLimiter(),
+        lila_image_read_rate_limiter=RejectingLimiter(),
+        lila_image_service=service,
+    )
+    with TestClient(app) as client:
+        headers = {"Authorization": "Bearer owner-a-token"}
+        paths = [
+            "/v1/lila/image-providers/comfyui",
+            "/v1/lila/image-providers/comfyui/config",
+            "/v1/lila/images?conversation_id=conversation-a",
+            f"/v1/lila/images/{job.job_id}",
+            f"/v1/lila/images/{job.job_id}/asset",
+        ]
+        for path in paths:
+            response = client.get(path, headers=headers)
+            assert response.status_code == 429, path
+            assert response.headers["retry-after"] == "60"
+
+
+def test_image_status_poll_uses_read_quota_while_cancel_uses_turn_quota(tmp_path):
+    service, _store, _state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner-a", payload=provider_payload()))
+    job = run(service.submit(
+        principal_id="owner-a",
+        idempotency_key=str(uuid4()),
+        request=request_payload(),
+    ))
+    app = create_app(
+        settings=make_settings(),
+        http_client=FakeHttpClient(),
+        authenticator=FakeAuthenticator(),
+        lila_turn_rate_limiter=RejectingLimiter(),
+        lila_image_read_rate_limiter=NoopLimiter(),
+        lila_image_service=service,
+    )
+    with TestClient(app) as client:
+        headers = {"Authorization": "Bearer owner-a-token"}
+        polled = client.get(f"/v1/lila/images/{job.job_id}", headers=headers)
+        assert polled.status_code == 200
+        cancelled = client.post(f"/v1/lila/images/{job.job_id}/cancel", headers=headers)
+        assert cancelled.status_code == 429
+        assert cancelled.headers["retry-after"] == "60"
 
 
 def test_image_history_cursor_is_stable_when_newer_jobs_are_added(tmp_path):

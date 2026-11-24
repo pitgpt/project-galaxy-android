@@ -53,6 +53,8 @@ class Settings:
     redis_url: str | None = field(default=None, repr=False)
     lila_turns_per_minute: int = 20
     lila_turns_per_day: int = 500
+    lila_image_reads_per_minute: int = 120
+    lila_image_reads_per_day: int = 2000
     lila_provider_id: str = "default"
     lila_provider_base_url: str | None = None
     lila_provider_model_id: str | None = None
@@ -124,6 +126,13 @@ class Settings:
         lila_turns_per_day = int(os.getenv("LILA_TURNS_PER_DAY", "500"))
         if not 1 <= lila_turns_per_day <= 100000:
             raise RuntimeError("LILA_TURNS_PER_DAY must be between 1 and 100000")
+
+        lila_image_reads_per_minute = int(os.getenv("LILA_IMAGE_READS_PER_MINUTE", "120"))
+        if not 30 <= lila_image_reads_per_minute <= 2000:
+            raise RuntimeError("LILA_IMAGE_READS_PER_MINUTE must be between 30 and 2000")
+        lila_image_reads_per_day = int(os.getenv("LILA_IMAGE_READS_PER_DAY", "2000"))
+        if not 1 <= lila_image_reads_per_day <= 100000:
+            raise RuntimeError("LILA_IMAGE_READS_PER_DAY must be between 1 and 100000")
 
         max_active = int(os.getenv("REALTIME_MAX_ACTIVE_SESSIONS", "2"))
         if max_active < 1:
@@ -247,6 +256,8 @@ class Settings:
             redis_url=redis_url,
             lila_turns_per_minute=lila_turns_per_minute,
             lila_turns_per_day=lila_turns_per_day,
+            lila_image_reads_per_minute=lila_image_reads_per_minute,
+            lila_image_reads_per_day=lila_image_reads_per_day,
             lila_provider_id=lila_provider_id,
             lila_provider_base_url=lila_provider_base_url,
             lila_provider_model_id=lila_provider_model_id,
