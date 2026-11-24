@@ -20,14 +20,26 @@ class FakeAuthenticator:
         return identities[token]
 
 
+class FakeProviderStreamContext:
+    def __init__(self, response):
+        self.response = response
+
+    async def __aenter__(self):
+        return self.response
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        await self.response.aclose()
+        return False
+
+
 class FakeProvider:
     def __init__(self, status_code=200):
         self.status_code = status_code
         self.calls = []
 
-    async def post(self, url, json, headers):
+    def _response(self, method, url, json, headers):
         self.calls.append((url, json, headers))
-        request = httpx.Request("POST", url)
+        request = httpx.Request(method, url)
         if self.status_code != 200:
             return httpx.Response(self.status_code, request=request, json={"error": {"message": "sensitive provider detail"}})
         return httpx.Response(
@@ -35,6 +47,12 @@ class FakeProvider:
             request=request,
             json={"value": "ek_test_secret", "expires_at": 1_800_000_000, "session": {"id": "sess_test"}},
         )
+
+    async def post(self, url, json, headers):
+        return self._response("POST", url, json, headers)
+
+    def stream(self, method, url, json, headers):
+        return FakeProviderStreamContext(self._response(method, url, json, headers))
 
 
 class FakeRedis:
