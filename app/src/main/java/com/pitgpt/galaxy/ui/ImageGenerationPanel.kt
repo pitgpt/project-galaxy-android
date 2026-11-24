@@ -284,6 +284,7 @@ internal fun ImageGenerationPanel(
     app: GalaxyApplication,
     characterId: String,
     modifier: Modifier = Modifier,
+    imageHistoryReady: Boolean,
     onSubmittingChanged: (Boolean) -> Unit,
     conversationId: String = characterId,
     onImagePersisted: (com.pitgpt.galaxy.core.model.StoredGeneratedImage) -> Unit = {},
@@ -310,7 +311,7 @@ internal fun ImageGenerationPanel(
     var isPersisting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(app, provider, characterId, conversationId, retryKey) {
+    LaunchedEffect(app, provider, characterId, conversationId, retryKey, imageHistoryReady) {
         isRestoring = true
         setupError = null
         try {
@@ -326,7 +327,7 @@ internal fun ImageGenerationPanel(
             providerConfigured = false
             setupError = "Не удалось прочитать конфигурацию Lila Core. Проверь авторизацию и подключение."
         } finally {
-            if (request == null) {
+            if (imageHistoryReady && request == null) {
                 try {
                     val restored = loadLatestRecoverableImageGenerationRequest(
                         characterId = characterId,
