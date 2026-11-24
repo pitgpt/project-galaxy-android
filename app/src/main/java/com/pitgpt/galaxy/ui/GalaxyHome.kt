@@ -124,11 +124,9 @@ internal fun buildConversationTimeline(
     }.sortedWith(compareBy<ConversationTimelineEntry> { it.createdAtEpochMillis }.thenBy { it.key })
 }
 
-internal fun isActiveCoreImageJobState(state: String): Boolean =
+internal fun shouldPollCoreImageJobState(state: String): Boolean =
     state in setOf(
-        "prepared",
         "submitting",
-        "submission_unknown",
         "queued",
         "running",
         "provider_completed",
@@ -774,6 +772,7 @@ private fun ConversationScreen(
     var imageHistoryRefreshKey by remember(conversationId) { mutableStateOf(0) }
     var imageHistoryLoadError by remember(conversationId) { mutableStateOf(false) }
     var imageHistorySyncWarning by remember(conversationId) { mutableStateOf<String?>(null) }
+    var imageHistoryReady by remember(conversationId) { mutableStateOf(false) }
     var imageJobs by remember(conversationId) { mutableStateOf<List<LilaImageHistoryJob>>(emptyList()) }
     var imageJobRequestIds by remember(conversationId) { mutableStateOf<Map<String, String>>(emptyMap()) }
     val sendScope = rememberCoroutineScope()
@@ -803,25 +802,28 @@ private fun ConversationScreen(
                         emptyMap()
                     }
                     generatedImages = app.generatedImages.listForConversation(conversationId)
+                    imageHistoryReady = true
                     imageHistorySyncWarning = if (sync.skippedAssets > 0) {
                         "Часть результатов осталась в Lila Core: импорт ограничен 10 изображениями и 50 МиБ за синхронизацию."
                     } else {
                         null
                     }
                     imageHistoryLoadError = false
-                    shouldPoll = coreHistory.any { isActiveCoreImageJobState(it.state) }
+                    shouldPoll = coreHistory.any { shouldPollCoreImageJobState(it.state) }
                 } else {
                     generatedImages = app.generatedImages.listForConversation(conversationId)
                     imageJobs = emptyList()
                     imageJobRequestIds = emptyMap()
                     imageHistorySyncWarning = null
                     imageHistoryLoadError = false
+                    imageHistoryReady = true
                     shouldPoll = false
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
                 imageHistoryLoadError = true
+                imageHistoryReady = true
                 shouldPoll = false
             }
             if (shouldPoll) delay(4_000)
@@ -893,6 +895,7 @@ private fun ConversationScreen(
                         characterId = characterId,
                         conversationId = conversationId,
                         modifier = Modifier.weight(0.42f),
+                        imageHistoryReady = imageHistoryReady,
                         onSubmittingChanged = { imageGenerationSubmitting = it },
                         onImagePersisted = { imageHistoryRefreshKey++ },
                         onJobStateChanged = { imageHistoryRefreshKey++ }
