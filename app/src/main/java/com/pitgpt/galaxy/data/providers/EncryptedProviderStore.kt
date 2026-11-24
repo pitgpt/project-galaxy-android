@@ -14,6 +14,18 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+/**
+ * Runs a block against a mutable plaintext buffer and clears that buffer on every exit path.
+ * Immutable JVM Strings and parsed JSON values cannot be reliably zeroized.
+ */
+internal inline fun <T> ByteArray.useAndZero(block: (ByteArray) -> T): T {
+    try {
+        return block(this)
+    } finally {
+        fill(0)
+    }
+}
+
 data class AiProviderConfig(
     val id: String,
     val name: String,
@@ -65,68 +77,82 @@ class EncryptedProviderStore internal constructor(
         val encoded = prefs.getString(DATA_KEY, null) ?: return ProviderSettings()
         return try {
             val payload = Base64.decode(encoded, Base64.NO_WRAP)
-            require(payload.size > IV_BYTES) { "Encrypted provider settings are truncated." }
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            // Never create a replacement key while reading: it cannot decrypt old data.
-            cipher.init(Cipher.DECRYPT_MODE, existingKey(),
-                GCMParameterSpec(TAG_BITS, payload.copyOfRange(0, IV_BYTES)))
-            val root = JSONObject(
-                cipher.doFinal(payload.copyOfRange(IV_BYTES, payload.size)).toString(Charsets.UTF_8)
-            )
-            val providers = buildList {
-                val array = root.optJSONArray("providers") ?: JSONArray()
-                for (i in 0 until array.length()) {
-                    val item = array.getJSONObject(i)
-                    add(AiProviderConfig(
-                        item.getString("id"),
-                        item.getString("name"),
-                        item.getString("baseUrl"),
-                        item.getString("apiKey"),
-                        item.getString("model")
-                    ))
+            try {
+                require(payload.size > IV_BYTES) { "Encrypted provider settings are truncated." }
+                val iv = payload.copyOfRange(0, IV_BYTES)
+                val root = try {
+                    val encryptedBody = payload.copyOfRange(IV_BYTES, payload.size)
+                    try {
+                        val cipher = Cipher.getInstance(TRANSFORMATION)
+                        // Never create a replacement key while reading: it cannot decrypt old data.
+                        cipher.init(Cipher.DECRYPT_MODE, existingKey(), GCMParameterSpec(TAG_BITS, iv))
+                        cipher.doFinal(encryptedBody).useAndZero { plaintext ->
+                            // JVM Strings/JSONObject values are immutable; clear the mutable UTF-8 buffer immediately.
+                            JSONObject(plaintext.toString(Charsets.UTF_8))
+                        }
+                    } finally {
+                        encryptedBody.fill(0)
+                    }
+                } finally {
+                    iv.fill(0)
                 }
-            }
-            val comfyUiJson = root.optJSONObject("comfyUi")
-            val comfyUi = comfyUiJson?.let { value ->
-                ComfyUiSavedSettings(
-                    lanBaseUrl = value.optString("lanBaseUrl").takeIf { it.isNotBlank() && it != "null" },
-                    lanBearerToken = value.optString("lanBearerToken").takeIf { it.isNotBlank() && it != "null" },
-                    vpnBaseUrl = value.optString("vpnBaseUrl").takeIf { it.isNotBlank() && it != "null" },
-                    vpnBearerToken = value.optString("vpnBearerToken").takeIf { it.isNotBlank() && it != "null" },
-                    preference = com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRoutePreference.valueOf(
-                        value.optString("preference").ifBlank { "AUTO" }
-                    )
-                )
-            }
-            val workflowJson = root.optJSONObject("comfyUiWorkflow")
-            val workflow = workflowJson?.let { value ->
-                fun node(name: String): ComfyUiNodeInput? {
-                    val item = value.optJSONObject(name) ?: return null
-                    return ComfyUiNodeInput(
-                        nodeId = item.getString("nodeId"),
-                        inputName = item.getString("inputName")
+                val providers = buildList {
+                    val array = root.optJSONArray("providers") ?: JSONArray()
+                    for (i in 0 until array.length()) {
+                        val item = array.getJSONObject(i)
+                        add(AiProviderConfig(
+                            item.getString("id"),
+                            item.getString("name"),
+                            item.getString("baseUrl"),
+                            item.getString("apiKey"),
+                            item.getString("model")
+                        ))
+                    }
+                }
+                val comfyUiJson = root.optJSONObject("comfyUi")
+                val comfyUi = comfyUiJson?.let { value ->
+                    ComfyUiSavedSettings(
+                        lanBaseUrl = value.optString("lanBaseUrl").takeIf { it.isNotBlank() && it != "null" },
+                        lanBearerToken = value.optString("lanBearerToken").takeIf { it.isNotBlank() && it != "null" },
+                        vpnBaseUrl = value.optString("vpnBaseUrl").takeIf { it.isNotBlank() && it != "null" },
+                        vpnBearerToken = value.optString("vpnBearerToken").takeIf { it.isNotBlank() && it != "null" },
+                        preference = com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRoutePreference.valueOf(
+                            value.optString("preference").ifBlank { "AUTO" }
+                        )
                     )
                 }
-                ComfyUiWorkflowTemplate(
-                    id = value.getString("id"),
-                    workflowJson = value.getString("workflowJson"),
-                    positivePrompt = requireNotNull(node("positivePrompt")) {
-                        "Workflow positive-prompt mapping is missing"
-                    },
-                    negativePrompt = node("negativePrompt"),
-                    width = node("width"),
-                    height = node("height"),
-                    seed = node("seed")
+                val workflowJson = root.optJSONObject("comfyUiWorkflow")
+                val workflow = workflowJson?.let { value ->
+                    fun node(name: String): ComfyUiNodeInput? {
+                        val item = value.optJSONObject(name) ?: return null
+                        return ComfyUiNodeInput(
+                            nodeId = item.getString("nodeId"),
+                            inputName = item.getString("inputName")
+                        )
+                    }
+                    ComfyUiWorkflowTemplate(
+                        id = value.getString("id"),
+                        workflowJson = value.getString("workflowJson"),
+                        positivePrompt = requireNotNull(node("positivePrompt")) {
+                            "Workflow positive-prompt mapping is missing"
+                        },
+                        negativePrompt = node("negativePrompt"),
+                        width = node("width"),
+                        height = node("height"),
+                        seed = node("seed")
+                    )
+                }.also { it?.validateMappings() }
+                ProviderSettings(
+                    providers,
+                    root.optString("activeProviderId").takeIf { it.isNotBlank() },
+                    root.optString("textModel").takeIf { it.isNotBlank() },
+                    root.optString("voiceModel").takeIf { it.isNotBlank() },
+                    comfyUi,
+                    workflow
                 )
-            }.also { it?.validateMappings() }
-            ProviderSettings(
-                providers,
-                root.optString("activeProviderId").takeIf { it.isNotBlank() },
-                root.optString("textModel").takeIf { it.isNotBlank() },
-                root.optString("voiceModel").takeIf { it.isNotBlank() },
-                comfyUi,
-                workflow
-            )
+            } finally {
+                payload.fill(0)
+            }
         } catch (error: Exception) {
             // Preserve the ciphertext. Recovery or destructive reset must be an explicit user action.
             throw ProviderSettingsLoadException(error)
@@ -167,8 +193,26 @@ class EncryptedProviderStore internal constructor(
             .put("comfyUi", comfyUi).put("comfyUiWorkflow", workflow)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        val encrypted = cipher.iv + cipher.doFinal(root.toString().toByteArray(Charsets.UTF_8))
-        check(prefs.edit().putString(DATA_KEY, Base64.encodeToString(encrypted, Base64.NO_WRAP)).commit())
+        val plaintext = root.toString().toByteArray(Charsets.UTF_8)
+        val encryptedBody = plaintext.useAndZero { cipher.doFinal(it) }
+        try {
+            val iv = cipher.iv
+            try {
+                val encrypted = ByteArray(iv.size + encryptedBody.size)
+                try {
+                    System.arraycopy(iv, 0, encrypted, 0, iv.size)
+                    System.arraycopy(encryptedBody, 0, encrypted, iv.size, encryptedBody.size)
+                    val encoded = Base64.encodeToString(encrypted, Base64.NO_WRAP)
+                    check(prefs.edit().putString(DATA_KEY, encoded).commit())
+                } finally {
+                    encrypted.fill(0)
+                }
+            } finally {
+                iv.fill(0)
+            }
+        } finally {
+            encryptedBody.fill(0)
+        }
     }
 
     /** Removes unreadable saved data only after an explicit user confirmation in the UI. */
