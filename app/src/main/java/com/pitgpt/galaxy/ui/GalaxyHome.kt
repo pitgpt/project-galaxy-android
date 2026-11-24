@@ -65,6 +65,8 @@ import com.pitgpt.galaxy.data.remote.LilaTurnStatus
 import com.pitgpt.galaxy.data.remote.stableLilaConversationId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.UUID
@@ -123,6 +125,15 @@ internal fun buildConversationTimeline(
         }
     }.sortedWith(compareBy<ConversationTimelineEntry> { it.createdAtEpochMillis }.thenBy { it.key })
 }
+
+internal fun mergeLilaImageHistoryJobs(
+    existing: List<LilaImageHistoryJob>,
+    incoming: List<LilaImageHistoryJob>
+): List<LilaImageHistoryJob> =
+    (existing + incoming)
+        .associateBy { it.jobId }
+        .values
+        .sortedByDescending { it.createdAtEpochMillis }
 
 internal fun shouldPollCoreImageJobState(state: String): Boolean =
     state in setOf(
@@ -775,42 +786,86 @@ private fun ConversationScreen(
     var imageHistoryReady by remember(conversationId) { mutableStateOf(false) }
     var imageJobs by remember(conversationId) { mutableStateOf<List<LilaImageHistoryJob>>(emptyList()) }
     var imageJobRequestIds by remember(conversationId) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var imageHistoryCursor by remember(conversationId) { mutableStateOf<String?>(null) }
+    var imageHistoryFullyLoaded by remember(conversationId) { mutableStateOf(false) }
+    var isLoadingOlderImageJobs by remember(conversationId) { mutableStateOf(false) }
+    var imageHistoryOlderLoadError by remember(conversationId) { mutableStateOf<String?>(null) }
+    var suppressNextTimelineAutoScroll by remember(conversationId) { mutableStateOf(false) }
+    var lastImageHistorySyncKey by remember(conversationId) { mutableStateOf(-1) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val imageHistorySyncMutex = remember(conversationId) { Mutex() }
 
     LaunchedEffect(app, conversationId, imageHistoryRefreshKey, remoteImageHistoryEnabled, characterId) {
         var shouldPoll = true
         while (shouldPoll) {
             try {
                 if (remoteImageHistoryEnabled) {
-                    val coreHistory = app.lilaCoreImageGenerationProvider.history(conversationId)
-                    val sync = syncCoreImageHistory(
-                        provider = app.lilaCoreImageGenerationProvider,
-                        conversationId = conversationId,
-                        characterId = characterId,
-                        requestStore = app.imageGenerationRequests,
-                        jobStore = app.comfyUiJobStore,
-                        images = app.generatedImages,
-                        history = coreHistory
-                    )
-                    imageJobs = coreHistory
-                    imageJobRequestIds = try {
-                        app.comfyUiJobStore.all().associate { it.promptId to it.requestId }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        emptyMap()
+                    imageHistorySyncMutex.withLock {
+                        val page = app.lilaCoreImageGenerationProvider.historyPage(conversationId)
+                        val pageJobIds = page.jobs.mapTo(mutableSetOf()) { it.jobId }
+                        val refreshedOlderJobs = imageJobs
+                            .filter { it.jobId !in pageJobIds && shouldPollCoreImageJobState(it.state) }
+                            .mapNotNull { job ->
+                                try {
+                                    job.copy(
+                                        state = app.lilaCoreImageGenerationProvider
+                                            .status(job.jobId).state.name.lowercase()
+                                    )
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            }
+                        val mergedHistory = mergeLilaImageHistoryJobs(
+                            imageJobs,
+                            page.jobs + refreshedOlderJobs
+                        )
+                        val syncAllLoaded = !imageHistoryReady ||
+                            lastImageHistorySyncKey != imageHistoryRefreshKey
+                        val historyToSync = if (syncAllLoaded) mergedHistory else page.jobs + refreshedOlderJobs
+                        val sync = syncCoreImageHistory(
+                            provider = app.lilaCoreImageGenerationProvider,
+                            conversationId = conversationId,
+                            characterId = characterId,
+                            requestStore = app.imageGenerationRequests,
+                            jobStore = app.comfyUiJobStore,
+                            images = app.generatedImages,
+                            history = historyToSync
+                        )
+                        if (syncAllLoaded) lastImageHistorySyncKey = imageHistoryRefreshKey
+                        imageJobs = mergedHistory
+                        if (!imageHistoryReady) {
+                            imageHistoryCursor = page.nextCursor
+                            imageHistoryFullyLoaded = page.nextCursor == null
+                        } else if (!imageHistoryFullyLoaded && imageHistoryCursor == null) {
+                            imageHistoryCursor = page.nextCursor
+                            imageHistoryFullyLoaded = page.nextCursor == null
+                        }
+                        imageJobRequestIds = try {
+                            app.comfyUiJobStore.all().associate { it.promptId to it.requestId }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            emptyMap()
+                        }
+                        generatedImages = app.generatedImages.listForConversation(conversationId)
+                        imageHistoryReady = true
+                        if (syncAllLoaded || imageHistorySyncWarning == null) {
+                            imageHistorySyncWarning = coreImageHistorySyncWarning(sync)
+                        }
+                        imageHistoryLoadError = false
+                        shouldPoll = mergedHistory.any { shouldPollCoreImageJobState(it.state) }
                     }
-                    generatedImages = app.generatedImages.listForConversation(conversationId)
-                    imageHistoryReady = true
-                    imageHistorySyncWarning = coreImageHistorySyncWarning(sync)
-                    imageHistoryLoadError = false
-                    shouldPoll = coreHistory.any { shouldPollCoreImageJobState(it.state) }
                 } else {
                     generatedImages = app.generatedImages.listForConversation(conversationId)
                     imageJobs = emptyList()
                     imageJobRequestIds = emptyMap()
+                    imageHistoryCursor = null
+                    imageHistoryFullyLoaded = true
                     imageHistorySyncWarning = null
+                    imageHistoryOlderLoadError = null
                     imageHistoryLoadError = false
                     imageHistoryReady = true
                     shouldPoll = false
@@ -850,8 +905,13 @@ private fun ConversationScreen(
             }
         }
     }
-    LaunchedEffect(timeline.size) {
-        if (timeline.isNotEmpty()) listState.animateScrollToItem(timeline.lastIndex)
+    LaunchedEffect(timeline.size, imageHistoryCursor != null) {
+        if (suppressNextTimelineAutoScroll) {
+            suppressNextTimelineAutoScroll = false
+        } else if (timeline.isNotEmpty()) {
+            val headerOffset = if (imageHistoryCursor != null) 1 else 0
+            listState.animateScrollToItem(timeline.lastIndex + headerOffset)
+        }
     }
     Box(
         Modifier.fillMaxSize().background(
@@ -959,6 +1019,118 @@ private fun ConversationScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     reverseLayout = false
                 ) {
+                    if (imageHistoryCursor != null) {
+                        item(key = "older-image-history") {
+                            Column(
+                                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                TextButton(
+                                    enabled = !isLoadingOlderImageJobs,
+                                    onClick = {
+                                        val cursor = imageHistoryCursor
+                                        if (cursor != null) {
+                                            sendScope.launch {
+                                                isLoadingOlderImageJobs = true
+                                                imageHistoryOlderLoadError = null
+                                                try {
+                                                    imageHistorySyncMutex.withLock {
+                                                        val page = app.lilaCoreImageGenerationProvider
+                                                            .historyPage(conversationId, cursor)
+                                                        if (page.nextCursor == cursor) {
+                                                            throw GalaxyApiException(
+                                                                null,
+                                                                "Lila Core не продвинул курсор истории изображений."
+                                                            )
+                                                        }
+                                                        val pageJobIds = page.jobs.mapTo(mutableSetOf()) { it.jobId }
+                                                        val refreshedOlderJobs = imageJobs
+                                                            .filter {
+                                                                it.jobId !in pageJobIds &&
+                                                                    shouldPollCoreImageJobState(it.state)
+                                                            }
+                                                            .mapNotNull { job ->
+                                                                try {
+                                                                    job.copy(
+                                                                        state = app.lilaCoreImageGenerationProvider
+                                                                            .status(job.jobId).state.name.lowercase()
+                                                                    )
+                                                                } catch (cancelled: CancellationException) {
+                                                                    throw cancelled
+                                                                } catch (_: Exception) {
+                                                                    null
+                                                                }
+                                                            }
+                                                        val mergedHistory = mergeLilaImageHistoryJobs(
+                                                            imageJobs,
+                                                            page.jobs + refreshedOlderJobs
+                                                        )
+                                                        val sync = syncCoreImageHistory(
+                                                            provider = app.lilaCoreImageGenerationProvider,
+                                                            conversationId = conversationId,
+                                                            characterId = characterId,
+                                                            requestStore = app.imageGenerationRequests,
+                                                            jobStore = app.comfyUiJobStore,
+                                                            images = app.generatedImages,
+                                                            history = mergedHistory
+                                                        )
+                                                        lastImageHistorySyncKey = imageHistoryRefreshKey
+                                                        suppressNextTimelineAutoScroll = true
+                                                        imageJobs = mergedHistory
+                                                        imageHistoryCursor = page.nextCursor
+                                                        imageHistoryFullyLoaded = page.nextCursor == null
+                                                        imageJobRequestIds = try {
+                                                            app.comfyUiJobStore.all()
+                                                                .associate { it.promptId to it.requestId }
+                                                        } catch (cancelled: CancellationException) {
+                                                            throw cancelled
+                                                        } catch (_: Exception) {
+                                                            emptyMap()
+                                                        }
+                                                        generatedImages =
+                                                            app.generatedImages.listForConversation(conversationId)
+                                                        imageHistorySyncWarning = coreImageHistorySyncWarning(sync)
+                                                        imageHistoryOlderLoadError = null
+                                                        if (mergedHistory.any {
+                                                                shouldPollCoreImageJobState(it.state)
+                                                            }) {
+                                                            imageHistoryRefreshKey++
+                                                        }
+                                                    }
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (error: Exception) {
+                                                    imageHistoryOlderLoadError =
+                                                        (error as? GalaxyApiException)?.message
+                                                            ?: "Не удалось загрузить более ранние задания."
+                                                } finally {
+                                                    isLoadingOlderImageJobs = false
+                                                }
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Text(
+                                        if (isLoadingOlderImageJobs) {
+                                            "ЗАГРУЖАЮ БОЛЕЕ РАННИЕ ЗАДАНИЯ…"
+                                        } else {
+                                            "ЗАГРУЗИТЬ БОЛЕЕ РАННИЕ ЗАДАНИЯ"
+                                        },
+                                        color = Ice,
+                                        fontSize = 9.sp
+                                    )
+                                }
+                                imageHistoryOlderLoadError?.let {
+                                    Text(
+                                        it,
+                                        color = Color(0xFFFF9B9B),
+                                        fontSize = 10.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
                     items(timeline, key = { it.key }) { entry ->
                         when {
                             entry.message != null -> {

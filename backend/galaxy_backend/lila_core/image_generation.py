@@ -217,6 +217,7 @@ class ImageGenerationHistoryResponse(BaseModel):
 
     conversation_id: str
     jobs: list[ImageGenerationJobResponse] = Field(default_factory=list, max_length=50)
+    next_cursor: str | None = Field(default=None, max_length=256)
 
 
 class ComfyUiImageReference(BaseModel):
@@ -729,14 +730,19 @@ class LilaImageGenerationService:
         return self._response(job)
 
     async def history(
-        self, *, principal_id: str, conversation_id: str, limit: int = 50
+        self, *, principal_id: str, conversation_id: str, limit: int = 50,
+        cursor: str | None = None,
     ) -> ImageGenerationHistoryResponse:
-        jobs = await self.store.list_jobs(
-            principal_id=principal_id, conversation_id=conversation_id, limit=limit
+        jobs, next_cursor = await self.store.list_jobs_page(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            limit=limit,
+            cursor=cursor,
         )
         return ImageGenerationHistoryResponse(
             conversation_id=conversation_id,
             jobs=[self._response(job) for job in jobs],
+            next_cursor=next_cursor,
         )
 
     async def asset(self, *, principal_id: str, job_id: str) -> dict[str, Any] | None:

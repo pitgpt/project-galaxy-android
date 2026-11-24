@@ -13,6 +13,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class LilaCoreImageGenerationProviderTest {
@@ -64,6 +65,33 @@ class LilaCoreImageGenerationProviderTest {
         assertEquals("portrait", history.single().prompt)
         assertEquals(4096L, history.single().assetByteSize)
         assertTrue(api.calls.single().path.contains("conversation_id=$CONV"))
+    }
+
+    @Test fun historyPagesCarryTheOpaqueCursorWithoutChangingConversationScope() = runBlocking {
+        val api = FakeApi().apply {
+            json.add(
+                JSONObject()
+                    .put("conversation_id", CONV)
+                    .put("jobs", JSONArray())
+                    .put("next_cursor", "opaque-next-page")
+            )
+            json.add(
+                JSONObject()
+                    .put("conversation_id", CONV)
+                    .put("jobs", JSONArray())
+                    .put("next_cursor", JSONObject.NULL)
+            )
+        }
+        val provider = LilaCoreImageGenerationProvider(api, FakeStore())
+
+        val first = provider.historyPage(CONV)
+        assertEquals("opaque-next-page", first.nextCursor)
+        val second = provider.historyPage(CONV, first.nextCursor)
+
+        assertNull(second.nextCursor)
+        assertTrue(api.calls[0].path.contains("limit=50"))
+        assertTrue(api.calls[1].path.contains("cursor=opaque-next-page"))
+        assertTrue(api.calls[1].path.contains("conversation_id=$CONV"))
     }
 
     @Test fun historyRejectsAResponseForAnotherConversation() = runBlocking {

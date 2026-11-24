@@ -1515,11 +1515,15 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
         conversation_id: str = Query(min_length=1, max_length=128),
         limit: int = Query(default=50, ge=1, le=50),
+        cursor: str | None = Query(default=None, max_length=256),
     ):
         service = await require_lila_image_service(request, user_id)
         try:
             return await service.history(
-                principal_id=user_id, conversation_id=conversation_id, limit=limit
+                principal_id=user_id,
+                conversation_id=conversation_id,
+                limit=limit,
+                cursor=cursor,
             )
         except ValueError:
             raise HTTPException(

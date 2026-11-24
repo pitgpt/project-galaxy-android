@@ -558,13 +558,31 @@ def test_authenticated_image_api_is_owner_scoped_and_never_returns_provider_secr
         job_id = created.json()["job_id"]
         assert created.json()["state"] == "queued"
 
+        created_second = client.post(
+            "/v1/lila/images",
+            headers={**headers, "Idempotency-Key": str(uuid4())},
+            json=request_payload(prompt="A second observatory").model_dump(mode="json"),
+        )
+        assert created_second.status_code == 200
+
         history = client.get(
             "/v1/lila/images",
             headers=headers,
-            params={"conversation_id": "conversation-a"},
+            params={"conversation_id": "conversation-a", "limit": 1},
         )
         assert history.status_code == 200
         assert len(history.json()["jobs"]) == 1
+        cursor = history.json()["next_cursor"]
+        assert isinstance(cursor, str) and cursor
+
+        older_history = client.get(
+            "/v1/lila/images",
+            headers=headers,
+            params={"conversation_id": "conversation-a", "limit": 1, "cursor": cursor},
+        )
+        assert older_history.status_code == 200
+        assert len(older_history.json()["jobs"]) == 1
+        assert older_history.json()["next_cursor"] is None
 
         other_headers = {"Authorization": "Bearer owner-b-token"}
         assert client.get(f"/v1/lila/images/{job_id}", headers=other_headers).status_code == 404
@@ -578,6 +596,48 @@ def test_authenticated_image_api_is_owner_scoped_and_never_returns_provider_secr
         assert asset.status_code == 200
         assert asset.headers["content-type"] == "image/png"
         assert asset.content == png_bytes()
+
+
+def test_image_history_cursor_is_stable_when_newer_jobs_are_added(tmp_path):
+    service, _store, _state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    created_ids = []
+    for index in range(3):
+        job = run(service.submit(
+            principal_id="owner",
+            idempotency_key=str(uuid4()),
+            request=request_payload(prompt=f"observatory {index}"),
+        ))
+        created_ids.append(job.job_id)
+        run(asyncio.sleep(0.005))
+
+    first_page = run(service.history(
+        principal_id="owner", conversation_id="conversation-a", limit=2
+    ))
+    assert [job.job_id for job in first_page.jobs] == [created_ids[2], created_ids[1]]
+    assert first_page.next_cursor is not None
+
+    run(service.submit(
+        principal_id="owner",
+        idempotency_key=str(uuid4()),
+        request=request_payload(prompt="newest observatory"),
+    ))
+    second_page = run(service.history(
+        principal_id="owner",
+        conversation_id="conversation-a",
+        limit=2,
+        cursor=first_page.next_cursor,
+    ))
+    assert [job.job_id for job in second_page.jobs] == [created_ids[0]]
+    assert second_page.next_cursor is None
+
+    with pytest.raises(ValueError, match="cursor is invalid"):
+        run(service.history(
+            principal_id="another-owner",
+            conversation_id="conversation-a",
+            limit=2,
+            cursor=first_page.next_cursor,
+        ))
 
 
 def test_comfyui_credentials_are_not_carried_to_a_new_endpoint(tmp_path):

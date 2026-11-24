@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -218,6 +220,59 @@ class SqliteLilaImageStore:
         return hmac.new(
             self._index_key, kind.encode("ascii") + b"\0" + value.encode("utf-8"), hashlib.sha256
         ).hexdigest()
+
+    def _encode_history_cursor(self, owner_key: str, job: dict[str, Any]) -> str:
+        payload = json.dumps(
+            {
+                "v": 1,
+                "created_at_ms": int(job["created_at_epoch_millis"]),
+                "job_id": str(job["job_id"]),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        signature = hmac.new(
+            self._index_key,
+            b"lila-image-history-cursor-v1\0" + owner_key.encode("ascii") + b"\0" + payload,
+            hashlib.sha256,
+        ).digest()[:16]
+        return base64.urlsafe_b64encode(payload + signature).rstrip(b"=").decode("ascii")
+
+    def _decode_history_cursor(
+        self, owner_key: str, cursor: str | None
+    ) -> tuple[int, str] | None:
+        if cursor is None:
+            return None
+        if not isinstance(cursor, str) or not cursor or len(cursor) > 256:
+            raise ValueError("Image history cursor is invalid")
+        try:
+            raw = base64.b64decode(
+                cursor + "=" * (-len(cursor) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+            if len(raw) <= 16:
+                raise ValueError("cursor payload is too short")
+            payload, signature = raw[:-16], raw[-16:]
+            expected = hmac.new(
+                self._index_key,
+                b"lila-image-history-cursor-v1\0" + owner_key.encode("ascii") + b"\0" + payload,
+                hashlib.sha256,
+            ).digest()[:16]
+            if not hmac.compare_digest(signature, expected):
+                raise ValueError("cursor signature is invalid")
+            value = json.loads(payload.decode("utf-8"))
+            if not isinstance(value, dict) or set(value) != {"v", "created_at_ms", "job_id"}:
+                raise ValueError("cursor shape is invalid")
+            timestamp = value["created_at_ms"]
+            job_id = value["job_id"]
+            if value["v"] != 1 or type(timestamp) is not int or not 0 <= timestamp <= 2**63 - 1:
+                raise ValueError("cursor position is invalid")
+            if not isinstance(job_id, str) or str(UUID(job_id)) != job_id:
+                raise ValueError("cursor job ID is invalid")
+            return timestamp, self._resource_key("image_job", job_id, 64)
+        except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, TypeError, KeyError, ValueError):
+            raise ValueError("Image history cursor is invalid") from None
 
     @staticmethod
     def _aad(kind: str, owner_key: str, resource_key: str, suffix: str = "") -> bytes:
@@ -517,27 +572,56 @@ class SqliteLilaImageStore:
     async def list_jobs(
         self, *, principal_id: str, conversation_id: str, limit: int = 50
     ) -> tuple[dict[str, Any], ...]:
+        jobs, _ = await self.list_jobs_page(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            limit=limit,
+        )
+        return jobs
+
+    async def list_jobs_page(
+        self, *, principal_id: str, conversation_id: str, limit: int = 50,
+        cursor: str | None = None,
+    ) -> tuple[tuple[dict[str, Any], ...], str | None]:
         await self.initialize()
         if not 1 <= limit <= 50:
             raise ValueError("Image history limit is invalid")
         owner_key = self._owner_key(principal_id)
         conversation_key = self._resource_key("conversation", conversation_id, 128)
-        return await asyncio.to_thread(
-            self._list_jobs_sync, owner_key, conversation_key, limit
+        cursor_position = self._decode_history_cursor(owner_key, cursor)
+        jobs, has_more = await asyncio.to_thread(
+            self._list_jobs_page_sync, owner_key, conversation_key, limit, cursor_position
         )
+        next_cursor = (
+            self._encode_history_cursor(owner_key, jobs[-1])
+            if has_more and jobs
+            else None
+        )
+        return jobs, next_cursor
 
-    def _list_jobs_sync(self, owner_key, conversation_key, limit):
+    def _list_jobs_page_sync(self, owner_key, conversation_key, limit, cursor_position):
+        query = self._job_select() + "WHERE j.owner_key=? AND j.conversation_key=? "
+        parameters: list[Any] = [owner_key, conversation_key]
+        if cursor_position is not None:
+            created_at_ms, job_key = cursor_position
+            query += (
+                "AND (j.created_at_ms < ? OR "
+                "(j.created_at_ms = ? AND j.job_key > ?)) "
+            )
+            parameters.extend((created_at_ms, created_at_ms, job_key))
+        query += "ORDER BY j.created_at_ms DESC, j.job_key ASC LIMIT ?"
+        parameters.append(limit + 1)
         connection = self._connect()
         try:
-            rows = connection.execute(
-                self._job_select() +
-                "WHERE j.owner_key=? AND j.conversation_key=? "
-                "ORDER BY j.created_at_ms DESC, j.job_key ASC LIMIT ?",
-                (owner_key, conversation_key, limit),
-            ).fetchall()
+            rows = connection.execute(query, tuple(parameters)).fetchall()
         finally:
             connection.close()
-        return tuple(self._decode_job_row(owner_key, row) for row in rows)
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        return (
+            tuple(self._decode_job_row(owner_key, row) for row in page_rows),
+            has_more,
+        )
 
     async def save_asset(
         self, *, principal_id: str, job_id: str, mime_type: str,

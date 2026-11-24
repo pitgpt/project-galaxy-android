@@ -55,6 +55,11 @@ data class LilaImageHistoryJob(
     val assetByteSize: Long?
 )
 
+data class LilaImageHistoryPage(
+    val jobs: List<LilaImageHistoryJob>,
+    val nextCursor: String?
+)
+
 /** Owner-scoped image adapter; ComfyUI credentials and workflow stay in Lila Core. */
 class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, private val jobs: ComfyUiJobStore) :
     ImageGenerationProvider, GeneratedImageResultSource {
@@ -126,12 +131,21 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
         )
     }
 
-    suspend fun history(conversationId: String): List<LilaImageHistoryJob> {
+    suspend fun historyPage(
+        conversationId: String,
+        cursor: String? = null
+    ): LilaImageHistoryPage {
         val expectedConversationId = canonicalUuid(conversationId)
+        if (cursor != null && (cursor.isBlank() || cursor.length > MAX_HISTORY_CURSOR_LENGTH)) {
+            throw GalaxyApiException(null, "Lila Core вернул некорректный курсор истории изображений.")
+        }
         val encodedConversationId = URLEncoder.encode(expectedConversationId, Charsets.UTF_8.name())
+        val cursorQuery = cursor?.let {
+            "&cursor=" + URLEncoder.encode(it, Charsets.UTF_8.name())
+        }.orEmpty()
         val json = api.requestJson(
             "GET",
-            "$IMAGES_PATH?conversation_id=$encodedConversationId&limit=50",
+            "$IMAGES_PATH?conversation_id=$encodedConversationId&limit=$HISTORY_PAGE_SIZE$cursorQuery",
             maxResponseBytes = MAX_JSON_RESPONSE_BYTES
         )
         if (canonicalUuid(json.optString("conversation_id")) != expectedConversationId) {
@@ -140,16 +154,32 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
         val jobsJson = json.optJSONArray("jobs")
             ?: throw GalaxyApiException(null, "Lila Core вернул некорректную историю изображений.")
         if (jobsJson.length() > MAX_HISTORY_JOBS) {
-            throw GalaxyApiException(null, "История изображений Lila превышает допустимый размер.")
+            throw GalaxyApiException(null, "История изображений Lila превышает допустимый размер страницы.")
         }
-        return buildList {
+        val nextCursor = if (!json.has("next_cursor") || json.isNull("next_cursor")) {
+            null
+        } else {
+            json.optString("next_cursor").also {
+                if (it.isBlank() || it.length > MAX_HISTORY_CURSOR_LENGTH || it == cursor) {
+                    throw GalaxyApiException(null, "Lila Core вернул некорректный курсор истории изображений.")
+                }
+            }
+        }
+        val jobs = buildList {
             for (index in 0 until jobsJson.length()) {
                 val item = jobsJson.optJSONObject(index)
                     ?: throw GalaxyApiException(null, "Lila Core вернул некорректную запись image job.")
                 add(parseHistoryJob(item, expectedConversationId))
             }
         }.sortedByDescending { it.createdAtEpochMillis }
+        if (jobs.isEmpty() && nextCursor != null) {
+            throw GalaxyApiException(null, "Lila Core вернул пустую страницу с продолжением истории.")
+        }
+        return LilaImageHistoryPage(jobs, nextCursor)
     }
+
+    suspend fun history(conversationId: String): List<LilaImageHistoryJob> =
+        historyPage(conversationId).jobs
 
     suspend fun configureProvider(baseUrl:String, workflow:ComfyUiWorkflowTemplate, bearerToken:String?=null,
         clearBearerToken:Boolean=false, timeoutSeconds:Double=30.0):LilaComfyUiProviderSummary {
@@ -353,7 +383,7 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
     override fun toString()="LilaCoreImageGenerationProvider(provider=comfyui, credentials=<redacted>)"
     private companion object{
         const val PROVIDER_PATH="/v1/lila/image-providers/comfyui";const val IMAGES_PATH="/v1/lila/images";const val PNG="image/png"
-        const val MAX_JSON_REQUEST_BYTES=5*1024*1024;const val MAX_JSON_RESPONSE_BYTES=5*1024*1024;const val MAX_HISTORY_JOBS=50
+        const val MAX_JSON_REQUEST_BYTES=5*1024*1024;const val MAX_JSON_RESPONSE_BYTES=5*1024*1024;const val MAX_HISTORY_JOBS=50;const val HISTORY_PAGE_SIZE=50;const val MAX_HISTORY_CURSOR_LENGTH=256
         val STATES=setOf("prepared","submitting","submission_unknown","queued","running","provider_completed","result_pending","completed","failed","cancelled")
     }
 }

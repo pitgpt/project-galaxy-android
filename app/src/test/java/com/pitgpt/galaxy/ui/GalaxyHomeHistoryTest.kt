@@ -73,6 +73,21 @@ class GalaxyHomeHistoryTest {
     }
 
     @Test
+    fun imageHistoryPageMergeKeepsOlderJobsAndPrefersFreshState() {
+        val older = imageJob("job-older", "queued", 1_000L)
+        val newest = imageJob("job-newest", "completed", 3_000L)
+        val refreshedOlder = older.copy(state = "running")
+
+        val merged = mergeLilaImageHistoryJobs(
+            existing = listOf(older, newest),
+            incoming = listOf(refreshedOlder)
+        )
+
+        assertEquals(listOf("job-newest", "job-older"), merged.map { it.jobId })
+        assertEquals("running", merged.last().state)
+    }
+
+    @Test
     fun coreImageJobPollingStopsOnlyForTerminalStates() {
         assertFalse(shouldPollCoreImageJobState("prepared"))
         assertFalse(shouldPollCoreImageJobState("submission_unknown"))
