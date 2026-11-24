@@ -68,6 +68,39 @@ class LilaCoreImageGenerationProviderTest {
     }
 
     @Test fun historyPagesCarryTheOpaqueCursorWithoutChangingConversationScope() = runBlocking {
+        val newestJob = historyJob(JOB, "newest portrait", 2_000L)
+        val olderJob = historyJob(PREVIOUS_JOB, "older portrait", 1_000L)
+        val api = FakeApi().apply {
+            json.add(
+                JSONObject()
+                    .put("conversation_id", CONV)
+                    .put("jobs", JSONArray().put(newestJob))
+                    .put("next_cursor", "opaque-next-page")
+            )
+            json.add(
+                JSONObject()
+                    .put("conversation_id", CONV)
+                    .put("jobs", JSONArray().put(olderJob))
+                    .put("next_cursor", JSONObject.NULL)
+            )
+        }
+        val provider = LilaCoreImageGenerationProvider(api, FakeStore())
+
+        val first = provider.historyPage(CONV)
+        assertEquals(1, first.jobs.size)
+        assertEquals(JOB, first.jobs.single().jobId)
+        assertEquals("opaque-next-page", first.nextCursor)
+
+        val second = provider.historyPage(CONV, first.nextCursor)
+        assertEquals(1, second.jobs.size)
+        assertEquals(PREVIOUS_JOB, second.jobs.single().jobId)
+        assertNull(second.nextCursor)
+        assertTrue(api.calls[0].path.contains("limit=50"))
+        assertTrue(api.calls[1].path.contains("cursor=opaque-next-page"))
+        assertTrue(api.calls[1].path.contains("conversation_id=$CONV"))
+    }
+
+    @Test fun historyRejectsAnEmptyPageWithAContinuationCursor() = runBlocking {
         val api = FakeApi().apply {
             json.add(
                 JSONObject()
@@ -75,23 +108,17 @@ class LilaCoreImageGenerationProviderTest {
                     .put("jobs", JSONArray())
                     .put("next_cursor", "opaque-next-page")
             )
-            json.add(
-                JSONObject()
-                    .put("conversation_id", CONV)
-                    .put("jobs", JSONArray())
-                    .put("next_cursor", JSONObject.NULL)
-            )
         }
-        val provider = LilaCoreImageGenerationProvider(api, FakeStore())
 
-        val first = provider.historyPage(CONV)
-        assertEquals("opaque-next-page", first.nextCursor)
-        val second = provider.historyPage(CONV, first.nextCursor)
+        var rejected = false
+        try {
+            LilaCoreImageGenerationProvider(api, FakeStore()).historyPage(CONV)
+        } catch (_: GalaxyApiException) {
+            rejected = true
+        }
 
-        assertNull(second.nextCursor)
-        assertTrue(api.calls[0].path.contains("limit=50"))
-        assertTrue(api.calls[1].path.contains("cursor=opaque-next-page"))
-        assertTrue(api.calls[1].path.contains("conversation_id=$CONV"))
+        assertTrue(rejected)
+        assertEquals(1, api.calls.size)
     }
 
     @Test fun historyRejectsAResponseForAnotherConversation() = runBlocking {
@@ -138,6 +165,15 @@ class LilaCoreImageGenerationProviderTest {
         LilaCoreImageGenerationProvider(api,store).cancel(JOB)
         assertEquals("GET",api.calls[0].method);assertEquals("POST",api.calls[1].method);assertTrue(store.get(JOB)?.cancelled==true)
     }
+    private fun historyJob(jobId: String, prompt: String, createdAt: Long) = JSONObject()
+        .put("job_id", jobId)
+        .put("conversation_id", CONV)
+        .put("prompt", prompt)
+        .put("width", 512)
+        .put("height", 512)
+        .put("state", "queued")
+        .put("created_at_epoch_millis", createdAt)
+
     private fun job(state:String,asset:JSONObject?=null)=JSONObject().put("job_id",JOB).put("conversation_id",CONV).put("state",state).apply{if(asset!=null)put("asset",asset)}
     private class FakeApi:LilaImageApiTransport{
         val json=ArrayDeque<JSONObject>();val binary=ArrayDeque<LilaBinaryResponse>();val calls=mutableListOf<Call>()
@@ -155,5 +191,5 @@ class LilaCoreImageGenerationProviderTest {
         override suspend fun all()=map.values.toList()
         override suspend fun markSubmissionStarted(promptId:String):Boolean{val r=map[promptId]?:return false;if(r.submissionStarted||r.cancelled)return false;map[promptId]=r.copy(submissionStarted=true);return true}
     }
-    private companion object{const val REQ="00000000-0000-0000-0000-000000000002";const val CONV="00000000-0000-0000-0000-000000000001";const val JOB="00000000-0000-0000-0000-000000000003"}
+    private companion object{const val REQ="00000000-0000-0000-0000-000000000002";const val CONV="00000000-0000-0000-0000-000000000001";const val JOB="00000000-0000-0000-0000-000000000003";const val PREVIOUS_JOB="00000000-0000-0000-0000-000000000004"}
 }
