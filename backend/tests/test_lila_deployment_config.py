@@ -226,8 +226,8 @@ def test_settings_load_optional_realtime_secret_files_without_exposing_values(mo
     safety_key = "safety-hmac-file-secret-material"
     openai_file = tmp_path / "openai-key"
     safety_file = tmp_path / "safety-key"
-    openai_file.write_text(openai_key + "\\n", encoding="ascii")
-    safety_file.write_text(safety_key + "\\n", encoding="ascii")
+    openai_file.write_text(openai_key + "\n", encoding="ascii")
+    safety_file.write_text(safety_key + "\n", encoding="ascii")
 
     _set_minimal_development_settings_environment(monkeypatch)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
