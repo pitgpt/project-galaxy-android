@@ -403,6 +403,10 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
             # Prove the production DNS-pinned HTTPX transport classifies a real
             # TCP refusal as a safe pre-send failure after the primary passed
             # model discovery. The fallback is the already-running real Ollama.
+            # Use a fresh conversation so this transport regression measures the
+            # connect-refusal/fallback path, not latency from the preceding
+            # multi-turn memory/history test on the bounded CPU model.
+            tcp_fallback_conversation_id = "live-tcp-" + uuid.uuid4().hex
             probe_model_id = "tcp-probe-model"
             primary_probe_provider_id = "tcp-primary-" + uuid.uuid4().hex[:12]
             primary_probe_requests = []
@@ -470,7 +474,7 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
                 assert primary_probe_requests == [("GET", "/v1/models")]
 
                 selected_tcp_fallback = client.put(
-                    "/v1/lila/conversations/" + conversation_id + "/model",
+                    "/v1/lila/conversations/" + tcp_fallback_conversation_id + "/model",
                     headers=auth_headers,
                     json={
                         "provider_id": primary_probe_provider_id,
@@ -506,7 +510,7 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
                     "Idempotency-Key": str(uuid.uuid4()),
                 },
                 json={
-                    "conversation_id": conversation_id,
+                    "conversation_id": tcp_fallback_conversation_id,
                     "message": tcp_fallback_message,
                 },
             )
@@ -547,7 +551,7 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
             )
 
             tcp_fallback_history = client.get(
-                "/v1/lila/conversations/" + conversation_id + "/messages",
+                "/v1/lila/conversations/" + tcp_fallback_conversation_id + "/messages",
                 headers=auth_headers,
             )
             assert tcp_fallback_history.status_code == 200, tcp_fallback_history.text
