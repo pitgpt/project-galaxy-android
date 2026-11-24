@@ -14,14 +14,6 @@ class FakeAuthenticator:
         return "owner-1"
 
 
-class FakeRateLimiter:
-    def __init__(self):
-        self.checked = []
-
-    async def check(self, principal_id: str) -> None:
-        self.checked.append(principal_id)
-
-
 class FakeSessionRegistry:
     def __init__(self):
         self.reserved = []
@@ -95,16 +87,14 @@ def make_client(upstream_response):
         allowed_character_ids=frozenset({"galaxy.default"}),
     )
     http_client = FakeHttpClient(upstream_response)
-    rate_limiter = FakeRateLimiter()
     session_registry = FakeSessionRegistry()
     app = create_app(
         settings=settings,
         http_client=http_client,
         authenticator=FakeAuthenticator(),
-        rate_limiter=rate_limiter,
         session_registry=session_registry,
     )
-    return TestClient(app), http_client, rate_limiter, session_registry
+    return TestClient(app), http_client, session_registry
 
 
 def create_session(client):
@@ -127,7 +117,7 @@ def test_realtime_session_accepts_bounded_streamed_json_response():
         [body],
         headers={"content-length": str(len(body))},
     )
-    client, http_client, limiter, registry = make_client(upstream)
+    client, http_client, registry = make_client(upstream)
 
     with client:
         response = create_session(client)
@@ -135,7 +125,6 @@ def test_realtime_session_accepts_bounded_streamed_json_response():
     assert response.status_code == 200
     assert response.json()["client_secret"] == "ephemeral-client-secret"
     assert response.json()["expires_at_epoch_millis"] == 1_764_000_000_000
-    assert limiter.checked == ["owner-1"]
     assert len(registry.reserved) == 1
     assert registry.closed == []
     assert http_client.calls[0][0] == "POST"
@@ -148,7 +137,7 @@ def test_realtime_session_rejects_oversized_declared_content_length_before_readi
         [b'{"value":"must-not-be-read"}'],
         headers={"content-length": str(MAX_REALTIME_SESSION_RESPONSE_BYTES + 1)},
     )
-    client, http_client, _, registry = make_client(upstream)
+    client, http_client, registry = make_client(upstream)
 
     with client:
         response = create_session(client)
@@ -167,7 +156,7 @@ def test_realtime_session_rejects_oversized_chunked_body_and_closes_lease():
         + b'"}'
     )
     upstream = FakeStreamResponse([body])
-    client, http_client, _, registry = make_client(upstream)
+    client, http_client, registry = make_client(upstream)
 
     with client:
         response = create_session(client)
