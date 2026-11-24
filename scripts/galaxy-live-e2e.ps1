@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 Runs one authenticated live Galaxy-to-Lila model turn using the same owner/character
