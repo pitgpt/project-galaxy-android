@@ -1,0 +1,18 @@
+services:
+  backend:
+    environment:
+      # The optional Realtime credentials are mounted as files, never copied
+      # into the backend container's environment metadata.
+      OPENAI_API_KEY: ""
+      OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+      SAFETY_IDENTIFIER_HMAC_KEY: ""
+      SAFETY_IDENTIFIER_HMAC_KEY_FILE: /run/secrets/safety_identifier_hmac_key
+    secrets:
+      - openai_api_key
+      - safety_identifier_hmac_key
+
+secrets:
+  openai_api_key:
+    file: ${OPENAI_API_KEY_SECRET_FILE:?Set OPENAI_API_KEY_SECRET_FILE to an absolute host secret-file path}
+  safety_identifier_hmac_key:
+    file: ${SAFETY_IDENTIFIER_HMAC_KEY_SECRET_FILE:?Set SAFETY_IDENTIFIER_HMAC_KEY_SECRET_FILE to an absolute host secret-file path}
