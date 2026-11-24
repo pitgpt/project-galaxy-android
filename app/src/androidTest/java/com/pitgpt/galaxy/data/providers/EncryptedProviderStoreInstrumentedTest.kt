@@ -14,6 +14,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -59,6 +60,38 @@ class EncryptedProviderStoreInstrumentedTest {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         val key = keyStore.getKey(keyAlias, null) as SecretKey
         assertNull("Android Keystore must not export the vault key", key.encoded)
+    }
+
+    @Test
+    fun providerApiKeyRoundTripsWithoutPlaintextPreferences() {
+        val apiKey = "sk-test-provider-vault-secret"
+        val provider = AiProviderConfig(
+            id = "test-provider",
+            name = "Test provider",
+            baseUrl = "https://provider.example/v1",
+            apiKey = apiKey,
+            model = "test-model"
+        )
+
+        store.save(ProviderSettings(providers = listOf(provider)))
+
+        val ciphertext = preferences.getString("encrypted_provider_settings_v1", null)
+        assertNotNull(ciphertext)
+        assertFalse("Provider API key must not appear in plaintext preferences", ciphertext!!.contains(apiKey))
+        assertEquals(apiKey, store.load().providers.single().apiKey)
+    }
+
+    @Test
+    fun plaintextByteBuffersAreZeroizedAfterSuccessAndFailure() {
+        val successfulBuffer = byteArrayOf(1, 2, 3)
+        assertEquals(6, successfulBuffer.useAndZero { it.sum() })
+        assertTrue(successfulBuffer.all { it == 0.toByte() })
+
+        val failingBuffer = byteArrayOf(4, 5, 6)
+        assertThrows(IllegalStateException::class.java) {
+            failingBuffer.useAndZero<Unit> { throw IllegalStateException("expected test failure") }
+        }
+        assertTrue(failingBuffer.all { it == 0.toByte() })
     }
 
     @Test
