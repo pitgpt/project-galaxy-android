@@ -18,6 +18,38 @@ import org.junit.Test
 
 class ImageGenerationPanelTest {
     @Test
+    fun historySyncWarningDistinguishesImportLimitsFromFailedJobs() {
+        val limitOnly = coreImageHistorySyncWarning(
+            CoreImageHistorySyncResult(importedImages = emptyList(), skippedAssets = 2)
+        )
+        assertTrue(limitOnly.orEmpty().contains("лимит"))
+        assertFalse(limitOnly.orEmpty().contains("Не удалось импортировать"))
+
+        val failedOnly = coreImageHistorySyncWarning(
+            CoreImageHistorySyncResult(
+                importedImages = emptyList(),
+                skippedAssets = 0,
+                failedJobs = 1
+            )
+        )
+        assertTrue(failedOnly.orEmpty().contains("Не удалось импортировать"))
+        assertFalse(failedOnly.orEmpty().contains("лимит"))
+
+        val mixed = coreImageHistorySyncWarning(
+            CoreImageHistorySyncResult(
+                importedImages = emptyList(),
+                skippedAssets = 2,
+                failedJobs = 1
+            )
+        )
+        assertTrue(mixed.orEmpty().contains("Не удалось импортировать"))
+        assertTrue(mixed.orEmpty().contains("лимит"))
+        assertNull(coreImageHistorySyncWarning(
+            CoreImageHistorySyncResult(importedImages = emptyList(), skippedAssets = 0)
+        ))
+    }
+
+    @Test
     fun coreHistoryRestoresRequestIntoTheSameOwnerScopedConversation() {
         val job = LilaImageHistoryJob(
             jobId = "00000000-0000-0000-0000-000000000003",
