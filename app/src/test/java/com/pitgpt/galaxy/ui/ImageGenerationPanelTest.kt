@@ -22,7 +22,7 @@ class ImageGenerationPanelTest {
         val limitOnly = coreImageHistorySyncWarning(
             CoreImageHistorySyncResult(importedImages = emptyList(), skippedAssets = 2)
         )
-        assertTrue(limitOnly.orEmpty().contains("лимит"))
+        assertTrue(limitOnly.orEmpty().contains("импорт ограничен"))
         assertFalse(limitOnly.orEmpty().contains("Не удалось импортировать"))
 
         val failedOnly = coreImageHistorySyncWarning(
@@ -33,7 +33,7 @@ class ImageGenerationPanelTest {
             )
         )
         assertTrue(failedOnly.orEmpty().contains("Не удалось импортировать"))
-        assertFalse(failedOnly.orEmpty().contains("лимит"))
+        assertFalse(failedOnly.orEmpty().contains("импорт ограничен"))
 
         val mixed = coreImageHistorySyncWarning(
             CoreImageHistorySyncResult(
@@ -43,7 +43,7 @@ class ImageGenerationPanelTest {
             )
         )
         assertTrue(mixed.orEmpty().contains("Не удалось импортировать"))
-        assertTrue(mixed.orEmpty().contains("лимит"))
+        assertTrue(mixed.orEmpty().contains("импорт ограничен"))
         assertNull(coreImageHistorySyncWarning(
             CoreImageHistorySyncResult(importedImages = emptyList(), skippedAssets = 0)
         ))
