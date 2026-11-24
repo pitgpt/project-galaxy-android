@@ -1438,6 +1438,7 @@ def create_app(
         user_id: Annotated[str, Depends(current_user)],
     ):
         service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
         response.headers["Cache-Control"] = "no-store"
         try:
             return await service.provider_configuration(principal_id=user_id)
