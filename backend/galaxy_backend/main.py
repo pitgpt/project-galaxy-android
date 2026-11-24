@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .lila_core.contracts import (
@@ -49,6 +49,23 @@ from .lila_core.provider_routing import (
     SelectedProviderUnavailable,
     create_provider_model_adapter,
 )
+from .lila_core.image_generation import (
+    ComfyUiFailure,
+    ComfyUiProviderConfigRequest,
+    ImageGenerationHistoryResponse,
+    ImageGenerationJobResponse,
+    ImageGenerationRequest,
+    ImageProviderConnectionTestResponse,
+    ImageProviderNotConfigured,
+    ImageProviderSummary,
+    ImageJobNotCancellable,
+)
+from .lila_core.image_store import (
+    ImageIdempotencyConflict,
+    ImageJobNotFound,
+    SqliteLilaImageStore,
+)
+from .lila_core.image_generation import LilaImageGenerationService
 from .lila_core.sqlite_store import (
     ProviderAlreadyExists,
     ProviderDisabled,
@@ -145,6 +162,8 @@ def create_app(
     lila_store: Any | None = None,
     lila_memory_reader: Any | None = None,
     lila_memory_writer: Any | None = None,
+    lila_image_store: SqliteLilaImageStore | None = None,
+    lila_image_service: LilaImageGenerationService | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -219,6 +238,8 @@ def create_app(
         app.state.lila_memory_writer = lila_memory_writer or lila_store
         app.state.lila_provider_adapter = lila_provider_adapter
         app.state.lila_provider_registry = lila_provider_registry
+        app.state.lila_image_store = lila_image_store
+        app.state.lila_image_service = lila_image_service
         if (
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
@@ -283,6 +304,19 @@ def create_app(
             app.state.lila_core_service = None
             app.state.lila_provider_adapter = lila_provider_adapter
 
+        image_store = lila_image_store
+        if image_store is None and app.state.settings.lila_storage_is_configured:
+            image_store = SqliteLilaImageStore(
+                app.state.settings.lila_database_path,
+                app.state.settings.lila_storage_encryption_key,
+            )
+        if image_store is not None:
+            await image_store.initialize()
+        app.state.lila_image_store = image_store
+        app.state.lila_image_service = lila_image_service or (
+            LilaImageGenerationService(image_store) if image_store is not None else None
+        )
+
         yield
         if app.state.redis is not None:
             await app.state.redis.aclose()
@@ -297,6 +331,8 @@ def create_app(
     app.state.lila_memory_writer = lila_memory_writer or lila_store
     app.state.lila_provider_adapter = lila_provider_adapter
     app.state.lila_provider_registry = lila_provider_registry
+    app.state.lila_image_store = lila_image_store
+    app.state.lila_image_service = lila_image_service
     app.state.lila_provider_http_client_factory = (
         lila_provider_http_client_factory or create_provider_http_client
     )
@@ -1286,6 +1322,239 @@ def create_app(
             conversation_id=conversation_id,
             status=turn_status,
             response=response,
+        )
+
+
+    async def require_lila_image_service(request: Request, user_id: str):
+        service = request.app.state.lila_image_service
+        if service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image generation is not configured",
+            )
+        try:
+            await request.app.state.lila_turn_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image service is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        return service
+
+    @app.get(
+        "/v1/lila/image-providers/comfyui",
+        response_model=ImageProviderSummary,
+    )
+    async def get_lila_comfyui_provider(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        try:
+            return await service.provider_summary(principal_id=user_id)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image provider settings are temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.put(
+        "/v1/lila/image-providers/comfyui",
+        response_model=ImageProviderSummary,
+    )
+    async def put_lila_comfyui_provider(
+        payload: ComfyUiProviderConfigRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        try:
+            return await service.configure_provider(principal_id=user_id, payload=payload)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="ComfyUI provider configuration is invalid or outside the local endpoint allowlist",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image provider settings could not be saved",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.post(
+        "/v1/lila/image-providers/comfyui/test",
+        response_model=ImageProviderConnectionTestResponse,
+    )
+    async def test_lila_comfyui_provider(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        try:
+            return await service.test_provider(principal_id=user_id)
+        except ImageProviderNotConfigured:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Configure a ComfyUI endpoint and workflow before testing the provider",
+            ) from None
+        except ComfyUiFailure:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="ComfyUI connection test failed",
+                headers={"Retry-After": "5"},
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="ComfyUI connection test is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.post(
+        "/v1/lila/images",
+        response_model=ImageGenerationJobResponse,
+    )
+    async def create_lila_image(
+        payload: ImageGenerationRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+        idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        try:
+            return await service.submit(
+                principal_id=user_id,
+                idempotency_key=str(idempotency_key),
+                request=payload,
+            )
+        except ImageProviderNotConfigured:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Configure a ComfyUI image provider before generating an image",
+            ) from None
+        except ImageIdempotencyConflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Idempotency-Key was already used for a different image request",
+            ) from None
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Image generation request is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image generation is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get(
+        "/v1/lila/images",
+        response_model=ImageGenerationHistoryResponse,
+    )
+    async def get_lila_image_history(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+        conversation_id: str = Query(min_length=1, max_length=128),
+        limit: int = Query(default=50, ge=1, le=50),
+    ):
+        service = await require_lila_image_service(request, user_id)
+        try:
+            return await service.history(
+                principal_id=user_id, conversation_id=conversation_id, limit=limit
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Image history request is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image history is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get(
+        "/v1/lila/images/{job_id}",
+        response_model=ImageGenerationJobResponse,
+    )
+    async def get_lila_image_job(
+        job_id: UUID,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        try:
+            return await service.get_job(principal_id=user_id, job_id=str(job_id))
+        except ImageJobNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image job not found") from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image job status is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.post(
+        "/v1/lila/images/{job_id}/cancel",
+        response_model=ImageGenerationJobResponse,
+    )
+    async def cancel_lila_image_job(
+        job_id: UUID,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        try:
+            return await service.cancel(principal_id=user_id, job_id=str(job_id))
+        except ImageJobNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image job not found") from None
+        except ImageJobNotCancellable:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only a confirmed queued ComfyUI image job can be cancelled",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image cancellation is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get("/v1/lila/images/{job_id}/asset")
+    async def get_lila_image_asset(
+        job_id: UUID,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        try:
+            asset = await service.asset(principal_id=user_id, job_id=str(job_id))
+        except ImageJobNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image asset not found") from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image asset is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        if asset is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image asset not found")
+        return Response(
+            content=asset["bytes"],
+            media_type=asset["mime_type"],
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Length": str(asset["byte_size"]),
+            },
         )
 
     @app.post("/v1/lila/turns", response_model=CoreTurnResponse)
