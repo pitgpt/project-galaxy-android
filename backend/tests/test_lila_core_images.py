@@ -296,6 +296,101 @@ def test_comfyui_live_adapter_lifecycle_and_encrypted_result(tmp_path):
         run(service.get_job(principal_id="other-owner", job_id=job.job_id))
 
 
+
+def test_prepared_image_job_is_submitted_after_service_restart(tmp_path):
+    service, store, state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    request = request_payload()
+    provider_config = run(store.get_provider_config(principal_id="owner"))
+    job, created = run(store.create_job(
+        principal_id="owner",
+        conversation_id=request.conversation_id,
+        idempotency_key=str(uuid4()),
+        request=request.model_dump(mode="json", exclude={"conversation_id"}),
+        provider_config=provider_config,
+    ))
+    assert created is True
+    assert job["state"] == "prepared"
+    assert state["post_prompt"] == 0
+
+    restarted_store = SqliteLilaImageStore(tmp_path / "lila.sqlite3", KEY)
+    restarted = LilaImageGenerationService(
+        restarted_store, client_factory=service.client_factory
+    )
+    recovered = run(restarted.get_job(principal_id="owner", job_id=job["job_id"]))
+    assert recovered.state == "queued"
+    assert state["post_prompt"] == 1
+
+    repeated = run(restarted.get_job(principal_id="owner", job_id=job["job_id"]))
+    assert repeated.state == "queued"
+    assert state["post_prompt"] == 1
+
+
+def test_interrupted_submission_is_not_retried_after_service_restart(tmp_path):
+    service, store, state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    request = request_payload()
+    idempotency_key = str(uuid4())
+    provider_config = run(store.get_provider_config(principal_id="owner"))
+    job, created = run(store.create_job(
+        principal_id="owner",
+        conversation_id=request.conversation_id,
+        idempotency_key=idempotency_key,
+        request=request.model_dump(mode="json", exclude={"conversation_id"}),
+        provider_config=provider_config,
+    ))
+    assert created is True
+    assert run(store.claim_submission(principal_id="owner", job_id=job["job_id"])) is True
+    assert state["post_prompt"] == 0
+
+    restarted_store = SqliteLilaImageStore(tmp_path / "lila.sqlite3", KEY)
+    restarted = LilaImageGenerationService(
+        restarted_store, client_factory=service.client_factory
+    )
+    recovered = run(restarted.get_job(principal_id="owner", job_id=job["job_id"]))
+    assert recovered.state == "submission_unknown"
+    assert state["post_prompt"] == 0
+
+    repeated = run(restarted.submit(
+        principal_id="owner",
+        idempotency_key=idempotency_key,
+        request=request,
+    ))
+    assert repeated.job_id == job["job_id"]
+    assert repeated.state == "submission_unknown"
+    assert state["post_prompt"] == 0
+
+
+def test_queued_image_job_recovers_and_persists_result_after_service_restart(tmp_path):
+    service, _store, state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    job = run(service.submit(
+        principal_id="owner",
+        idempotency_key=str(uuid4()),
+        request=request_payload(),
+    ))
+    assert job.state == "queued"
+    assert state["post_prompt"] == 1
+
+    restarted_store = SqliteLilaImageStore(tmp_path / "lila.sqlite3", KEY)
+    restarted = LilaImageGenerationService(
+        restarted_store, client_factory=service.client_factory
+    )
+    state["mode"] = "completed"
+    recovered = run(restarted.get_job(principal_id="owner", job_id=job.job_id))
+    assert recovered.state == "completed"
+    assert recovered.asset is not None
+    assert state["post_prompt"] == 1
+
+    asset = run(restarted.asset(principal_id="owner", job_id=job.job_id))
+    assert asset["bytes"] == png_bytes()
+    history = run(restarted.history(
+        principal_id="owner", conversation_id="conversation-a"
+    ))
+    assert len(history.jobs) == 1
+    assert history.jobs[0].job_id == job.job_id
+    assert history.jobs[0].state == "completed"
+
 def test_submission_unknown_is_never_resubmitted_on_idempotent_retry(tmp_path):
     service, _store, state = make_service(tmp_path, mode="submit-unknown")
     run(service.configure_provider(principal_id="owner", payload=provider_payload()))
