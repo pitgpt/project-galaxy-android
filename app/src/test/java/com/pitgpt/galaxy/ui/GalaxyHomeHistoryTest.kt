@@ -129,8 +129,6 @@ class GalaxyHomeHistoryTest {
         )
         assertEquals(listOf(900L, 901L, 1500L, 2000L, 2000L), merged.map { it.createdAtEpochMillis })
     }
-}
-
 
     @Test
     fun mergeRestoresFallbackNoticeFromRemoteHistoryWithoutDuplicatingLocalNotice() {
@@ -181,3 +179,4 @@ class GalaxyHomeHistoryTest {
         assertEquals("local-fallback-notice", merged[2].id)
         assertEquals(noticeText, merged[2].content)
     }
+}
