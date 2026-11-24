@@ -40,6 +40,12 @@ android {
     testOptions {
         execution = "ANDROIDX_TEST_ORCHESTRATOR"
         unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            // Robolectric downloads android-all at test runtime, outside Gradle's dependency cache.
+            // Use Maven Central's canonical endpoint instead of the repo1 alias for runner consistency.
+            it.systemProperty("robolectric.dependency.repo.url", "https://repo.maven.apache.org/maven2")
+            it.systemProperty("robolectric.dependency.repo.id", "mavenCentral")
+        }
     }
 }
 
