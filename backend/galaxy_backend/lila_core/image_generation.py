@@ -5,7 +5,7 @@ import asyncio
 import json
 import re
 from contextlib import asynccontextmanager
-from hashlib import sha256
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from urllib.parse import quote
 from uuid import UUID
@@ -225,12 +225,18 @@ class ComfyUiImageReference(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class ImageProviderStatus:
+    state: Literal["unknown", "queued", "running", "completed", "failed"]
+    result_available: bool = False
+
+
 class ImageProviderAdapter(Protocol):
     """Provider-neutral image lifecycle contract used by Lila Core."""
 
     async def test_connection(self) -> None: ...
     async def submit(self, request: ImageGenerationRequest, prompt_id: str) -> None: ...
-    async def status(self, prompt_id: str) -> tuple[str, list[ComfyUiImageReference]]: ...
+    async def status(self, prompt_id: str) -> ImageProviderStatus: ...
     async def cancel_queued(self, prompt_id: str) -> bool: ...
     async def download_result(self, prompt_id: str) -> tuple[bytes, int, int]: ...
 
@@ -344,7 +350,11 @@ class ComfyUiImageAdapter:
                     result.add(entry[1])
         return result
 
-    async def status(self, prompt_id: str) -> tuple[str, list[ComfyUiImageReference]]:
+    async def status(self, prompt_id: str) -> ImageProviderStatus:
+        state, images = await self._status_with_images(prompt_id)
+        return ImageProviderStatus(state=state, result_available=bool(images))
+
+    async def _status_with_images(self, prompt_id: str) -> tuple[str, list[ComfyUiImageReference]]:
         queue = await self._json("GET", "/queue")
         running = self._queue_ids(queue.get("queue_running"))
         pending = self._queue_ids(queue.get("queue_pending"))
@@ -391,18 +401,18 @@ class ComfyUiImageAdapter:
         return "completed", images
 
     async def cancel_queued(self, prompt_id: str) -> bool:
-        state, _ = await self.status(prompt_id)
+        state, _ = await self._status_with_images(prompt_id)
         if state != "queued":
             return False
         await self._request_bytes(
             "POST", "/queue", json_body={"delete": [prompt_id]},
             max_bytes=MAX_COMFYUI_JSON_BYTES,
         )
-        state_after, _ = await self.status(prompt_id)
+        state_after, _ = await self._status_with_images(prompt_id)
         return state_after == "unknown"
 
     async def download_result(self, prompt_id: str) -> tuple[bytes, int, int]:
-        state, images = await self.status(prompt_id)
+        state, images = await self._status_with_images(prompt_id)
         if state != "completed" or not images:
             raise ComfyUiFailure("provider_result_not_ready")
         image = images[0]
@@ -590,10 +600,11 @@ class LilaImageGenerationService:
             images = []
             try:
                 async with self._adapter(job["provider_config"]) as adapter:
-                    state, images = await adapter.status(str(job["provider_prompt_id"]))
+                    provider_status = await adapter.status(str(job["provider_prompt_id"]))
+                    state = provider_status.state
             except Exception:
                 return job
-            if state == "completed" and not images:
+            if state == "completed" and not provider_status.result_available:
                 return await self.store.update_job(
                     principal_id=principal_id, job_id=job["job_id"],
                     state="failed", error_code="provider_result_missing",
