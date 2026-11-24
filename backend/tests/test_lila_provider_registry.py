@@ -193,7 +193,7 @@ def test_schema_v4_migration_preserves_history_and_adds_provider_catalog(tmp_pat
     ]
     assert memories[0].content == "memory survives"
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 7
     assert database.execute(
         "SELECT COUNT(*) FROM lila_providers"
     ).fetchone()[0] == 1
