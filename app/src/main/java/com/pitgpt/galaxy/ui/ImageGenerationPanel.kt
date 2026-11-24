@@ -214,17 +214,18 @@ internal suspend fun syncCoreImageHistory(
     requestStore: ImageGenerationRequestStore,
     jobStore: ComfyUiJobStore,
     images: GeneratedImageRepository,
+    history: List<LilaImageHistoryJob>? = null,
     maxAssetImports: Int = 10,
     maxAssetBytes: Long = 50L * 1024 * 1024
 ): CoreImageHistorySyncResult {
     require(maxAssetImports in 1..50)
     require(maxAssetBytes in 1L..250L * 1024 * 1024)
-    val history = provider.history(conversationId)
+    val coreHistory = history ?: provider.history(conversationId)
     val imported = mutableListOf<com.pitgpt.galaxy.core.model.StoredGeneratedImage>()
     var skipped = 0
     var importedBytes = 0L
 
-    for (job in history.sortedByDescending { it.createdAtEpochMillis }) {
+    for (job in coreHistory.sortedByDescending { it.createdAtEpochMillis }) {
         try {
             val existingJob = jobStore.get(job.jobId)
             val requestId = existingJob?.requestId ?: job.jobId
@@ -285,10 +286,12 @@ internal fun ImageGenerationPanel(
     modifier: Modifier = Modifier,
     onSubmittingChanged: (Boolean) -> Unit,
     conversationId: String = characterId,
-    onImagePersisted: (com.pitgpt.galaxy.core.model.StoredGeneratedImage) -> Unit = {}
+    onImagePersisted: (com.pitgpt.galaxy.core.model.StoredGeneratedImage) -> Unit = {},
+    onJobStateChanged: () -> Unit = {}
 ) {
     val provider = remember(app) { app.lilaCoreImageGenerationProvider }
     val currentOnImagePersisted by rememberUpdatedState(onImagePersisted)
+    val currentOnJobStateChanged by rememberUpdatedState(onJobStateChanged)
     var providerConfigured by remember { mutableStateOf(false) }
     var setupError by remember { mutableStateOf<String?>(null) }
     var retryKey by remember { mutableStateOf(0) }
@@ -317,24 +320,6 @@ internal fun ImageGenerationPanel(
                 setupError = "ComfyUI не настроен в Lila Core. Открой настройки ComfyUI и сохрани endpoint с workflow."
             }
 
-            try {
-                val sync = syncCoreImageHistory(
-                    provider = provider,
-                    conversationId = conversationId,
-                    characterId = characterId,
-                    requestStore = app.imageGenerationRequests,
-                    jobStore = app.comfyUiJobStore,
-                    images = app.generatedImages
-                )
-                sync.importedImages.forEach(currentOnImagePersisted)
-                if (sync.skippedAssets > 0) {
-                    panelError = "Часть старых изображений осталась в Lila Core: автоматическая загрузка ограничена недавней историей и 50 МиБ за открытие."
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                panelError = "Не удалось синхронизировать историю изображений из Lila Core. Локальная история сохранена."
-            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
@@ -486,6 +471,7 @@ internal fun ImageGenerationPanel(
                     } finally {
                         isSubmitting = false
                         onSubmittingChanged(false)
+                        currentOnJobStateChanged()
                     }
                 }
             }
@@ -517,6 +503,7 @@ internal fun ImageGenerationPanel(
                         } finally {
                             isSubmitting = false
                             onSubmittingChanged(false)
+                            currentOnJobStateChanged()
                         }
                     }
                 }
@@ -557,6 +544,7 @@ internal fun ImageGenerationPanel(
                             if (isTerminalImageGenerationState(status?.state)) statusNeedsRetry = false
                         } finally {
                             isCancelling = false
+                            currentOnJobStateChanged()
                         }
                     }
                 }
