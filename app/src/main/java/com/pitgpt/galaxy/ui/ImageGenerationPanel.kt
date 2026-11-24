@@ -19,6 +19,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
@@ -33,12 +34,13 @@ import com.pitgpt.galaxy.core.model.ImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.CancelImageGeneration
 import com.pitgpt.galaxy.core.usecase.GetImageGenerationStatus
 import com.pitgpt.galaxy.core.usecase.SubmitImageGeneration
+import com.pitgpt.galaxy.core.repository.GeneratedImageRepository
 import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
+import com.pitgpt.galaxy.core.usecase.PersistGeneratedImageResult
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionCancelledException
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiSubmissionUncertainException
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
+import com.pitgpt.galaxy.data.remote.LilaCoreImageGenerationProvider
+import com.pitgpt.galaxy.data.remote.LilaImageHistoryJob
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -178,6 +180,104 @@ internal fun CharacterScopedGenerationPanel(
     key(conversationId) { content() }
 }
 
+internal data class CoreImageHistorySyncResult(
+    val importedImages: List<com.pitgpt.galaxy.core.model.StoredGeneratedImage>,
+    val skippedAssets: Int
+)
+
+internal fun coreHistoryRequest(
+    job: LilaImageHistoryJob,
+    requestId: String,
+    characterId: String
+): ImageGenerationRequest = ImageGenerationRequest(
+    id = requestId,
+    conversationId = job.conversationId,
+    characterId = characterId,
+    prompt = job.prompt,
+    negativePrompt = job.negativePrompt,
+    preferredMimeType = "image/png",
+    width = job.width,
+    height = job.height,
+    seed = job.seed,
+    createdAtEpochMillis = job.createdAtEpochMillis
+)
+
+/**
+ * Imports only a bounded recent window from the owner-scoped Core history.
+ * Binary assets are immediately persisted through the existing encrypted media repository;
+ * older assets remain in Core and are not downloaded eagerly on every screen open.
+ */
+internal suspend fun syncCoreImageHistory(
+    provider: LilaCoreImageGenerationProvider,
+    conversationId: String,
+    characterId: String,
+    requestStore: ImageGenerationRequestStore,
+    jobStore: ComfyUiJobStore,
+    images: GeneratedImageRepository,
+    maxAssetImports: Int = 10,
+    maxAssetBytes: Long = 50L * 1024 * 1024
+): CoreImageHistorySyncResult {
+    require(maxAssetImports in 1..50)
+    require(maxAssetBytes in 1L..250L * 1024 * 1024)
+    val history = provider.history(conversationId)
+    val imported = mutableListOf<com.pitgpt.galaxy.core.model.StoredGeneratedImage>()
+    var skipped = 0
+    var importedBytes = 0L
+
+    for (job in history.sortedByDescending { it.createdAtEpochMillis }) {
+        try {
+            val existingJob = jobStore.get(job.jobId)
+            val requestId = existingJob?.requestId ?: job.jobId
+            val existingRequest = requestStore.get(requestId)
+            val request = existingRequest ?: coreHistoryRequest(job, requestId, characterId)
+
+            check(request.conversationId == conversationId && request.characterId == characterId) {
+                "Core image history conflicts with the local conversation context"
+            }
+            check(
+                request.prompt == job.prompt &&
+                    request.negativePrompt.orEmpty() == job.negativePrompt.orEmpty() &&
+                    request.width == job.width &&
+                    request.height == job.height &&
+                    request.seed == job.seed
+            ) {
+                "Core image history conflicts with the stored generation request"
+            }
+            if (existingRequest == null) requestStore.put(request)
+
+            if (existingJob == null) {
+                jobStore.put(
+                    ComfyUiJobRecord(
+                        promptId = job.jobId,
+                        requestId = requestId,
+                        createdAtEpochMillis = job.createdAtEpochMillis,
+                        submissionStarted = true
+                    )
+                )
+            } else {
+                check(existingJob.requestId == requestId) {
+                    "Core image job is already correlated to a different local request"
+                }
+            }
+
+            if (job.state != "completed" || images.getForRequest(requestId) != null) continue
+            val assetBytes = job.assetByteSize ?: continue
+            if (imported.size >= maxAssetImports || assetBytes > maxAssetBytes - importedBytes) {
+                skipped++
+                continue
+            }
+
+            imported += PersistGeneratedImageResult(provider, images).invoke(request, job.jobId)
+            importedBytes += assetBytes
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            skipped++
+        }
+    }
+    return CoreImageHistorySyncResult(importedImages = imported, skippedAssets = skipped)
+}
+
 @Composable
 internal fun ImageGenerationPanel(
     app: GalaxyApplication,
@@ -187,7 +287,9 @@ internal fun ImageGenerationPanel(
     conversationId: String = characterId,
     onImagePersisted: (com.pitgpt.galaxy.core.model.StoredGeneratedImage) -> Unit = {}
 ) {
-    var runtime by remember { mutableStateOf<ComfyUiRuntime?>(null) }
+    val provider = remember(app) { app.lilaCoreImageGenerationProvider }
+    val currentOnImagePersisted by rememberUpdatedState(onImagePersisted)
+    var providerConfigured by remember { mutableStateOf(false) }
     var setupError by remember { mutableStateOf<String?>(null) }
     var retryKey by remember { mutableStateOf(0) }
     var statusRetryKey by remember { mutableStateOf(0) }
@@ -204,66 +306,86 @@ internal fun ImageGenerationPanel(
     var isCancelling by remember { mutableStateOf(false) }
     var isPersisting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val clientId = remember { UUID.randomUUID().toString() }
 
-    LaunchedEffect(app, clientId, retryKey) {
-        runtime = null
+    LaunchedEffect(app, provider, characterId, conversationId, retryKey) {
+        isRestoring = true
         setupError = null
         try {
-            runtime = app.createComfyUiRuntimeFromSavedSettings(clientId)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            setupError = "Не удалось подключиться к ComfyUI. Проверь настройки и доступность сервера."
-        }
-    }
+            val summary = provider.providerSummary()
+            providerConfigured = summary.configured
+            if (!summary.configured) {
+                setupError = "ComfyUI не настроен в Lila Core. Открой настройки ComfyUI и сохрани endpoint с workflow."
+            }
 
-    LaunchedEffect(app, characterId, conversationId) {
-        if (request != null || isRestoring) return@LaunchedEffect
-        isRestoring = true
-        try {
-            val restored = loadLatestRecoverableImageGenerationRequest(
-                characterId = characterId,
-                conversationId = conversationId,
-                requestStore = app.imageGenerationRequests,
-                jobStore = app.comfyUiJobStore
-            )
-            if (restored != null) {
-                request = restored.request
-                prompt = restored.request.prompt
-                if (restored.canResumeSafely) {
-                    isPreparedRecovery = true
-                    panelError = "Найден сохранённый запрос, который ещё не отправлялся. Его можно безопасно продолжить."
-                } else {
-                    jobId = requireNotNull(restored.job).promptId
+            try {
+                val sync = syncCoreImageHistory(
+                    provider = provider,
+                    conversationId = conversationId,
+                    characterId = characterId,
+                    requestStore = app.imageGenerationRequests,
+                    jobStore = app.comfyUiJobStore,
+                    images = app.generatedImages
+                )
+                sync.importedImages.forEach(currentOnImagePersisted)
+                if (sync.skippedAssets > 0) {
+                    panelError = "Часть старых изображений осталась в Lila Core: автоматическая загрузка ограничена недавней историей и 50 МиБ за открытие."
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                panelError = "Не удалось синхронизировать историю изображений из Lila Core. Локальная история сохранена."
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            panelError = "Не удалось восстановить сохранённое задание. Повтори проверку после подключения к ComfyUI."
+            providerConfigured = false
+            setupError = "Не удалось прочитать конфигурацию Lila Core. Проверь авторизацию и подключение."
         } finally {
+            if (request == null) {
+                try {
+                    val restored = loadLatestRecoverableImageGenerationRequest(
+                        characterId = characterId,
+                        conversationId = conversationId,
+                        requestStore = app.imageGenerationRequests,
+                        jobStore = app.comfyUiJobStore
+                    )
+                    if (restored != null) {
+                        request = restored.request
+                        prompt = restored.request.prompt
+                        if (restored.canResumeSafely) {
+                            isPreparedRecovery = true
+                            panelError = "Найден сохранённый запрос с устойчивым ID. Его можно безопасно продолжить без создания дубликата."
+                        } else {
+                            jobId = requireNotNull(restored.job).promptId
+                        }
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    panelError = "Не удалось восстановить локальную связь image job. Данные не удалены."
+                }
+            }
             isRestoring = false
         }
     }
 
-    LaunchedEffect(runtime, jobId, request, statusRetryKey, isPreparedRecovery) {
+    LaunchedEffect(provider, jobId, request, statusRetryKey, isPreparedRecovery) {
         if (isPreparedRecovery) return@LaunchedEffect
         statusNeedsRetry = false
-        val activeRuntime = runtime ?: return@LaunchedEffect
         val activeJobId = jobId ?: return@LaunchedEffect
         val activeRequest = request ?: return@LaunchedEffect
         var terminal = false
         try {
             while (!terminal) {
-                val current = GetImageGenerationStatus(activeRuntime.provider).invoke(activeJobId)
+                val current = GetImageGenerationStatus(provider).invoke(activeJobId)
                 status = current
                 when (current.state) {
                     ImageGenerationState.COMPLETED -> {
                         isPersisting = true
                         try {
-                            val stored = activeRuntime.persistCompletedResult(activeRequest, activeJobId)
-                            onImagePersisted(stored)
+                            val stored = PersistGeneratedImageResult(provider, app.generatedImages)
+                                .invoke(activeRequest, activeJobId)
+                            currentOnImagePersisted(stored)
                             val plaintext = app.generatedImages.read(stored.assetId)
                             val decoded = decodeGeneratedImageAndClearBytes(plaintext)
                             image = decoded
@@ -276,7 +398,7 @@ internal fun ImageGenerationPanel(
                         terminal = true
                     }
                     ImageGenerationState.FAILED -> {
-                        panelError = "ComfyUI завершил генерацию с ошибкой."
+                        panelError = "ComfyUI завершил генерацию с ошибкой. Проверь сохранённый workflow."
                         terminal = true
                     }
                     ImageGenerationState.CANCELLED -> terminal = true
@@ -287,9 +409,9 @@ internal fun ImageGenerationPanel(
             throw cancelled
         } catch (_: Exception) {
             panelError = if (status == null) {
-                "Состояние задания пока не подтверждено. Повтори проверку статуса; повторная отправка заблокирована."
+                "Состояние задания пока не подтверждено. Повтори проверку; новая отправка с другим ID не выполняется."
             } else {
-                "Не удалось получить результат. Проверь подключение и повтори попытку."
+                "Не удалось получить результат. Проверь подключение и повтори проверку статуса."
             }
             terminal = isTerminalImageGenerationState(status?.state)
             statusNeedsRetry = !terminal
@@ -302,15 +424,17 @@ internal fun ImageGenerationPanel(
     ) {
         Text("ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ", fontSize = 16.sp)
         when {
-            runtime != null -> Text(
-                "ComfyUI подключён. Используется workflow из зашифрованных настроек.",
+            providerConfigured -> Text(
+                "Запрос проходит через Lila Core. Workflow и ComfyUI credentials хранятся на сервере.",
                 fontSize = 11.sp
             )
             setupError != null -> {
                 Text(setupError.orEmpty(), fontSize = 12.sp)
-                Button(onClick = { retryKey++ }) { Text("ПОВТОРИТЬ ПОДКЛЮЧЕНИЕ") }
+                Button(onClick = { retryKey++ }, enabled = !isSubmitting && !isRestoring) {
+                    Text("ПОВТОРИТЬ ПРОВЕРКУ CORE")
+                }
             }
-            else -> Text("Проверяю сохранённые настройки и подключение…", fontSize = 12.sp)
+            else -> Text("Проверяю конфигурацию Lila Core…", fontSize = 12.sp)
         }
         OutlinedTextField(
             value = prompt,
@@ -321,12 +445,11 @@ internal fun ImageGenerationPanel(
             label = { Text("Описание изображения") },
             minLines = 3,
             maxLines = 5,
-            enabled = runtime != null && (request == null || isPreparedRecovery) && !isSubmitting && !isRestoring
+            enabled = providerConfigured && request == null && !isSubmitting && !isRestoring
         )
         Button(
-            enabled = runtime != null && prompt.isNotBlank() && request == null && !isSubmitting && !isRestoring,
+            enabled = providerConfigured && prompt.isNotBlank() && request == null && !isSubmitting && !isRestoring,
             onClick = {
-                val selectedRuntime = runtime ?: return@Button
                 val requestToSubmit = try {
                     ImageGenerationRequest(
                         id = UUID.randomUUID().toString(),
@@ -348,36 +471,18 @@ internal fun ImageGenerationPanel(
                 panelError = null
                 scope.launch {
                     try {
-                        // Save the full request in SQLCipher before the job journal can
-                        // advance to SUBMISSION_STARTED or any network request occurs.
                         app.imageGenerationRequests.put(requestToSubmit)
-                        val submittedJobId = SubmitImageGeneration(selectedRuntime.provider).invoke(requestToSubmit)
+                        val submittedJobId = SubmitImageGeneration(provider).invoke(requestToSubmit)
                         jobId = submittedJobId
                         status = ImageGenerationStatus(ImageGenerationState.QUEUED)
                         isPreparedRecovery = false
-                    } catch (cancelled: ComfyUiSubmissionCancelledException) {
-                        jobId = cancelled.promptId
-                        status = null
-                        statusNeedsRetry = true
-                        isPreparedRecovery = false
-                        panelError = "Отправка прервана после передачи управления сети. Проверяю сохранённый ID; повторная отправка заблокирована."
-                        throw cancelled
                     } catch (cancelled: CancellationException) {
-                        // This generic cancellation occurs before the durable submission claim; resuming the
-                        // same prepared request is safe because no POST /prompt has been started.
                         isPreparedRecovery = true
-                        panelError = "Отправка отменена до подтверждения передачи серверу. Сохранённый запрос можно продолжить."
+                        panelError = "Отправка прервана. Сохранённый запрос можно безопасно повторить с тем же ID."
                         throw cancelled
-                    } catch (uncertain: ComfyUiSubmissionUncertainException) {
-                        jobId = uncertain.promptId
-                        status = null
-                        statusNeedsRetry = true
-                        isPreparedRecovery = false
-                        panelError = "Приём задания не подтверждён. Проверяю сохранённый ID; повторная отправка заблокирована."
                     } catch (_: Exception) {
-                        // No started job means the same saved request can be retried safely.
                         isPreparedRecovery = true
-                        panelError = "Не удалось отправить задание. Сохранённый запрос оставлен для безопасного повтора."
+                        panelError = "Не удалось подтвердить отправку. Повтор использует тот же idempotency key и те же параметры."
                     } finally {
                         isSubmitting = false
                         onSubmittingChanged(false)
@@ -389,60 +494,37 @@ internal fun ImageGenerationPanel(
         }
         if (isPreparedRecovery && request != null) {
             Button(
-                enabled = runtime != null && prompt.isNotBlank() && !isSubmitting && !isRestoring,
+                enabled = providerConfigured && !isSubmitting && !isRestoring,
                 onClick = {
-                    val activeRuntime = runtime ?: return@Button
                     val savedRequest = request ?: return@Button
-                    val requestToResume = try {
-                        savedRequest.copy(prompt = prompt.trim())
-                    } catch (_: IllegalArgumentException) {
-                        panelError = "Проверь описание изображения."
-                        return@Button
-                    }
                     isSubmitting = true
                     onSubmittingChanged(true)
                     panelError = null
                     scope.launch {
                         try {
-                            app.imageGenerationRequests.put(requestToResume)
-                            request = requestToResume
-                            val submittedJobId = SubmitImageGeneration(activeRuntime.provider).invoke(requestToResume)
+                            app.imageGenerationRequests.put(savedRequest)
+                            val submittedJobId = SubmitImageGeneration(provider).invoke(savedRequest)
                             jobId = submittedJobId
                             status = ImageGenerationStatus(ImageGenerationState.QUEUED)
                             isPreparedRecovery = false
-                        } catch (cancelled: ComfyUiSubmissionCancelledException) {
-                            jobId = cancelled.promptId
-                            status = null
-                            statusNeedsRetry = true
-                            isPreparedRecovery = false
-                            panelError = "Отправка прервана после передачи управления сети. Проверяю сохранённый ID; повторная отправка заблокирована."
-                            throw cancelled
                         } catch (cancelled: CancellationException) {
-                            // This generic cancellation occurs before the durable submission claim; resuming the
-                            // same prepared request is safe because no POST /prompt has been started.
                             isPreparedRecovery = true
-                            panelError = "Отправка отменена до подтверждения передачи серверу. Сохранённый запрос можно продолжить."
+                            panelError = "Повтор прерван. Тот же сохранённый запрос можно продолжить позже."
                             throw cancelled
-                        } catch (uncertain: ComfyUiSubmissionUncertainException) {
-                            jobId = uncertain.promptId
-                            status = null
-                            statusNeedsRetry = true
-                            isPreparedRecovery = false
-                            panelError = "Приём задания не подтверждён. Проверяю сохранённый ID; повторная отправка заблокирована."
                         } catch (_: Exception) {
                             isPreparedRecovery = true
-                            panelError = "Не удалось продолжить отправку. Запрос сохранён; повтори попытку после проверки настроек."
+                            panelError = "Повтор не подтверждён. Параметры и idempotency key сохранены без изменений."
                         } finally {
                             isSubmitting = false
                             onSubmittingChanged(false)
                         }
                     }
                 }
-            ) { Text("ПРОДОЛЖИТЬ СОХРАНЁННУЮ ОТПРАВКУ") }
+            ) { Text("ПОВТОРИТЬ СОХРАНЁННЫЙ ЗАПРОС") }
         }
-        if (isRestoring) Text("Восстанавливаю сохранённое задание…", fontSize = 11.sp)
+        if (isRestoring) Text("Восстанавливаю историю Lila Core…", fontSize = 11.sp)
         status?.let { current ->
-            Text("Статус: ${imageGenerationStatusLabel(current.state)}", fontSize = 12.sp)
+            Text("Статус: " + imageGenerationStatusLabel(current.state), fontSize = 12.sp)
             current.progressPercent?.let { Text("Прогресс: $it%", fontSize = 11.sp) }
         }
         if (statusNeedsRetry) {
@@ -458,12 +540,11 @@ internal fun ImageGenerationPanel(
             Button(
                 enabled = !isPersisting,
                 onClick = {
-                    val selectedRuntime = runtime ?: return@Button
                     val selectedJobId = jobId ?: return@Button
                     isCancelling = true
                     scope.launch {
                         try {
-                            CancelImageGeneration(selectedRuntime.provider).invoke(selectedJobId)
+                            CancelImageGeneration(provider).invoke(selectedJobId)
                             status = ImageGenerationStatus(ImageGenerationState.CANCELLED)
                             statusNeedsRetry = false
                         } catch (cancelled: CancellationException) {
@@ -471,11 +552,9 @@ internal fun ImageGenerationPanel(
                         } catch (_: Exception) {
                             panelError = "Отмена не подтверждена. Задание могло уже перейти к выполнению."
                             status = refreshStatusPreservingCancellation(status) {
-                                GetImageGenerationStatus(selectedRuntime.provider).invoke(selectedJobId)
+                                GetImageGenerationStatus(provider).invoke(selectedJobId)
                             }
-                            if (isTerminalImageGenerationState(status?.state)) {
-                                statusNeedsRetry = false
-                            }
+                            if (isTerminalImageGenerationState(status?.state)) statusNeedsRetry = false
                         } finally {
                             isCancelling = false
                         }
@@ -484,9 +563,9 @@ internal fun ImageGenerationPanel(
             ) { Text("ОТМЕНИТЬ ЗАДАНИЕ") }
         }
         if (status?.state == ImageGenerationState.RUNNING) {
-            Text("Задание выполняется. Безопасная отмена для запущенного ComfyUI job не поддерживается.", fontSize = 11.sp)
+            Text("Задание выполняется. Безопасная отмена уже запущенного ComfyUI job не поддерживается.", fontSize = 11.sp)
         }
-        if (isPersisting) Text("Сохраняю результат в зашифрованное хранилище…", fontSize = 11.sp)
+        if (isPersisting) Text("Сохраняю результат в зашифрованное хранилище Galaxy…", fontSize = 11.sp)
         image?.let { bitmap ->
             Image(
                 bitmap = bitmap,
@@ -496,12 +575,7 @@ internal fun ImageGenerationPanel(
             )
         }
         panelError?.let { Text(it, fontSize = 11.sp) }
-        if (status?.state?.let { state ->
-                state == ImageGenerationState.COMPLETED ||
-                    state == ImageGenerationState.FAILED ||
-                    state == ImageGenerationState.CANCELLED
-            } == true
-        ) {
+        if (isTerminalImageGenerationState(status?.state)) {
             Button(
                 onClick = {
                     request = null
@@ -516,7 +590,7 @@ internal fun ImageGenerationPanel(
             ) { Text("НОВАЯ ГЕНЕРАЦИЯ") }
         }
         Text(
-            "Изображение загружается в память и сохраняется только через зашифрованное хранилище Galaxy.",
+            "Результаты из Core кэшируются только через зашифрованное хранилище Galaxy. История заданий остаётся в Lila Core.",
             fontSize = 10.sp
         )
     }

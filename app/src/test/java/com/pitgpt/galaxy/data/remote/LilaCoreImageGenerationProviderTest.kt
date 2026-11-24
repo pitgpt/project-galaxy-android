@@ -8,6 +8,7 @@ import java.security.MessageDigest
 import java.util.ArrayDeque
 import java.util.Base64
 import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -15,6 +16,71 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LilaCoreImageGenerationProviderTest {
+    @Test fun providerConfigurationLoadsEditableWorkflowWithoutReturningCredentials() = runBlocking {
+        val workflow = JSONObject()
+            .put("workflow_id", "basic-v1")
+            .put("workflow_json", """{"3":{"inputs":{"text":""}}}""")
+            .put("positive_prompt", JSONObject().put("node_id", "3").put("input_name", "text"))
+        val api = FakeApi().apply {
+            json.add(
+                JSONObject()
+                    .put("configured", true)
+                    .put("base_url", "http://host.docker.internal:8188")
+                    .put("timeout_seconds", 30.0)
+                    .put("workflow", workflow)
+                    .put("has_bearer_token", true)
+            )
+        }
+
+        val configuration = LilaCoreImageGenerationProvider(api, FakeStore()).providerConfiguration()
+
+        assertTrue(configuration.configured)
+        assertEquals("http://host.docker.internal:8188", configuration.baseUrl)
+        assertEquals("basic-v1", configuration.workflow?.id)
+        assertTrue(configuration.hasBearerToken)
+        assertEquals("/v1/lila/image-providers/comfyui/config", api.calls.single().path)
+    }
+
+    @Test fun historyIsBoundToTheRequestedConversationAndParsesAssetSize() = runBlocking {
+        val job = JSONObject()
+            .put("job_id", JOB)
+            .put("conversation_id", CONV)
+            .put("prompt", "portrait")
+            .put("negative_prompt", "blur")
+            .put("width", 512)
+            .put("height", 768)
+            .put("seed", 42)
+            .put("state", "completed")
+            .put("created_at_epoch_millis", 1234L)
+            .put("asset", JSONObject().put("byte_size", 4096))
+        val api = FakeApi().apply {
+            json.add(JSONObject().put("conversation_id", CONV).put("jobs", JSONArray().put(job)))
+        }
+
+        val history = LilaCoreImageGenerationProvider(api, FakeStore()).history(CONV)
+
+        assertEquals(1, history.size)
+        assertEquals(JOB, history.single().jobId)
+        assertEquals("portrait", history.single().prompt)
+        assertEquals(4096L, history.single().assetByteSize)
+        assertTrue(api.calls.single().path.contains("conversation_id=$CONV"))
+    }
+
+    @Test fun historyRejectsAResponseForAnotherConversation() = runBlocking {
+        val otherConversation = "00000000-0000-0000-0000-000000000009"
+        val api = FakeApi().apply {
+            json.add(JSONObject().put("conversation_id", otherConversation).put("jobs", JSONArray()))
+        }
+
+        var rejected = false
+        try {
+            LilaCoreImageGenerationProvider(api, FakeStore()).history(CONV)
+        } catch (_: GalaxyApiException) {
+            rejected = true
+        }
+        assertTrue(rejected)
+    }
+
     @Test fun submitUsesIdempotencyAndPersistsCoreJob() = runBlocking {
         val api=FakeApi().apply{json.add(job("queued"))};val store=FakeStore()
         val request=ImageGenerationRequest(REQ,CONV,"lila","portrait",width=512,height=512,seed=42L,createdAtEpochMillis=1234L)

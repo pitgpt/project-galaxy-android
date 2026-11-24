@@ -56,6 +56,7 @@ from .lila_core.image_generation import (
     ImageGenerationJobResponse,
     ImageGenerationRequest,
     ImageProviderConnectionTestResponse,
+    ImageProviderConfigurationResponse,
     ImageProviderNotConfigured,
     ImageProviderSummary,
     ImageJobNotCancellable,
@@ -1361,6 +1362,26 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Lila image provider settings are temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get(
+        "/v1/lila/image-providers/comfyui/config",
+        response_model=ImageProviderConfigurationResponse,
+    )
+    async def get_lila_comfyui_provider_configuration(
+        request: Request,
+        response: Response,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await service.provider_configuration(principal_id=user_id)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image provider configuration is temporarily unavailable",
                 headers={"Retry-After": "5"},
             ) from None
 

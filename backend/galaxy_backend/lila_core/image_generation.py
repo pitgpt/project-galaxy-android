@@ -138,6 +138,21 @@ class ImageProviderSummary(BaseModel):
     supports_queued_cancellation: bool = True
     supports_running_cancellation: Literal[False] = False
 
+class ImageProviderConfigurationResponse(BaseModel):
+    """Owner-authenticated editable configuration; bearer credentials are never serialized."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: Literal["comfyui"] = "comfyui"
+    configured: bool
+    base_url: str | None = Field(default=None, max_length=2048)
+    timeout_seconds: float | None = Field(default=None, ge=1.0, le=30.0)
+    workflow: ComfyUiWorkflowConfig | None = None
+    has_bearer_token: bool = False
+    supports_queued_cancellation: bool = True
+    supports_running_cancellation: Literal[False] = False
+
+
 
 class ImageProviderConnectionTestResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -503,6 +518,21 @@ class LilaImageGenerationService:
         return ImageProviderSummary(
             configured=True,
             workflow_id=workflow_id,
+            has_bearer_token=bool(config.get("bearer_token")),
+        )
+
+    async def provider_configuration(
+        self, *, principal_id: str
+    ) -> ImageProviderConfigurationResponse:
+        config = await self.store.get_provider_config(principal_id=principal_id)
+        if config is None:
+            return ImageProviderConfigurationResponse(configured=False)
+        workflow = ComfyUiWorkflowConfig.model_validate(config.get("workflow"))
+        return ImageProviderConfigurationResponse(
+            configured=True,
+            base_url=str(config["base_url"]),
+            timeout_seconds=float(config.get("timeout_seconds", 30.0)),
+            workflow=workflow,
             has_bearer_token=bool(config.get("bearer_token")),
         )
 

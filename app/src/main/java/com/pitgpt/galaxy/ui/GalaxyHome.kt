@@ -392,7 +392,7 @@ fun GalaxyHome() {
             }
         )
     } else if (showComfyUiSettings) {
-        ComfyUiSettingsScreen(store = app.providerStore, onBack = { showComfyUiSettings = false })
+        ComfyUiSettingsScreen(app = app, onBack = { showComfyUiSettings = false })
     } else if (showChat) {
         val conversationId = conversationOwnerKey?.let { ownerKey ->
             getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)

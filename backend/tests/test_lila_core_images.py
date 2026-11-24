@@ -432,6 +432,28 @@ def test_authenticated_image_api_is_owner_scoped_and_never_returns_provider_secr
         assert "never-return-this-token" not in summary.text
         assert "base_url" not in summary.text
 
+        configuration = client.get(
+            "/v1/lila/image-providers/comfyui/config", headers=headers
+        )
+        assert configuration.status_code == 200
+        assert configuration.headers["cache-control"] == "no-store"
+        config_json = configuration.json()
+        assert config_json["configured"] is True
+        assert config_json["base_url"] == "http://127.0.0.1:8188"
+        assert config_json["workflow"]["workflow_id"] == "basic-v1"
+        assert config_json["has_bearer_token"] is True
+        assert "never-return-this-token" not in configuration.text
+
+        other_configuration = client.get(
+            "/v1/lila/image-providers/comfyui/config",
+            headers={"Authorization": "Bearer owner-b-token"},
+        )
+        assert other_configuration.status_code == 200
+        assert other_configuration.json()["configured"] is False
+        assert other_configuration.json()["base_url"] is None
+        assert other_configuration.json()["workflow"] is None
+        assert "never-return-this-token" not in other_configuration.text
+
         created = client.post(
             "/v1/lila/images",
             headers={**headers, "Idempotency-Key": str(uuid4())},

@@ -15,7 +15,9 @@ import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -31,6 +33,27 @@ data class LilaBinaryResponse(val contentType: String, val bytes: ByteArray) {
 data class LilaComfyUiProviderSummary(val configured: Boolean, val workflowId: String?, val hasBearerToken: Boolean,
     val supportsQueuedCancellation: Boolean, val supportsRunningCancellation: Boolean)
 data class LilaComfyUiProviderTestResult(val providerId: String, val connectionReachable: Boolean, val workflowId: String?)
+
+data class LilaComfyUiProviderConfiguration(
+    val configured: Boolean,
+    val baseUrl: String?,
+    val timeoutSeconds: Double?,
+    val workflow: ComfyUiWorkflowTemplate?,
+    val hasBearerToken: Boolean
+)
+
+data class LilaImageHistoryJob(
+    val jobId: String,
+    val conversationId: String,
+    val prompt: String,
+    val negativePrompt: String?,
+    val width: Int,
+    val height: Int,
+    val seed: Long?,
+    val state: String,
+    val createdAtEpochMillis: Long,
+    val assetByteSize: Long?
+)
 
 /** Owner-scoped image adapter; ComfyUI credentials and workflow stay in Lila Core. */
 class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, private val jobs: ComfyUiJobStore) :
@@ -49,6 +72,85 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
             json.optBoolean("supports_running_cancellation"))
     }
 
+    suspend fun providerConfiguration(): LilaComfyUiProviderConfiguration {
+        val json = api.requestJson("GET", "$PROVIDER_PATH/config", maxResponseBytes = MAX_JSON_RESPONSE_BYTES)
+        val configured = json.optBoolean("configured")
+        val hasBearerToken = json.optBoolean("has_bearer_token")
+        if (!configured) {
+            if (optionalString(json, "base_url", 2048) != null || !json.isNull("workflow")) {
+                throw GalaxyApiException(null, "Lila Core вернул некорректную конфигурацию ComfyUI.")
+            }
+            return LilaComfyUiProviderConfiguration(false, null, null, null, false)
+        }
+        val baseUrl = optionalString(json, "base_url", 2048)
+            ?: throw GalaxyApiException(null, "Lila Core не вернул адрес ComfyUI.")
+        val timeoutSeconds = json.optDouble("timeout_seconds", Double.NaN)
+        if (timeoutSeconds !in 1.0..30.0) {
+            throw GalaxyApiException(null, "Lila Core вернул некорректный timeout ComfyUI.")
+        }
+        val workflowJson = json.optJSONObject("workflow")
+            ?: throw GalaxyApiException(null, "Lila Core не вернул workflow ComfyUI.")
+        val workflow = try {
+            fun node(key: String, required: Boolean): ComfyUiNodeInput? {
+                if (workflowJson.isNull(key)) {
+                    if (required) throw IllegalArgumentException("Required workflow mapping is missing")
+                    return null
+                }
+                val value = workflowJson.optJSONObject(key)
+                    ?: throw IllegalArgumentException("Workflow mapping is invalid")
+                return ComfyUiNodeInput(
+                    value.optString("node_id"),
+                    value.optString("input_name")
+                )
+            }
+            ComfyUiWorkflowTemplate(
+                id = workflowJson.optString("workflow_id"),
+                workflowJson = workflowJson.optString("workflow_json"),
+                positivePrompt = requireNotNull(node("positive_prompt", true)),
+                negativePrompt = node("negative_prompt", false),
+                width = node("width", false),
+                height = node("height", false),
+                seed = node("seed", false)
+            ).also { it.validateMappings() }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            throw GalaxyApiException(null, "Lila Core вернул некорректный workflow ComfyUI.")
+        }
+        return LilaComfyUiProviderConfiguration(
+            configured = true,
+            baseUrl = baseUrl,
+            timeoutSeconds = timeoutSeconds,
+            workflow = workflow,
+            hasBearerToken = hasBearerToken
+        )
+    }
+
+    suspend fun history(conversationId: String): List<LilaImageHistoryJob> {
+        val expectedConversationId = canonicalUuid(conversationId)
+        val encodedConversationId = URLEncoder.encode(expectedConversationId, Charsets.UTF_8.name())
+        val json = api.requestJson(
+            "GET",
+            "$IMAGES_PATH?conversation_id=$encodedConversationId&limit=50",
+            maxResponseBytes = MAX_JSON_RESPONSE_BYTES
+        )
+        if (canonicalUuid(json.optString("conversation_id")) != expectedConversationId) {
+            throw GalaxyApiException(null, "Lila Core вернул историю изображений для другого диалога.")
+        }
+        val jobsJson = json.optJSONArray("jobs")
+            ?: throw GalaxyApiException(null, "Lila Core вернул некорректную историю изображений.")
+        if (jobsJson.length() > MAX_HISTORY_JOBS) {
+            throw GalaxyApiException(null, "История изображений Lila превышает допустимый размер.")
+        }
+        return buildList {
+            for (index in 0 until jobsJson.length()) {
+                val item = jobsJson.optJSONObject(index)
+                    ?: throw GalaxyApiException(null, "Lila Core вернул некорректную запись image job.")
+                add(parseHistoryJob(item, expectedConversationId))
+            }
+        }.sortedByDescending { it.createdAtEpochMillis }
+    }
+
     suspend fun configureProvider(baseUrl:String, workflow:ComfyUiWorkflowTemplate, bearerToken:String?=null,
         clearBearerToken:Boolean=false, timeoutSeconds:Double=30.0):LilaComfyUiProviderSummary {
         require(baseUrl.isNotBlank() && baseUrl.length<=2048)
@@ -57,7 +159,7 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
         val body=JSONObject().put("base_url",baseUrl.trim()).put("timeout_seconds",timeoutSeconds)
             .put("workflow",workflow.toCoreJson()).put("clear_bearer_token",clearBearerToken)
         bearerToken?.takeIf{it.isNotBlank()}?.let{body.put("bearer_token",it)}
-        return parseSummary(api.requestJson("PUT",PROVIDER_PATH,body,maxRequestBytes=3*1024*1024,maxResponseBytes=2*1024*1024))
+        return parseSummary(api.requestJson("PUT",PROVIDER_PATH,body,maxRequestBytes=5*1024*1024,maxResponseBytes=5*1024*1024))
     }
 
     suspend fun testProvider():LilaComfyUiProviderTestResult {
@@ -173,6 +275,52 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
         return GeneratedImageAsset("lila-core:$id",record.requestId,mime,width,height,size,digest,record.createdAtEpochMillis)
     }
 
+    private fun parseHistoryJob(json: JSONObject, expectedConversationId: String): LilaImageHistoryJob {
+        val jobId = canonicalUuid(json.optString("job_id"))
+        val conversationId = canonicalUuid(json.optString("conversation_id"))
+        if (conversationId != expectedConversationId) {
+            throw GalaxyApiException(null, "Lila Core вернул image job для другого диалога.")
+        }
+        val prompt = optionalString(json, "prompt", 12_000)
+            ?: throw GalaxyApiException(null, "Lila Core вернул image job без промпта.")
+        val negativePrompt = optionalString(json, "negative_prompt", 4_000)
+        val width = json.optInt("width", 0)
+        val height = json.optInt("height", 0)
+        if (width !in 64..2048 || height !in 64..2048) {
+            throw GalaxyApiException(null, "Lila Core вернул недопустимые размеры изображения.")
+        }
+        val seed: Long? = if (json.isNull("seed")) {
+            null
+        } else {
+            val value = json.optLong("seed", -1L)
+            if (value < 0L) throw GalaxyApiException(null, "Lila Core вернул некорректный seed.")
+            value
+        }
+        val state = json.optString("state")
+        requireKnownState(state)
+        val createdAt = json.optLong("created_at_epoch_millis", -1L)
+        if (createdAt <= 0L) {
+            throw GalaxyApiException(null, "Lila Core вернул некорректное время image job.")
+        }
+        val asset = json.optJSONObject("asset")
+        val assetByteSize = asset?.optLong("byte_size", -1L)?.takeIf { it in 1L..25L * 1024 * 1024 }
+        if (state == "completed" && assetByteSize == null) {
+            throw GalaxyApiException(null, "Завершённое изображение Lila не содержит корректного asset.")
+        }
+        return LilaImageHistoryJob(
+            jobId = jobId,
+            conversationId = conversationId,
+            prompt = prompt,
+            negativePrompt = negativePrompt,
+            width = width,
+            height = height,
+            seed = seed,
+            state = state,
+            createdAtEpochMillis = createdAt,
+            assetByteSize = assetByteSize
+        )
+    }
+
     private fun parseSummary(json:JSONObject)=LilaComfyUiProviderSummary(json.optBoolean("configured"),
         optionalString(json,"workflow_id",96),json.optBoolean("has_bearer_token"),
         json.optBoolean("supports_queued_cancellation",true),json.optBoolean("supports_running_cancellation"))
@@ -205,7 +353,7 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
     override fun toString()="LilaCoreImageGenerationProvider(provider=comfyui, credentials=<redacted>)"
     private companion object{
         const val PROVIDER_PATH="/v1/lila/image-providers/comfyui";const val IMAGES_PATH="/v1/lila/images";const val PNG="image/png"
-        const val MAX_JSON_REQUEST_BYTES=3*1024*1024;const val MAX_JSON_RESPONSE_BYTES=2*1024*1024
+        const val MAX_JSON_REQUEST_BYTES=5*1024*1024;const val MAX_JSON_RESPONSE_BYTES=5*1024*1024;const val MAX_HISTORY_JOBS=50
         val STATES=setOf("prepared","submitting","submission_unknown","queued","running","provider_completed","result_pending","completed","failed","cancelled")
     }
 }

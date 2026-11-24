@@ -2,6 +2,7 @@ package com.pitgpt.galaxy.ui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
+import com.pitgpt.galaxy.data.remote.LilaImageHistoryJob
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.InMemoryComfyUiJobStore
 import kotlinx.coroutines.CancellationException
@@ -16,6 +17,38 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ImageGenerationPanelTest {
+    @Test
+    fun coreHistoryRestoresRequestIntoTheSameOwnerScopedConversation() {
+        val job = LilaImageHistoryJob(
+            jobId = "00000000-0000-0000-0000-000000000003",
+            conversationId = "00000000-0000-0000-0000-000000000001",
+            prompt = "portrait",
+            negativePrompt = "blur",
+            width = 768,
+            height = 1024,
+            seed = 42L,
+            state = "completed",
+            createdAtEpochMillis = 1234L,
+            assetByteSize = 4096L
+        )
+
+        val restored = coreHistoryRequest(
+            job = job,
+            requestId = job.jobId,
+            characterId = "character-a"
+        )
+
+        assertEquals(job.jobId, restored.id)
+        assertEquals(job.conversationId, restored.conversationId)
+        assertEquals("character-a", restored.characterId)
+        assertEquals("portrait", restored.prompt)
+        assertEquals("blur", restored.negativePrompt)
+        assertEquals(768, restored.width)
+        assertEquals(1024, restored.height)
+        assertEquals(42L, restored.seed)
+        assertEquals(1234L, restored.createdAtEpochMillis)
+    }
+
     @Test
     fun navigationIsLockedOnlyDuringSubmissionBecauseActiveJobsAreDurable() {
         assertTrue(imageGenerationNavigationLocked(isSubmitting = true))

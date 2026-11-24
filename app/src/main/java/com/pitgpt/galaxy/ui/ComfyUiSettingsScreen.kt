@@ -9,14 +9,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -28,20 +26,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pitgpt.galaxy.data.providers.ComfyUiSavedSettings
-import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
-import com.pitgpt.galaxy.data.providers.ProviderSettings
-import com.pitgpt.galaxy.data.providers.ProviderSettingsIo
-import com.pitgpt.galaxy.data.providers.resolveComfyUiBearerToken
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiEndpointSelector
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiNodeInput
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRoutePreference
+import com.pitgpt.galaxy.GalaxyApplication
+import com.pitgpt.galaxy.data.remote.LilaComfyUiProviderConfiguration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -53,10 +44,17 @@ private val ComfyMuted = Color(0xFF9AA8C5)
 private val ComfyAccent = Color(0xFFB8D9FF)
 
 @Composable
-fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
-    val settingsIo = remember(store) { ProviderSettingsIo(store) }
+fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
+    val provider = remember(app) { app.lilaCoreImageGenerationProvider }
     val context = LocalContext.current
-    var persistedComfyUi by remember { mutableStateOf<ComfyUiSavedSettings?>(null) }
+    val scope = rememberCoroutineScope()
+
+    var baseUrl by remember { mutableStateOf("") }
+    var persistedBaseUrl by remember { mutableStateOf<String?>(null) }
+    var bearerToken by remember { mutableStateOf("") }
+    var hasBearerToken by remember { mutableStateOf(false) }
+    var clearBearerToken by remember { mutableStateOf(false) }
+    var configured by remember { mutableStateOf(false) }
     var workflowId by remember { mutableStateOf("") }
     var workflowJson by remember { mutableStateOf("") }
     var positiveNodeId by remember { mutableStateOf("") }
@@ -71,51 +69,19 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
     var seedInputName by remember { mutableStateOf("seed") }
     var loading by remember { mutableStateOf(true) }
     var loadFailed by remember { mutableStateOf(false) }
-    var lanUrl by remember { mutableStateOf("") }
-    var lanToken by remember { mutableStateOf("") }
-    var vpnUrl by remember { mutableStateOf("") }
-    var vpnToken by remember { mutableStateOf("") }
-    var clearLanToken by remember { mutableStateOf(false) }
-    var clearVpnToken by remember { mutableStateOf(false) }
-    var preference by remember { mutableStateOf(ComfyUiRoutePreference.AUTO) }
-    var status by remember { mutableStateOf<String?>(null) }
-    var checking by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
+    var checking by remember { mutableStateOf(false) }
     var importingWorkflow by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    val workflowPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            scope.launch {
-                importingWorkflow = true
-                try {
-                    val imported = withContext(Dispatchers.IO) {
-                        val input = context.contentResolver.openInputStream(uri)
-                            ?: throw IllegalStateException("Workflow file cannot be opened")
-                        readBoundedWorkflowJson(input)
-                    }
-                    workflowJson = imported
-                    if (workflowId.isBlank()) workflowId = "comfyui.workflow.v1"
-                    status = "Workflow JSON загружен. Укажи ID узлов и входов, затем сохрани шаблон."
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    status = "Не удалось прочитать workflow. Файл должен быть JSON размером не более 2 МиБ."
-                } finally {
-                    importingWorkflow = false
-                }
-            }
-        }
-    }
+    var status by remember { mutableStateOf<String?>(null) }
 
-    fun applyLoadedSettings(loaded: ProviderSettings) {
-        val comfy = loaded.comfyUi
-        persistedComfyUi = comfy
-        lanUrl = comfy?.lanBaseUrl.orEmpty()
-        vpnUrl = comfy?.vpnBaseUrl.orEmpty()
-        preference = comfy?.preference ?: ComfyUiRoutePreference.AUTO
-        val workflow = loaded.comfyUiWorkflow
+    fun applyConfiguration(configuration: LilaComfyUiProviderConfiguration) {
+        configured = configuration.configured
+        persistedBaseUrl = configuration.baseUrl
+        baseUrl = configuration.baseUrl.orEmpty()
+        hasBearerToken = configuration.hasBearerToken
+        bearerToken = ""
+        clearBearerToken = false
+        val workflow = configuration.workflow
         workflowId = workflow?.id.orEmpty()
         workflowJson = workflow?.workflowJson.orEmpty()
         positiveNodeId = workflow?.positivePrompt?.nodeId.orEmpty()
@@ -128,47 +94,58 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
         heightInputName = workflow?.height?.inputName ?: "height"
         seedNodeId = workflow?.seed?.nodeId.orEmpty()
         seedInputName = workflow?.seed?.inputName ?: "seed"
-        lanToken = ""
-        vpnToken = ""
-        clearLanToken = false
-        clearVpnToken = false
         loadFailed = false
     }
 
-    LaunchedEffect(settingsIo) {
+    suspend fun loadConfiguration() {
         try {
-            captureComfyUiSettingsResult { settingsIo.load() }
-                .onSuccess(::applyLoadedSettings)
-                .onFailure { loadFailed = true }
-        } finally {
-            loading = false
+            val configuration = provider.providerConfiguration()
+            applyConfiguration(configuration)
+            status = if (configuration.configured) {
+                "Настройки загружены из защищённого хранилища Lila Core."
+            } else {
+                "ComfyUI ещё не настроен в Lila Core."
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            loadFailed = true
+            status = "Не удалось прочитать конфигурацию Lila Core. Сохранённые данные не изменены."
         }
     }
 
-    fun candidate(): ComfyUiSavedSettings {
-        val lan = lanUrl.trim().takeIf { it.isNotEmpty() }
-        val vpn = vpnUrl.trim().takeIf { it.isNotEmpty() }
-        val saved = ComfyUiSavedSettings(
-            lanBaseUrl = lan,
-            lanBearerToken = resolveComfyUiBearerToken(
-                endpoint = lan,
-                enteredToken = lanToken,
-                clearSavedToken = clearLanToken,
-                previousEndpoint = persistedComfyUi?.lanBaseUrl,
-                previousToken = persistedComfyUi?.lanBearerToken
-            ),
-            vpnBaseUrl = vpn,
-            vpnBearerToken = resolveComfyUiBearerToken(
-                endpoint = vpn,
-                enteredToken = vpnToken,
-                clearSavedToken = clearVpnToken,
-                previousEndpoint = persistedComfyUi?.vpnBaseUrl,
-                previousToken = persistedComfyUi?.vpnBearerToken
-            ),
-            preference = preference
-        )
-        saved.toEndpointOptions()
-        return saved
+    val workflowPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                importingWorkflow = true
+                try {
+                    workflowJson = withContext(Dispatchers.IO) {
+                        val input = context.contentResolver.openInputStream(uri)
+                            ?: throw IllegalStateException("Workflow file cannot be opened")
+                        readBoundedWorkflowJson(input)
+                    }
+                    configured = false
+                    if (workflowId.isBlank()) workflowId = "comfyui.workflow.v1"
+                    status = "Workflow JSON загружен. Укажи ID узлов и входов, затем сохрани конфигурацию."
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    status = "Не удалось прочитать workflow. Файл должен быть JSON размером не более 2 МиБ."
+                } finally {
+                    importingWorkflow = false
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(provider) {
+        try {
+            loadConfiguration()
+        } finally {
+            loading = false
+        }
     }
 
     Column(
@@ -179,248 +156,181 @@ fun ComfyUiSettingsScreen(store: EncryptedProviderStore, onBack: () -> Unit) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) { Text("‹ НАЗАД", color = ComfyAccent) }
             Spacer(Modifier.weight(1f))
-            Text("COMFYUI", color = ComfyText, fontSize = 17.sp)
+            Text("COMFYUI · LILA CORE", color = ComfyText, fontSize = 16.sp)
         }
         Text(
-            "Подключение к ComfyUI на домашнем компьютере. Адреса и токены сохраняются в зашифрованном хранилище Android Keystore.",
+            "Настройки и секреты хранятся в защищённом хранилище Lila Core. Android обращается к Core по HTTPS; сам Core подключается к ComfyUI на домашнем компьютере.",
             color = ComfyMuted, fontSize = 12.sp, lineHeight = 18.sp
         )
+        Text(
+            "Для backend в Docker обычно используется http://host.docker.internal:8188. Разрешён только локальный endpoint на порту 8188; публичные адреса и произвольный LAN egress отклоняются.",
+            color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
+        )
+
         when {
-            loading -> {
-                Text("Читаю зашифрованные настройки…", color = ComfyMuted, fontSize = 13.sp)
-            }
+            loading -> Text("Читаю конфигурацию Lila Core…", color = ComfyMuted, fontSize = 13.sp)
             loadFailed -> {
-                Text("Не удалось прочитать зашифрованные настройки. Данные не изменены и не перезаписаны.",
-                    color = Color(0xFFFFB0A8), fontSize = 13.sp)
+                Text(
+                    "Конфигурация не прочитана. Изменения заблокированы, чтобы не перезаписать существующий workflow.",
+                    color = Color(0xFFFFB0A8), fontSize = 13.sp
+                )
                 Button(
                     enabled = !saving && !checking,
                     onClick = {
                         loading = true
                         scope.launch {
-                            try {
-                                captureComfyUiSettingsResult { settingsIo.load() }
-                                    .onSuccess {
-                                        applyLoadedSettings(it)
-                                        status = "Настройки прочитаны."
-                                    }
-                                    .onFailure {
-                                        loadFailed = true
-                                        status = "Хранилище пока недоступно. Исходные данные сохранены."
-                                    }
-                            } finally {
-                                loading = false
-                            }
+                            try { loadConfiguration() } finally { loading = false }
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("ПОВТОРИТЬ ЧТЕНИЕ") }
             }
             else -> {
-                Text("LAN — адрес компьютера в домашней сети", color = ComfyAccent, fontSize = 13.sp)
+                Text("ENDPOINT COMFYUI", color = ComfyAccent, fontSize = 13.sp)
                 OutlinedTextField(
-                    value = lanUrl, onValueChange = { lanUrl = it; status = null },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text("LAN URL, например http://192.168.1.20:8188") }
+                    value = baseUrl,
+                    onValueChange = { baseUrl = it; configured = false; status = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Backend URL, например http://host.docker.internal:8188") }
                 )
                 OutlinedTextField(
-                    value = lanToken, onValueChange = { lanToken = it; status = null },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text(if (persistedComfyUi?.lanBearerToken != null) "LAN-токен (пусто — сохранить только для прежнего адреса)" else "LAN-токен (необязательно)") },
+                    value = bearerToken,
+                    onValueChange = { bearerToken = it; clearBearerToken = false; configured = false; status = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = {
+                        Text(if (hasBearerToken) "Новый токен (пусто — сохранить прежний для того же адреса)" else "Bearer token (необязательно)")
+                    },
                     visualTransformation = PasswordVisualTransformation()
                 )
-                if (persistedComfyUi?.lanBearerToken != null) {
+                if (hasBearerToken) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = clearLanToken, onCheckedChange = { clearLanToken = it })
-                        Text("Удалить сохранённый LAN-токен", color = ComfyMuted, fontSize = 12.sp)
+                        Checkbox(
+                            checked = clearBearerToken,
+                            onCheckedChange = { clearBearerToken = it; if (it) bearerToken = ""; configured = false }
+                        )
+                        Text("Удалить сохранённый токен", color = ComfyMuted, fontSize = 12.sp)
                     }
                 }
-
-                Text("VPN / Tailscale — адрес компьютера через VPN", color = ComfyAccent, fontSize = 13.sp)
-                OutlinedTextField(
-                    value = vpnUrl, onValueChange = { vpnUrl = it; status = null },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text("VPN URL, например http://100.64.0.10:8188") }
-                )
-                OutlinedTextField(
-                    value = vpnToken, onValueChange = { vpnToken = it; status = null },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text(if (persistedComfyUi?.vpnBearerToken != null) "VPN-токен (пусто — сохранить только для прежнего адреса)" else "VPN-токен (необязательно)") },
-                    visualTransformation = PasswordVisualTransformation()
-                )
-                if (persistedComfyUi?.vpnBearerToken != null) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = clearVpnToken, onCheckedChange = { clearVpnToken = it })
-                        Text("Удалить сохранённый VPN-токен", color = ComfyMuted, fontSize = 12.sp)
-                    }
+                if (hasBearerToken && persistedBaseUrl != null && persistedBaseUrl != baseUrl.trim() && bearerToken.isBlank()) {
+                    Text(
+                        "При смене endpoint Core удалит прежний токен. Введи новый токен, если он нужен новому адресу.",
+                        color = Color(0xFFE9BD70), fontSize = 11.sp, lineHeight = 16.sp
+                    )
                 }
-
 
                 Text("ШАБЛОН WORKFLOW", color = ComfyAccent, fontSize = 13.sp)
                 Text(
-                    "Импортируй API-format JSON из ComfyUI. Galaxy не угадывает узлы: укажи ID узла и имя входа для каждого поля.",
+                    "Импортируй API-format JSON из ComfyUI. Galaxy не угадывает узлы: явно укажи ID узла и имя входа для каждого поля.",
                     color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
                 )
                 Button(
                     enabled = !saving && !checking && !importingWorkflow,
                     onClick = { workflowPicker.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text(if (importingWorkflow) "ЧИТАЮ WORKFLOW…" else if (workflowJson.isBlank()) "ИМПОРТИРОВАТЬ WORKFLOW JSON" else "ЗАМЕНИТЬ WORKFLOW JSON") }
+                ) {
+                    Text(if (importingWorkflow) "ЧИТАЮ WORKFLOW…" else if (workflowJson.isBlank()) "ИМПОРТИРОВАТЬ WORKFLOW JSON" else "ЗАМЕНИТЬ WORKFLOW JSON")
+                }
                 Text(
                     if (workflowJson.isBlank()) "Workflow пока не импортирован."
-                    else "JSON загружен и готов к настройке. Содержимое хранится в зашифрованном хранилище.",
+                    else "Workflow загружен и готов к проверке. Полный JSON передаётся только в Lila Core.",
                     color = ComfyMuted, fontSize = 11.sp
                 )
-                OutlinedTextField(value = workflowId, onValueChange = { workflowId = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("ID шаблона") })
-                OutlinedTextField(value = positiveNodeId, onValueChange = { positiveNodeId = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Positive prompt · ID узла") })
-                OutlinedTextField(value = positiveInputName, onValueChange = { positiveInputName = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Positive prompt · имя входа") })
-                OutlinedTextField(value = negativeNodeId, onValueChange = { negativeNodeId = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Negative prompt · ID узла (необязательно)") })
-                OutlinedTextField(value = negativeInputName, onValueChange = { negativeInputName = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Negative prompt · имя входа") })
-                OutlinedTextField(value = widthNodeId, onValueChange = { widthNodeId = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Width · ID узла (необязательно)") })
-                OutlinedTextField(value = widthInputName, onValueChange = { widthInputName = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Width · имя входа") })
-                OutlinedTextField(value = heightNodeId, onValueChange = { heightNodeId = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Height · ID узла (необязательно)") })
-                OutlinedTextField(value = heightInputName, onValueChange = { heightInputName = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Height · имя входа") })
-                OutlinedTextField(value = seedNodeId, onValueChange = { seedNodeId = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Seed · ID узла (необязательно)") })
-                OutlinedTextField(value = seedInputName, onValueChange = { seedInputName = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Seed · имя входа") })
+                OutlinedTextField(value = workflowId, onValueChange = { workflowId = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("ID шаблона") })
+                OutlinedTextField(value = positiveNodeId, onValueChange = { positiveNodeId = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Positive prompt · ID узла") })
+                OutlinedTextField(value = positiveInputName, onValueChange = { positiveInputName = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Positive prompt · имя входа") })
+                OutlinedTextField(value = negativeNodeId, onValueChange = { negativeNodeId = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Negative prompt · ID узла (необязательно)") })
+                OutlinedTextField(value = negativeInputName, onValueChange = { negativeInputName = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Negative prompt · имя входа") })
+                OutlinedTextField(value = widthNodeId, onValueChange = { widthNodeId = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Width · ID узла (необязательно)") })
+                OutlinedTextField(value = widthInputName, onValueChange = { widthInputName = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Width · имя входа") })
+                OutlinedTextField(value = heightNodeId, onValueChange = { heightNodeId = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Height · ID узла (необязательно)") })
+                OutlinedTextField(value = heightInputName, onValueChange = { heightInputName = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Height · имя входа") })
+                OutlinedTextField(value = seedNodeId, onValueChange = { seedNodeId = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Seed · ID узла (необязательно)") })
+                OutlinedTextField(value = seedInputName, onValueChange = { seedInputName = it; configured = false }, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("Seed · имя входа") })
+
                 Button(
-                    enabled = !saving && !checking && !loading && !loadFailed && !importingWorkflow,
+                    enabled = !saving && !checking && !importingWorkflow && baseUrl.isNotBlank() && workflowJson.isNotBlank(),
                     onClick = {
                         saving = true
                         scope.launch {
                             try {
-                                val template = try {
-                                    buildComfyUiWorkflowTemplate(
-                                        id = workflowId,
-                                        workflowJson = workflowJson,
-                                        positiveNodeId = positiveNodeId,
-                                        positiveInputName = positiveInputName,
-                                        negativeNodeId = negativeNodeId,
-                                        negativeInputName = negativeInputName,
-                                        widthNodeId = widthNodeId,
-                                        widthInputName = widthInputName,
-                                        heightNodeId = heightNodeId,
-                                        heightInputName = heightInputName,
-                                        seedNodeId = seedNodeId,
-                                        seedInputName = seedInputName
-                                    )
-                                } catch (cancelled: CancellationException) {
-                                    throw cancelled
-                                } catch (_: Exception) {
-                                    null
-                                }
-
-                                if (template == null) {
-                                    status = "Проверь JSON, ID шаблона и соответствие ID узлов/имён входов."
+                                val template = buildComfyUiWorkflowTemplate(
+                                    id = workflowId,
+                                    workflowJson = workflowJson,
+                                    positiveNodeId = positiveNodeId,
+                                    positiveInputName = positiveInputName,
+                                    negativeNodeId = negativeNodeId,
+                                    negativeInputName = negativeInputName,
+                                    widthNodeId = widthNodeId,
+                                    widthInputName = widthInputName,
+                                    heightNodeId = heightNodeId,
+                                    heightInputName = heightInputName,
+                                    seedNodeId = seedNodeId,
+                                    seedInputName = seedInputName
+                                )
+                                val oldUrl = persistedBaseUrl
+                                val oldHadToken = hasBearerToken
+                                val enteredToken = bearerToken.trim().takeIf { it.isNotEmpty() }
+                                val result = provider.configureProvider(
+                                    baseUrl = baseUrl,
+                                    workflow = template,
+                                    bearerToken = enteredToken,
+                                    clearBearerToken = clearBearerToken
+                                )
+                                configured = result.configured
+                                hasBearerToken = result.hasBearerToken
+                                persistedBaseUrl = baseUrl.trim()
+                                bearerToken = ""
+                                clearBearerToken = false
+                                status = if (oldHadToken && oldUrl != null && oldUrl != baseUrl.trim() && enteredToken == null) {
+                                    "Настройки сохранены. Старый токен удалён при смене endpoint."
                                 } else {
-                                    val current = settingsIo.load()
-                                    settingsIo.save(current.copy(comfyUiWorkflow = template))
-                                    status = "Workflow сохранён в зашифрованном хранилище."
+                                    "Конфигурация сохранена в защищённом хранилище Lila Core."
                                 }
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (_: Exception) {
-                                status = "Не удалось сохранить workflow. Проверь Android Keystore."
+                                status = "Не удалось сохранить конфигурацию. Проверь workflow, endpoint и доступность Lila Core."
                             } finally {
                                 saving = false
                             }
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("СОХРАНИТЬ WORKFLOW") }
+                ) { Text(if (saving) "СОХРАНЕНИЕ…" else "СОХРАНИТЬ В LILA CORE") }
 
-                Text("Предпочитаемый маршрут", color = ComfyAccent, fontSize = 13.sp)
-                ComfyUiRoutePreference.values().forEach { option ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected = preference == option, onClick = { preference = option })
-                        Text(
-                            when (option) {
-                                ComfyUiRoutePreference.AUTO -> "Автоматически: сначала LAN, затем VPN"
-                                ComfyUiRoutePreference.LAN_ONLY -> "Только LAN"
-                                ComfyUiRoutePreference.VPN_ONLY -> "Только VPN"
-                            },
-                            color = ComfyText, fontSize = 12.sp
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Проверка выполняется по последней сохранённой конфигурации. Сначала сохрани изменения.",
+                    color = ComfyMuted, fontSize = 11.sp
+                )
                 Button(
-                    enabled = !checking && !saving,
+                    enabled = !saving && !checking && !loadFailed && configured,
                     onClick = {
                         checking = true
-                        status = "Проверяю подключение…"
+                        status = "Проверяю соединение через Lila Core…"
                         scope.launch {
                             try {
-                                val result = captureComfyUiSettingsResult {
-                                    ComfyUiEndpointSelector().resolve(candidate().toEndpointOptions())
+                                val result = provider.testProvider()
+                                status = if (result.connectionReachable) {
+                                    "ComfyUI доступен через Core; workflow: " + (result.workflowId ?: "неизвестен") + "."
+                                } else {
+                                    "Core не подтвердил соединение с ComfyUI."
                                 }
-                                status = result.fold(
-                                    onSuccess = { resolution ->
-                                        resolution.attempts.joinToString(separator = "\n") {
-                                            "${it.route}: ${it.message}"
-                                        }.ifBlank { "Не удалось проверить подключение." }
-                                    },
-                                    onFailure = {
-                                        "Проверь адреса, режим маршрута и токены. Секреты не были выведены."
-                                    }
-                                )
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                status = "Проверка ComfyUI не прошла. Проверь адрес, workflow и доступность backend."
                             } finally {
                                 checking = false
                             }
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text(if (checking) "ПРОВЕРКА…" else "ПРОВЕРИТЬ ПОДКЛЮЧЕНИЕ") }
+                ) { Text(if (checking) "ПРОВЕРКА…" else "ПРОВЕРИТЬ СОХРАНЁННУЮ КОНФИГУРАЦИЮ") }
 
-                Button(
-                    enabled = !saving && !checking,
-                    onClick = {
-                        val next = runCatching { candidate() }.getOrNull()
-                        if (next == null) {
-                            status = "Проверь адреса и выбранный режим маршрута."
-                        } else {
-                            saving = true
-                            scope.launch {
-                                try {
-                                    captureComfyUiSettingsResult {
-                                        val current = settingsIo.load()
-                                        settingsIo.save(current.copy(comfyUi = next))
-                                    }.onSuccess {
-                                        persistedComfyUi = next
-                                        status = "Настройки ComfyUI сохранены в зашифрованном хранилище."
-                                        lanToken = ""
-                                        vpnToken = ""
-                                        clearLanToken = false
-                                        clearVpnToken = false
-                                    }.onFailure {
-                                        status = "Не удалось сохранить настройки. Проверь адреса и доступность Android Keystore."
-                                    }
-                                } finally {
-                                    saving = false
-                                }
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(if (saving) "СОХРАНЕНИЕ…" else "СОХРАНИТЬ НАСТРОЙКИ") }
                 status?.let { Text(it, color = ComfyAccent, fontSize = 12.sp, lineHeight = 18.sp) }
-                Text(
-                    "Публичные адреса требуют HTTPS. Android может блокировать обычный HTTP даже для частных адресов; глобальное разрешение cleartext traffic не включено. Перенаправления запросов отключены.",
-                    color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
-                )
             }
         }
     }
 }
-
-

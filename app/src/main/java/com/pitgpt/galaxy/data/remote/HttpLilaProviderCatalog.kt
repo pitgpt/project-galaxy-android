@@ -495,6 +495,8 @@ class HttpLilaProviderCatalog(
         method == "POST" && Regex("/v1/lila/images/[0-9a-fA-F-]{36}/cancel").matches(path) -> "cancel-image-job"
         method == "GET" && Regex("/v1/lila/images/[0-9a-fA-F-]{36}/asset").matches(path) -> "download-image-asset"
         method == "GET" && path == "/v1/lila/image-providers/comfyui" -> "get-image-provider"
+        method == "GET" && path == "/v1/lila/image-providers/comfyui/config" -> "get-image-provider-config"
+        method == "GET" && path.startsWith("/v1/lila/images?") -> "list-image-history"
         method == "PUT" && path == "/v1/lila/image-providers/comfyui" -> "configure-image-provider"
         method == "POST" && path == "/v1/lila/image-providers/comfyui/test" -> "test-image-provider"
         else -> "other"
@@ -642,8 +644,8 @@ class HttpLilaProviderCatalog(
 
     private companion object {
         const val MAX_RESPONSE_BYTES = 128 * 1024
-        const val MAX_IMAGE_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
-        const val MAX_IMAGE_JSON_REQUEST_BYTES = 3 * 1024 * 1024
+        const val MAX_IMAGE_JSON_RESPONSE_BYTES = 5 * 1024 * 1024
+        const val MAX_IMAGE_JSON_REQUEST_BYTES = 5 * 1024 * 1024
         const val MAX_BINARY_RESPONSE_BYTES = 25 * 1024 * 1024
         const val MAX_PROVIDERS = 20
         const val MAX_MODELS = 100
