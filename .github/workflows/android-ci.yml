@@ -102,7 +102,9 @@ jobs:
         uses: actions/checkout@v4
       - name: Parse script and verify Android conversation ID vector
         shell: pwsh
-        run: ./scripts/galaxy-live-e2e.ps1 -SelfTest
+        run: |
+          ./scripts/galaxy-live-e2e.ps1 -SelfTest
+          ./scripts/lila-comfyui-live-e2e.ps1 -SelfTest
 
   live-ollama-e2e:
     name: Live Ollama model E2E
