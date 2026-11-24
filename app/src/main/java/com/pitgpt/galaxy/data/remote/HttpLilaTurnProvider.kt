@@ -347,12 +347,12 @@ class HttpLilaTurnProvider(
                     ) {
                         return null
                     }
+                    val providerId = optionalString(response, "provider_id", 64)
+                    val modelId = optionalString(response, "model_id", 256)
+                    val fallback = parseFallbackDisclosure(response, "assistant", providerId, modelId)
                     LilaTurnReconciliation(
-                        LilaTurnStatus.COMPLETED,
-                        val providerId = optionalString(response, "provider_id", 64)
-                        val modelId = optionalString(response, "model_id", 256)
-                        val fallback = parseFallbackDisclosure(response, "assistant", providerId, modelId)
-                        LilaTurnResult(
+                        status = LilaTurnStatus.COMPLETED,
+                        result = LilaTurnResult(
                             conversationId = responseConversationId,
                             text = assistantText,
                             providerId = providerId,
@@ -599,6 +599,7 @@ class HttpLilaTurnProvider(
                 modelId == null ||
                 fromProviderId == null ||
                 fromModelId == null ||
+                reason == null ||
                 reason !in setOf("primary_connection_unavailable", "primary_provider_unavailable") ||
                 providerId == fromProviderId
             ) {

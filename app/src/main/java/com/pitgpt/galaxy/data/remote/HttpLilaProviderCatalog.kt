@@ -457,6 +457,15 @@ class HttpLilaProviderCatalog(
         )
     }
 
+    private fun optionalString(payload: JSONObject, key: String, maxLength: Int): String? {
+        if (payload.isNull(key)) return null
+        val value = payload.optString(key).takeIf { it.isNotBlank() && it != "null" } ?: return null
+        if (value.length > maxLength) {
+            throw GalaxyApiException(null, "Сервис Lila вернул некорректные данные модели.")
+        }
+        return value
+    }
+
     private fun readBounded(input: InputStream): String {
         val output = ZeroizingByteArrayOutputStream()
         val scratch = ByteArray(8 * 1024)
