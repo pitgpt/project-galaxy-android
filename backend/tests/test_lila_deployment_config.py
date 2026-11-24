@@ -12,13 +12,27 @@ LILA_DATA_PATH = "/var/lib/galaxy/lila"
 LILA_DATABASE_PATH = f"{LILA_DATA_PATH}/lila.sqlite3"
 
 
-def _resolved_compose_config():
+def _resolved_compose_config(
+    *compose_files: str,
+    env_overrides: dict[str, str] | None = None,
+):
     if shutil.which("docker") is None:
         pytest.skip("Docker Compose is unavailable in this environment")
 
+    selected_files = compose_files or ("docker-compose.yml",)
+    command = ["docker", "compose"]
+    for compose_file in selected_files:
+        command.extend(["-f", compose_file])
+    command.extend(["config", "--format", "json"])
+
+    environment = os.environ.copy()
+    if env_overrides:
+        environment.update(env_overrides)
+
     result = subprocess.run(
-        ["docker", "compose", "config", "--format", "json"],
+        command,
         cwd=BACKEND_ROOT,
+        env=environment,
         capture_output=True,
         text=True,
         timeout=60,
@@ -67,10 +81,53 @@ def test_compose_mounts_storage_and_provider_secrets_without_container_environme
     assert mounted == {"lila_storage_encryption_key"}
     assert set(config["secrets"]) == {"lila_storage_encryption_key"}
     assert config["secrets"]["lila_storage_encryption_key"]["environment"] == "LILA_STORAGE_ENCRYPTION_KEY"
+    assert "OPENAI_API_KEY_FILE" not in backend_environment
+    assert "SAFETY_IDENTIFIER_HMAC_KEY_FILE" not in backend_environment
     resolved = json.dumps(config)
     assert storage_key not in resolved
     if provider_key:
         assert provider_key not in resolved
+
+
+def test_realtime_compose_override_mounts_optional_credentials_as_secret_files(monkeypatch, tmp_path):
+    openai_key = "realtime-openai-test-secret"
+    safety_key = "realtime-hmac-test-secret"
+    openai_file = tmp_path / "openai-api-key"
+    safety_file = tmp_path / "safety-hmac-key"
+    openai_file.write_text(openai_key, encoding="ascii")
+    safety_file.write_text(safety_key, encoding="ascii")
+
+    config = _resolved_compose_config(
+        "docker-compose.yml",
+        "docker-compose.realtime.yml",
+        env_overrides={
+            "OPENAI_API_KEY_SECRET_FILE": str(openai_file.resolve()),
+            "SAFETY_IDENTIFIER_HMAC_KEY_SECRET_FILE": str(safety_file.resolve()),
+        },
+    )
+    backend = config["services"]["backend"]
+    environment = backend["environment"]
+
+    assert environment["OPENAI_API_KEY"] == ""
+    assert environment["SAFETY_IDENTIFIER_HMAC_KEY"] == ""
+    assert environment["OPENAI_API_KEY_FILE"] == "/run/secrets/openai_api_key"
+    assert environment["SAFETY_IDENTIFIER_HMAC_KEY_FILE"] == "/run/secrets/safety_identifier_hmac_key"
+
+    mounted = {
+        item if isinstance(item, str) else item["source"]
+        for item in backend["secrets"]
+    }
+    assert mounted == {
+        "lila_storage_encryption_key",
+        "openai_api_key",
+        "safety_identifier_hmac_key",
+    }
+    assert config["secrets"]["openai_api_key"]["file"] == str(openai_file.resolve())
+    assert config["secrets"]["safety_identifier_hmac_key"]["file"] == str(safety_file.resolve())
+
+    resolved = json.dumps(config)
+    assert openai_key not in resolved
+    assert safety_key not in resolved
 
 
 def test_backend_image_prepares_private_store_directory_for_runtime_uid():
