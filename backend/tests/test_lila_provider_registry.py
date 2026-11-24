@@ -660,10 +660,16 @@ def test_schema_v5_migration_preserves_encrypted_provider_catalog(tmp_path):
     assert providers[0]["provider_id"] == "cloud-main"
 
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 7
     assert database.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lila_conversation_models'"
     ).fetchone()[0] == 1
+    columns = {row[1] for row in database.execute("PRAGMA table_info(lila_turn_metadata)")}
+    assert {
+        "fallback_from_provider_id",
+        "fallback_from_model_id",
+        "fallback_reason",
+    }.issubset(columns)
     database.close()
 
 
@@ -2082,3 +2088,86 @@ def test_primary_connection_failure_with_missing_configured_fallback_is_explicit
     with pytest.raises(SelectedFallbackProviderUnavailable):
         run(execute())
     assert calls == ["primary.vendor.net"]
+
+
+def test_schema_v6_migration_adds_fallback_history_columns_without_data_loss(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    store = SqliteLilaStore(path, KEY)
+    database = sqlite3.connect(path)
+    database.execute("PRAGMA foreign_keys=ON")
+    database.execute(
+        """CREATE TABLE lila_messages (
+            owner_key TEXT NOT NULL,
+            conversation_key TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK(sequence > 0),
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+            ciphertext BLOB NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY(owner_key, conversation_key, sequence)
+        ) WITHOUT ROWID"""
+    )
+    database.execute(
+        """CREATE TABLE lila_meta (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            key_check BLOB NOT NULL
+        )"""
+    )
+    database.execute(
+        "INSERT INTO lila_meta(singleton, key_check) VALUES(1, ?)",
+        (store._key_check(),),
+    )
+    database.execute(
+        """CREATE TABLE lila_memories (
+            owner_key TEXT NOT NULL,
+            memory_key TEXT NOT NULL,
+            nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+            ciphertext BLOB NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY(owner_key, memory_key)
+        ) WITHOUT ROWID"""
+    )
+    database.execute(
+        """CREATE TABLE lila_turn_metadata (
+            owner_key TEXT NOT NULL,
+            conversation_key TEXT NOT NULL,
+            assistant_sequence INTEGER NOT NULL CHECK(assistant_sequence > 0),
+            provider_id TEXT CHECK(provider_id IS NULL OR length(provider_id) BETWEEN 1 AND 64),
+            model_id TEXT CHECK(model_id IS NULL OR length(model_id) BETWEEN 1 AND 256),
+            PRIMARY KEY(owner_key, conversation_key, assistant_sequence),
+            FOREIGN KEY(owner_key, conversation_key, assistant_sequence)
+                REFERENCES lila_messages(owner_key, conversation_key, sequence)
+                ON DELETE CASCADE,
+            CHECK(provider_id IS NOT NULL OR model_id IS NOT NULL)
+        ) WITHOUT ROWID"""
+    )
+    database.execute(
+        "INSERT INTO lila_messages VALUES(?, ?, ?, ?, ?, ?, ?)",
+        ("owner-key", "conversation-key", 2, "assistant", bytes(12), b"ciphertext", 1000),
+    )
+    database.execute(
+        "INSERT INTO lila_turn_metadata VALUES(?, ?, ?, ?, ?)",
+        ("owner-key", "conversation-key", 2, "primary-provider", "primary-model"),
+    )
+    database.execute("PRAGMA user_version=6")
+    database.commit()
+    database.close()
+
+    migrated = SqliteLilaStore(path, KEY)
+    run(migrated.initialize())
+
+    database = sqlite3.connect(path)
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 7
+    columns = {row[1] for row in database.execute("PRAGMA table_info(lila_turn_metadata)")}
+    assert {
+        "fallback_from_provider_id",
+        "fallback_from_model_id",
+        "fallback_reason",
+    }.issubset(columns)
+    row = database.execute(
+        "SELECT provider_id, model_id, fallback_from_provider_id, fallback_from_model_id, fallback_reason "
+        "FROM lila_turn_metadata WHERE assistant_sequence=2"
+    ).fetchone()
+    assert row == ("primary-provider", "primary-model", None, None, None)
+    database.close()

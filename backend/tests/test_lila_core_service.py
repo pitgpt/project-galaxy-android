@@ -44,6 +44,9 @@ class FakeHistoryReader:
             assistant_message=assistant_message,
             provider_id=response.provider_id,
             model_id=response.model_id,
+            fallback_from_provider_id=response.fallback_from_provider_id,
+            fallback_from_model_id=response.fallback_from_model_id,
+            fallback_reason=response.fallback_reason,
         )
 
     async def release_idempotent_turn(
@@ -59,7 +62,8 @@ class FakeHistoryReader:
 
     async def append_turn(
         self, *, principal_id, conversation_id, user_message, assistant_message,
-        provider_id=None, model_id=None
+        provider_id=None, model_id=None, fallback_from_provider_id=None,
+        fallback_from_model_id=None, fallback_reason=None
     ):
         self.appended_turns.append((principal_id, conversation_id, user_message, assistant_message))
         self.model_identities.append((provider_id, model_id))

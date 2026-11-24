@@ -49,7 +49,9 @@ data class LilaConversationModelSelection(
     val conversationId: String,
     val selected: Boolean,
     val providerId: String?,
-    val modelId: String?
+    val modelId: String?,
+    val fallbackProviderId: String? = null,
+    val fallbackModelId: String? = null
 )
 
 data class LilaRequestDiagnostic(
@@ -221,14 +223,24 @@ class HttpLilaProviderCatalog(
     suspend fun setConversationModel(
         conversationId: String,
         providerId: String,
-        modelId: String
+        modelId: String,
+        fallbackProviderId: String? = null,
+        fallbackModelId: String? = null
     ): LilaConversationModelSelection {
         require(conversationId.isNotBlank() && conversationId.length <= 128)
         require(providerId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")))
         require(modelId.isNotBlank() && modelId.length <= MAX_MODEL_ID_CHARS)
+        require((fallbackProviderId == null) == (fallbackModelId == null))
+        if (fallbackProviderId != null) {
+            require(fallbackProviderId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")))
+            require(fallbackProviderId != providerId)
+            require(!fallbackModelId.isNullOrBlank() && fallbackModelId.length <= MAX_MODEL_ID_CHARS)
+        }
         val body = JSONObject()
             .put("provider_id", providerId)
             .put("model_id", modelId)
+            .put("fallback_provider_id", fallbackProviderId ?: JSONObject.NULL)
+            .put("fallback_model_id", fallbackModelId ?: JSONObject.NULL)
         val payload = requestJson(
             "PUT",
             "/v1/lila/conversations/${encodePathSegment(conversationId)}/model",
@@ -423,16 +435,25 @@ class HttpLilaProviderCatalog(
             throw GalaxyApiException(null, "Сервис Lila вернул выбор модели для другого диалога.")
         }
         val selected = payload.optBoolean("selected")
-        val providerId = payload.optString("provider_id", "").takeIf { it.isNotBlank() && it != "null" }
-        val modelId = payload.optString("model_id", "").takeIf { it.isNotBlank() && it != "null" }
+        val providerId = optionalString(payload, "provider_id", 64)
+        val modelId = optionalString(payload, "model_id", MAX_MODEL_ID_CHARS)
+        val fallbackProviderId = optionalString(payload, "fallback_provider_id", 64)
+        val fallbackModelId = optionalString(payload, "fallback_model_id", MAX_MODEL_ID_CHARS)
         if (selected && (providerId == null || modelId == null)) {
             throw GalaxyApiException(null, "Сервис Lila вернул неполный выбор модели.")
+        }
+        if ((fallbackProviderId == null) != (fallbackModelId == null) ||
+            (fallbackProviderId != null && (!selected || fallbackProviderId == providerId))
+        ) {
+            throw GalaxyApiException(null, "Сервис Lila вернул некорректный резервный выбор модели.")
         }
         return LilaConversationModelSelection(
             conversationId = expectedConversationId,
             selected = selected,
             providerId = providerId,
-            modelId = modelId
+            modelId = modelId,
+            fallbackProviderId = fallbackProviderId,
+            fallbackModelId = fallbackModelId
         )
     }
 

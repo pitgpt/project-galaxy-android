@@ -126,6 +126,8 @@ class HttpLilaProviderCatalogTest {
                 .put("selected", true)
                 .put("provider_id", "cloud-main")
                 .put("model_id", "model-b")
+                .put("fallback_provider_id", "cloud-backup")
+                .put("fallback_model_id", "backup-model")
                 .toString()
         )
         val connections = mutableListOf<FakeConnection>()
@@ -140,7 +142,9 @@ class HttpLilaProviderCatalogTest {
         )
 
         val probe = catalog.probeProvider("cloud-main")
-        val selection = catalog.setConversationModel("conversation-1", "cloud-main", "model-b")
+        val selection = catalog.setConversationModel(
+            "conversation-1", "cloud-main", "model-b", "cloud-backup", "backup-model"
+        )
 
         assertTrue(probe.connectionReachable)
         assertTrue(probe.modelDiscoverySupported)
@@ -148,10 +152,14 @@ class HttpLilaProviderCatalogTest {
         assertFalse(probe.chatCompletionVerified)
         assertTrue(selection.selected)
         assertEquals("model-b", selection.modelId)
+        assertEquals("cloud-backup", selection.fallbackProviderId)
+        assertEquals("backup-model", selection.fallbackModelId)
         assertEquals("PUT", selectionConnection.requestMethod)
         val request = JSONObject(String(selectionConnection.requestBody.toByteArray(), Charsets.UTF_8))
         assertEquals("cloud-main", request.getString("provider_id"))
         assertEquals("model-b", request.getString("model_id"))
+        assertEquals("cloud-backup", request.getString("fallback_provider_id"))
+        assertEquals("backup-model", request.getString("fallback_model_id"))
         assertTrue(connections.all { it.disconnected })
     }
 
@@ -165,6 +173,8 @@ class HttpLilaProviderCatalogTest {
                 .put("selected", true)
                 .put("provider_id", "local-main")
                 .put("model_id", "qwen-local")
+                .put("fallback_provider_id", "cloud-backup")
+                .put("fallback_model_id", "backup-model")
                 .toString()
         )
         val catalog = HttpLilaProviderCatalog(
@@ -178,6 +188,8 @@ class HttpLilaProviderCatalogTest {
         assertTrue(selection.selected)
         assertEquals("local-main", selection.providerId)
         assertEquals("qwen-local", selection.modelId)
+        assertEquals("cloud-backup", selection.fallbackProviderId)
+        assertEquals("backup-model", selection.fallbackModelId)
         assertEquals("GET", connection.requestMethod)
         assertTrue(connection.disconnected)
     }

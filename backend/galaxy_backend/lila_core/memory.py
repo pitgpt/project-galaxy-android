@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, Protocol, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .contracts import CoreTurnResponse
 
@@ -30,7 +30,7 @@ class ConversationMessage(BaseModel):
 
 
 class StoredConversationMessage(BaseModel):
-    """One authenticated, committed message with a stable per-conversation sequence."""
+    """One authenticated, committed message with stable sequence and actual model disclosure."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -40,6 +40,33 @@ class StoredConversationMessage(BaseModel):
     created_at_epoch_millis: int = Field(ge=0)
     provider_id: str | None = Field(default=None, min_length=1, max_length=64)
     model_id: str | None = Field(default=None, min_length=1, max_length=256)
+    fallback_used: bool = False
+    fallback_from_provider_id: str | None = Field(default=None, min_length=1, max_length=64)
+    fallback_from_model_id: str | None = Field(default=None, min_length=1, max_length=256)
+    fallback_reason: Literal[
+        "primary_connection_unavailable",
+        "primary_provider_unavailable",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_fallback_disclosure(self):
+        metadata = (
+            self.fallback_from_provider_id,
+            self.fallback_from_model_id,
+            self.fallback_reason,
+        )
+        if self.fallback_used:
+            if (
+                self.role != "assistant"
+                or self.provider_id is None
+                or self.model_id is None
+                or any(value is None for value in metadata)
+                or self.provider_id == self.fallback_from_provider_id
+            ):
+                raise ValueError("fallback history must identify actual and primary models")
+        elif any(value is not None for value in metadata):
+            raise ValueError("fallback metadata is only valid when fallback_used is true")
+        return self
 
 
 class MemorySnippet(BaseModel):
@@ -100,8 +127,14 @@ class ConversationHistoryWriter(Protocol):
         assistant_message: str,
         provider_id: str | None = None,
         model_id: str | None = None,
+        fallback_from_provider_id: str | None = None,
+        fallback_from_model_id: str | None = None,
+        fallback_reason: Literal[
+            "primary_connection_unavailable",
+            "primary_provider_unavailable",
+        ] | None = None,
     ) -> None:
-        """Persist the user and assistant messages as one indivisible turn."""
+        """Persist the user and assistant messages and explicit fallback disclosure atomically."""
         ...
 
     async def reserve_idempotent_turn(

@@ -65,7 +65,8 @@ class RecordingHistoryReader:
 
     async def append_turn(
         self, *, principal_id, conversation_id, user_message, assistant_message,
-        provider_id=None, model_id=None
+        provider_id=None, model_id=None, fallback_from_provider_id=None,
+        fallback_from_model_id=None, fallback_reason=None
     ):
         self.appended_turns.append((principal_id, conversation_id, user_message, assistant_message))
         self.model_identities.append((provider_id, model_id))
@@ -550,6 +551,9 @@ def test_lila_history_is_owner_scoped_and_paginates_without_gaps(tmp_path):
             assistant_message=f"assistant-{index}",
             provider_id=f"provider-{index}",
             model_id=f"model-{index}",
+            fallback_from_provider_id="primary-provider" if index == 2 else None,
+            fallback_from_model_id="primary-model" if index == 2 else None,
+            fallback_reason="primary_connection_unavailable" if index == 2 else None,
         ))
     asyncio.run(store.append_turn(
         principal_id="user-b",
@@ -590,6 +594,11 @@ def test_lila_history_is_owner_scoped_and_paginates_without_gaps(tmp_path):
     assert first.json()["messages"][0]["model_id"] is None
     assert first.json()["messages"][1]["provider_id"] == "provider-2"
     assert first.json()["messages"][1]["model_id"] == "model-2"
+    assert first.json()["messages"][1]["fallback_used"] is True
+    assert first.json()["messages"][1]["fallback_from_provider_id"] == "primary-provider"
+    assert first.json()["messages"][1]["fallback_from_model_id"] == "primary-model"
+    assert first.json()["messages"][1]["fallback_reason"] == "primary_connection_unavailable"
+    assert first.json()["messages"][0]["fallback_used"] is False
     assert first.json()["next_before_sequence"] == 5
     assert [item["content"] for item in second.json()["messages"]] == [
         "user-1", "assistant-1"

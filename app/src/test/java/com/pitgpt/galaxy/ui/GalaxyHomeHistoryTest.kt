@@ -130,3 +130,54 @@ class GalaxyHomeHistoryTest {
         assertEquals(listOf(900L, 901L, 1500L, 2000L, 2000L), merged.map { it.createdAtEpochMillis })
     }
 }
+
+
+    @Test
+    fun mergeRestoresFallbackNoticeFromRemoteHistoryWithoutDuplicatingLocalNotice() {
+        val characterId = "owner:partition:galaxy.default"
+        val conversationId = "00000000-0000-4000-8000-000000000405"
+        val fallback = LilaHistoryMessage(
+            sequence = 2,
+            role = "assistant",
+            content = "Ответ резервной модели",
+            createdAtEpochMillis = 1001,
+            providerId = "backup-provider",
+            modelId = "backup-model",
+            fallbackUsed = true,
+            fallbackFromProviderId = "primary-provider",
+            fallbackFromModelId = "primary-model",
+            fallbackReason = "primary_connection_unavailable"
+        )
+        val noticeText = lilaFallbackNoticeText(
+            fallbackUsed = fallback.fallbackUsed,
+            providerId = fallback.providerId,
+            modelId = fallback.modelId,
+            fallbackFromProviderId = fallback.fallbackFromProviderId,
+            fallbackFromModelId = fallback.fallbackFromModelId,
+            fallbackReason = fallback.fallbackReason
+        )!!
+        val localNotice = ConversationMessage(
+            id = "local-fallback-notice",
+            characterId = characterId,
+            role = MessageRole.SYSTEM,
+            content = noticeText,
+            createdAtEpochMillis = 1003
+        )
+
+        val merged = mergeRemoteHistory(
+            characterId,
+            conversationId,
+            listOf(localNotice),
+            listOf(
+                LilaHistoryMessage(1, "user", "hello", 1000),
+                fallback
+            )
+        )
+
+        assertEquals(3, merged.size)
+        assertEquals(MessageRole.CHARACTER, merged[1].role)
+        assertEquals("Ответ резервной модели", merged[1].content)
+        assertEquals(MessageRole.SYSTEM, merged[2].role)
+        assertEquals("local-fallback-notice", merged[2].id)
+        assertEquals(noticeText, merged[2].content)
+    }

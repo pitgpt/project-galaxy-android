@@ -62,6 +62,9 @@ fun LilaProviderSettingsScreen(
     var chatTests by remember { mutableStateOf<Map<String, LilaProviderChatTestResult>>(emptyMap()) }
     var selectedProviderId by remember { mutableStateOf<String?>(null) }
     var selectedModelId by remember { mutableStateOf("") }
+    var fallbackEnabled by remember { mutableStateOf(false) }
+    var selectedFallbackProviderId by remember { mutableStateOf<String?>(null) }
+    var selectedFallbackModelId by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(true) }
     var isSaving by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -87,6 +90,13 @@ fun LilaProviderSettingsScreen(
                 selection = catalog.getConversationModel(conversationId)
                 selectedProviderId = selection.providerId
                 selectedModelId = selection.modelId.orEmpty()
+                fallbackEnabled = selection.fallbackProviderId != null
+                selectedFallbackProviderId = selection.fallbackProviderId
+                selectedFallbackModelId = selection.fallbackModelId.orEmpty()
+            } else {
+                fallbackEnabled = false
+                selectedFallbackProviderId = null
+                selectedFallbackModelId = ""
             }
         } catch (exception: CancellationException) {
             throw exception
@@ -147,6 +157,13 @@ fun LilaProviderSettingsScreen(
                     Text("МОДЕЛЬ ЭТОГО ДИАЛОГА", fontWeight = FontWeight.Bold)
                     if (selection.selected) {
                         Text("${selection.providerId} · ${selection.modelId}", color = ProviderScreenText, fontWeight = FontWeight.SemiBold)
+                        if (selection.fallbackProviderId != null && selection.fallbackModelId != null) {
+                            Text(
+                                "Резервная: ${selection.fallbackProviderId} · ${selection.fallbackModelId}",
+                                color = Color(0xFFE9BD70),
+                                fontSize = 11.sp
+                            )
+                        }
                         if (providers.none { it.providerId == selection.providerId }) {
                             Text(
                                 "Выбранный провайдер удалён. Выбери другой — автоматической подмены нет.",
@@ -308,10 +325,27 @@ fun LilaProviderSettingsScreen(
                                         error = null
                                         notice = null
                                         try {
+                                            val fallbackProvider = selectedFallbackProviderId.takeIf { fallbackEnabled }
+                                            val fallbackModel = selectedFallbackModelId.trim().takeIf { fallbackEnabled }
+                                            if (fallbackEnabled && (fallbackProvider == null || fallbackModel.isNullOrBlank())) {
+                                                error = "Выбери резервного провайдера и укажи его Model ID."
+                                                return@launch
+                                            }
+                                            if (fallbackProvider == provider.providerId) {
+                                                error = "Основная и резервная модели должны принадлежать разным провайдерам."
+                                                return@launch
+                                            }
                                             val result = catalog.setConversationModel(
-                                                conversationId, provider.providerId, chosenModel
+                                                conversationId,
+                                                provider.providerId,
+                                                chosenModel,
+                                                fallbackProvider,
+                                                fallbackModel
                                             )
                                             selection = result
+                                            fallbackEnabled = result.fallbackProviderId != null
+                                            selectedFallbackProviderId = result.fallbackProviderId
+                                            selectedFallbackModelId = result.fallbackModelId.orEmpty()
                                             onModelSelected("${provider.providerId} · $chosenModel")
                                             notice = "Модель сохранена для этого диалога."
                                         } catch (exception: CancellationException) {
@@ -326,6 +360,129 @@ fun LilaProviderSettingsScreen(
                                 }
                             ) { Text("ВЫБРАТЬ ДЛЯ ДИАЛОГА") }
                         }
+                    }
+                }
+            }
+        }
+
+        if (conversationId != null && selection.selected) {
+            Card(shape = RoundedCornerShape(16.dp)) {
+                Column(
+                    Modifier.fillMaxWidth().padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("РЕЗЕРВНАЯ МОДЕЛЬ", fontWeight = FontWeight.Bold)
+                    Text(
+                        "Переключение разрешено только при подтверждённой ошибке соединения до отправки запроса. Ошибки авторизации, HTTP 5xx и неоднозначные таймауты не запускают вторую генерацию.",
+                        color = ProviderScreenMuted,
+                        fontSize = 11.sp
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = fallbackEnabled,
+                            onCheckedChange = { checked ->
+                                fallbackEnabled = checked
+                                if (checked && selectedFallbackProviderId == null) {
+                                    val candidate = providers.firstOrNull {
+                                        it.enabled && it.providerId != selection.providerId
+                                    }
+                                    selectedFallbackProviderId = candidate?.providerId
+                                    selectedFallbackModelId = candidate?.modelId.orEmpty()
+                                } else if (!checked) {
+                                    selectedFallbackProviderId = null
+                                    selectedFallbackModelId = ""
+                                }
+                            }
+                        )
+                        Text("Использовать резервную модель")
+                    }
+                    if (fallbackEnabled) {
+                        val candidates = providers.filter {
+                            it.enabled && it.providerId != selection.providerId
+                        }
+                        if (candidates.isEmpty()) {
+                            Text(
+                                "Добавь ещё одного включённого провайдера с поддержкой чата.",
+                                color = ProviderScreenMuted,
+                                fontSize = 11.sp
+                            )
+                        } else {
+                            Text("РЕЗЕРВНЫЙ ПРОВАЙДЕР", color = ProviderScreenMuted, fontSize = 10.sp)
+                            candidates.forEach { candidate ->
+                                TextButton(
+                                    onClick = {
+                                        selectedFallbackProviderId = candidate.providerId
+                                        selectedFallbackModelId = candidate.modelId
+                                    }
+                                ) {
+                                    Text(
+                                        (if (selectedFallbackProviderId == candidate.providerId) "● " else "") +
+                                            "${candidate.providerId} · ${candidate.modelId}",
+                                        color = if (selectedFallbackProviderId == candidate.providerId)
+                                            ProviderScreenText else ProviderScreenMuted
+                                    )
+                                }
+                            }
+                            OutlinedTextField(
+                                value = selectedFallbackModelId,
+                                onValueChange = { selectedFallbackModelId = it },
+                                label = { Text("Fallback Model ID") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                        }
+                    }
+                    Button(
+                        enabled = !isSaving && (
+                            !fallbackEnabled ||
+                                (selectedFallbackProviderId != null && selectedFallbackModelId.isNotBlank())
+                            ),
+                        onClick = {
+                            scope.launch {
+                                val primaryProvider = selection.providerId ?: return@launch
+                                val primaryModel = selection.modelId ?: return@launch
+                                val fallbackProvider = selectedFallbackProviderId.takeIf { fallbackEnabled }
+                                val fallbackModel = selectedFallbackModelId.trim().takeIf { fallbackEnabled }
+                                if (fallbackEnabled && (fallbackProvider == null || fallbackModel.isNullOrBlank())) {
+                                    error = "Выбери резервного провайдера и укажи его Model ID."
+                                    return@launch
+                                }
+                                if (fallbackProvider == primaryProvider) {
+                                    error = "Основная и резервная модели должны принадлежать разным провайдерам."
+                                    return@launch
+                                }
+                                isSaving = true
+                                error = null
+                                notice = null
+                                try {
+                                    val result = catalog.setConversationModel(
+                                        conversationId,
+                                        primaryProvider,
+                                        primaryModel,
+                                        fallbackProvider,
+                                        fallbackModel
+                                    )
+                                    selection = result
+                                    fallbackEnabled = result.fallbackProviderId != null
+                                    selectedFallbackProviderId = result.fallbackProviderId
+                                    selectedFallbackModelId = result.fallbackModelId.orEmpty()
+                                    notice = if (result.fallbackProviderId != null) {
+                                        "Резервная модель сохранена. Переключение будет явно отмечено в беседе."
+                                    } else {
+                                        "Резервная модель отключена."
+                                    }
+                                } catch (exception: CancellationException) {
+                                    throw exception
+                                } catch (exception: Exception) {
+                                    error = (exception as? GalaxyApiException)?.message
+                                        ?: "Не удалось сохранить резервную модель."
+                                } finally {
+                                    isSaving = false
+                                }
+                            }
+                        }
+                    ) {
+                        Text("СОХРАНИТЬ НАСТРОЙКУ РЕЗЕРВА")
                     }
                 }
             }

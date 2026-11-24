@@ -470,6 +470,32 @@ fun GalaxyHome() {
                     messages.removeAll { it.id == pendingMessageId }
                     messages.add(userMessage)
                     messages.add(assistantMessage)
+                    val fallbackNotice = lilaFallbackNoticeText(
+                        fallbackUsed = response.fallbackUsed,
+                        providerId = response.providerId,
+                        modelId = response.modelId,
+                        fallbackFromProviderId = response.fallbackFromProviderId,
+                        fallbackFromModelId = response.fallbackFromModelId,
+                        fallbackReason = response.fallbackReason
+                    )
+                    if (fallbackNotice != null) {
+                        val noticeMessage = ConversationMessage(
+                            id = UUID.randomUUID().toString(),
+                            characterId = storageCharacterId,
+                            role = MessageRole.SYSTEM,
+                            content = fallbackNotice,
+                            createdAtEpochMillis = createdAt + 2
+                        )
+                        messages.add(noticeMessage)
+                        try {
+                            app.conversations.append(noticeMessage)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            historySyncWarning =
+                                "Ответ Лилы сохранён, но уведомление о резервной модели будет восстановлено при синхронизации."
+                        }
+                    }
                     activeModelLabel = response.displayModel.takeIf {
                         response.providerId != null || response.modelId != null
                     }
@@ -831,6 +857,7 @@ private fun ConversationScreen(
                             entry.message != null -> {
                                 val message = entry.message
                                 val isUser = message.role == MessageRole.USER
+                                val isSystem = message.role == MessageRole.SYSTEM
                                 Row(
                                     Modifier.fillMaxWidth(),
                                     horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
@@ -838,7 +865,13 @@ private fun ConversationScreen(
                                     Column(
                                         Modifier.fillMaxWidth(0.86f)
                                             .clip(RoundedCornerShape(18.dp))
-                                            .background(if (isUser) Color(0xFF354779) else Color(0xFF202A46))
+                                            .background(
+                                                when {
+                                                    isUser -> Color(0xFF354779)
+                                                    isSystem -> Color(0xFF3A3426)
+                                                    else -> Color(0xFF202A46)
+                                                }
+                                            )
                                             .padding(horizontal = 14.dp, vertical = 11.dp)
                                     ) {
                                         val pendingDelivery = isUser &&
@@ -847,9 +880,13 @@ private fun ConversationScreen(
                                             when {
                                                 pendingDelivery -> "ТЫ · ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ"
                                                 isUser -> "ТЫ"
+                                                isSystem -> "МАРШРУТИЗАЦИЯ МОДЕЛИ"
                                                 else -> characterName.uppercase()
                                             },
-                                            color = if (pendingDelivery) Color(0xFFE9BD70) else Ice,
+                                            color = when {
+                                                pendingDelivery || isSystem -> Color(0xFFE9BD70)
+                                                else -> Ice
+                                            },
                                             fontSize = 9.sp,
                                             fontWeight = FontWeight.Bold,
                                             letterSpacing = 1.sp
@@ -876,8 +913,12 @@ private fun ConversationScreen(
                                             }
                                         }
                                         Spacer(Modifier.height(5.dp))
-                                        Text(message.content, color = Color.White, fontSize = 15.sp,
-                                            lineHeight = 21.sp)
+                                        Text(
+                                            message.content,
+                                            color = if (isSystem) Color(0xFFFFD98A) else Color.White,
+                                            fontSize = if (isSystem) 11.sp else 15.sp,
+                                            lineHeight = if (isSystem) 16.sp else 21.sp
+                                        )
                                     }
                                 }
                             }
@@ -1450,6 +1491,27 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
 }
 
 
+internal fun lilaFallbackNoticeText(
+    fallbackUsed: Boolean,
+    providerId: String?,
+    modelId: String?,
+    fallbackFromProviderId: String?,
+    fallbackFromModelId: String?,
+    fallbackReason: String?
+): String? {
+    if (!fallbackUsed) return null
+    val actualProvider = providerId ?: return null
+    val actualModel = modelId ?: return null
+    val primaryProvider = fallbackFromProviderId ?: return null
+    val primaryModel = fallbackFromModelId ?: return null
+    val reason = when (fallbackReason) {
+        "primary_connection_unavailable" -> "основной провайдер не принял соединение до отправки"
+        "primary_provider_unavailable" -> "основной провайдер был недоступен до отправки"
+        else -> return null
+    }
+    return "Резервная модель использована. Основная: $primaryProvider · $primaryModel — $reason. Ответ: $actualProvider · $actualModel."
+}
+
 internal fun mergeRemoteHistory(
     characterId: String,
     conversationId: String,
@@ -1457,7 +1519,8 @@ internal fun mergeRemoteHistory(
     remote: List<LilaHistoryMessage>
 ): List<ConversationMessage> {
     val unmatchedLocal = local.toMutableList()
-    val remoteMessages = remote.map { entry ->
+    val remoteMessages = mutableListOf<ConversationMessage>()
+    remote.forEach { entry ->
         val role = when (entry.role) {
             "user" -> MessageRole.USER
             "assistant" -> MessageRole.CHARACTER
@@ -1468,7 +1531,7 @@ internal fun mergeRemoteHistory(
                 it.role == role && it.content == entry.content
         }
         val previous = if (matchIndex >= 0) unmatchedLocal.removeAt(matchIndex) else null
-        ConversationMessage(
+        remoteMessages += ConversationMessage(
             id = previous?.id
                 ?.takeUnless { it.startsWith(PENDING_LILA_MESSAGE_PREFIX) }
                 ?: "lila-$conversationId-${entry.sequence.toString().padStart(20, '0')}",
@@ -1477,6 +1540,29 @@ internal fun mergeRemoteHistory(
             content = entry.content,
             createdAtEpochMillis = previous?.createdAtEpochMillis ?: entry.createdAtEpochMillis
         )
+
+        val noticeText = lilaFallbackNoticeText(
+            fallbackUsed = entry.fallbackUsed,
+            providerId = entry.providerId,
+            modelId = entry.modelId,
+            fallbackFromProviderId = entry.fallbackFromProviderId,
+            fallbackFromModelId = entry.fallbackFromModelId,
+            fallbackReason = entry.fallbackReason
+        )
+        if (noticeText != null) {
+            val noticeIndex = unmatchedLocal.indexOfFirst {
+                it.role == MessageRole.SYSTEM && it.content == noticeText
+            }
+            val previousNotice = if (noticeIndex >= 0) unmatchedLocal.removeAt(noticeIndex) else null
+            remoteMessages += ConversationMessage(
+                id = previousNotice?.id
+                    ?: "lila-$conversationId-fallback-${entry.sequence.toString().padStart(20, '0')}",
+                characterId = characterId,
+                role = MessageRole.SYSTEM,
+                content = noticeText,
+                createdAtEpochMillis = previousNotice?.createdAtEpochMillis ?: entry.createdAtEpochMillis
+            )
+        }
     }
     return (remoteMessages + unmatchedLocal)
         .sortedBy { it.createdAtEpochMillis }

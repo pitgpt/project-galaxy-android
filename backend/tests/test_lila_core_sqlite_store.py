@@ -485,6 +485,51 @@ def test_idempotent_turn_replays_encrypted_response_and_rejects_key_reuse(tmp_pa
     assert page[1].model_id == "model-a"
 
 
+def test_idempotent_fallback_disclosure_is_persisted_in_owner_scoped_history(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    store = SqliteLilaStore(path, KEY)
+    values = {
+        "principal_id": "owner-a",
+        "conversation_id": "fallback-chat",
+        "idempotency_key": "00000000-0000-4000-8000-000000000125",
+        "user_message": "hello through fallback",
+    }
+    assert run(store.reserve_idempotent_turn(**values)) is None
+    response = CoreTurnResponse(
+        conversation_id="fallback-chat",
+        text="Ответ резервной модели",
+        provider_id="backup-provider",
+        model_id="backup-model",
+        fallback_used=True,
+        fallback_from_provider_id="primary-provider",
+        fallback_from_model_id="primary-model",
+        fallback_reason="primary_connection_unavailable",
+    )
+    run(store.complete_idempotent_turn(
+        **values,
+        assistant_message=response.text,
+        response=response,
+    ))
+
+    reopened = SqliteLilaStore(path, KEY)
+    page, cursor = run(reopened.load_conversation_page(
+        principal_id="owner-a", conversation_id="fallback-chat", limit=20
+    ))
+    assert cursor is None
+    assistant = page[-1]
+    assert assistant.fallback_used is True
+    assert assistant.provider_id == "backup-provider"
+    assert assistant.model_id == "backup-model"
+    assert assistant.fallback_from_provider_id == "primary-provider"
+    assert assistant.fallback_from_model_id == "primary-model"
+    assert assistant.fallback_reason == "primary_connection_unavailable"
+    assert run(reopened.reserve_idempotent_turn(**values)) == response
+    other_owner, _ = run(reopened.load_conversation_page(
+        principal_id="owner-b", conversation_id="fallback-chat", limit=20
+    ))
+    assert other_owner == ()
+
+
 def test_provider_model_identity_is_persisted_with_assistant_history_after_restart(tmp_path):
     path = tmp_path / "lila.sqlite3"
     store = SqliteLilaStore(path, KEY)
