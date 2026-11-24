@@ -6,6 +6,7 @@ import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
 import com.pitgpt.galaxy.data.remote.LilaImageHistoryJob
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -73,14 +74,15 @@ class GalaxyHomeHistoryTest {
 
     @Test
     fun coreImageJobPollingStopsOnlyForTerminalStates() {
-        assertTrue(isActiveCoreImageJobState("prepared"))
-        assertTrue(isActiveCoreImageJobState("submission_unknown"))
-        assertTrue(isActiveCoreImageJobState("queued"))
-        assertTrue(isActiveCoreImageJobState("running"))
-        assertTrue(isActiveCoreImageJobState("result_pending"))
-        assertFalse(isActiveCoreImageJobState("completed"))
-        assertFalse(isActiveCoreImageJobState("failed"))
-        assertFalse(isActiveCoreImageJobState("cancelled"))
+        assertFalse(shouldPollCoreImageJobState("prepared"))
+        assertFalse(shouldPollCoreImageJobState("submission_unknown"))
+        assertTrue(shouldPollCoreImageJobState("submitting"))
+        assertTrue(shouldPollCoreImageJobState("queued"))
+        assertTrue(shouldPollCoreImageJobState("running"))
+        assertTrue(shouldPollCoreImageJobState("result_pending"))
+        assertFalse(shouldPollCoreImageJobState("completed"))
+        assertFalse(shouldPollCoreImageJobState("failed"))
+        assertFalse(shouldPollCoreImageJobState("cancelled"))
         assertEquals("ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ", coreImageJobStatusLabel("submission_unknown"))
     }
 
