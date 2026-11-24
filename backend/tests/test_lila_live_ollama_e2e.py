@@ -113,15 +113,25 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
     )
 
     captured_chat_requests: list[dict[str, object]] = []
+    captured_provider_routes: list[dict[str, object]] = []
 
     def recording_provider_http_client_factory(provider_type, timeout_seconds):
         client = create_provider_http_client(provider_type, timeout_seconds)
 
-        async def capture_chat_request(request):
+        async def capture_provider_request(request):
+            # Keep only non-secret routing metadata. Never retain prompt bodies,
+            # authorization headers, response payloads, or provider diagnostics.
+            captured_provider_routes.append(
+                {
+                    "method": request.method,
+                    "port": request.url.port,
+                    "path": request.url.path,
+                }
+            )
             if request.url.path == "/api/chat":
                 captured_chat_requests.append(json.loads(request.content))
 
-        client.event_hooks["request"].append(capture_chat_request)
+        client.event_hooks["request"].append(capture_provider_request)
         return client
 
     def new_app():
@@ -389,6 +399,174 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
             assert final_messages[2]["content"] == "What is the project codeword?"
             assert final_messages[-1]["provider_id"] == provider_id
             assert final_messages[-1]["model_id"] == model_id
+
+            # Prove the production DNS-pinned HTTPX transport classifies a real
+            # TCP refusal as a safe pre-send failure after the primary passed
+            # model discovery. The fallback is the already-running real Ollama.
+            probe_model_id = "tcp-probe-model"
+            primary_probe_provider_id = "tcp-primary-" + uuid.uuid4().hex[:12]
+            primary_probe_requests = []
+
+            class PrimaryProbeHandler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    if self.path != "/v1/models":
+                        self.send_error(404)
+                        return
+                    primary_probe_requests.append(("GET", self.path))
+                    payload = json.dumps(
+                        {
+                            "object": "list",
+                            "data": [{"id": probe_model_id, "object": "model"}],
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def do_POST(self):
+                    primary_probe_requests.append(("POST", self.path))
+                    self.send_error(500)
+
+                def log_message(self, format, *args):
+                    return
+
+            primary_probe_server = ThreadingHTTPServer(
+                ("127.0.0.1", 8080),
+                PrimaryProbeHandler,
+            )
+            primary_probe_thread = threading.Thread(
+                target=primary_probe_server.serve_forever,
+                daemon=True,
+            )
+            primary_probe_thread.start()
+            try:
+                primary_probe_payload = {
+                    "provider_id": primary_probe_provider_id,
+                    "provider_type": "local",
+                    "base_url": "http://127.0.0.1:8080/v1",
+                    "model_id": probe_model_id,
+                    "api_key": None,
+                    "timeout_seconds": 5,
+                    "capabilities": ["chat"],
+                    "enabled": True,
+                }
+                primary_created = client.post(
+                    "/v1/lila/providers",
+                    headers=auth_headers,
+                    json=primary_probe_payload,
+                )
+                assert primary_created.status_code == 200, primary_created.text
+
+                primary_probe = client.post(
+                    "/v1/lila/providers/" + primary_probe_provider_id + "/probe",
+                    headers=auth_headers,
+                )
+                assert primary_probe.status_code == 200, primary_probe.text
+                assert primary_probe.json()["connection_reachable"] is True
+                assert primary_probe.json()["configured_model_available"] is True
+                assert primary_probe_requests == [("GET", "/v1/models")]
+
+                selected_tcp_fallback = client.put(
+                    "/v1/lila/conversations/" + conversation_id + "/model",
+                    headers=auth_headers,
+                    json={
+                        "provider_id": primary_probe_provider_id,
+                        "model_id": probe_model_id,
+                        "fallback_provider_id": provider_id,
+                        "fallback_model_id": model_id,
+                    },
+                )
+                assert selected_tcp_fallback.status_code == 200, selected_tcp_fallback.text
+                assert selected_tcp_fallback.json()["selected"] is True
+                assert selected_tcp_fallback.json()["fallback_provider_id"] == provider_id
+                assert selected_tcp_fallback.json()["fallback_model_id"] == model_id
+            finally:
+                # Close the listener only after the successful discovery probe.
+                # The next generation must therefore fail during TCP connect,
+                # before any HTTP request can reach this primary provider.
+                primary_probe_server.shutdown()
+                primary_probe_server.server_close()
+                primary_probe_thread.join(timeout=2)
+
+            assert ("GET", 8080, "/v1/models") in [
+                (item["method"], item["port"], item["path"])
+                for item in captured_provider_routes
+            ]
+
+            tcp_fallback_message = (
+                "Проверь резервирование после отказа TCP-соединения основной модели."
+            )
+            tcp_fallback = client.post(
+                "/v1/lila/turns",
+                headers={
+                    **auth_headers,
+                    "Idempotency-Key": str(uuid.uuid4()),
+                },
+                json={
+                    "conversation_id": conversation_id,
+                    "message": tcp_fallback_message,
+                },
+            )
+            assert tcp_fallback.status_code == 200, tcp_fallback.text
+            tcp_fallback_result = tcp_fallback.json()
+            assert tcp_fallback_result["text"].strip()
+            assert tcp_fallback_result["provider_id"] == provider_id
+            assert tcp_fallback_result["model_id"] == model_id
+            assert tcp_fallback_result["fallback_used"] is True
+            assert tcp_fallback_result["fallback_from_provider_id"] == primary_probe_provider_id
+            assert tcp_fallback_result["fallback_from_model_id"] == probe_model_id
+            assert tcp_fallback_result["fallback_reason"] == "primary_connection_unavailable"
+
+            route_attempts = [
+                (item["method"], item["port"], item["path"])
+                for item in captured_provider_routes
+            ]
+            primary_generation_attempt = (
+                "POST",
+                8080,
+                "/v1/chat/completions",
+            )
+            fallback_generation_request = ("POST", 11434, "/api/chat")
+            assert primary_generation_attempt in route_attempts
+            assert fallback_generation_request in route_attempts
+            assert route_attempts.index(primary_generation_attempt) < max(
+                index
+                for index, route in enumerate(route_attempts)
+                if route == fallback_generation_request
+            )
+            assert primary_probe_requests == [("GET", "/v1/models")]
+
+            tcp_fallback_history = client.get(
+                "/v1/lila/conversations/" + conversation_id + "/messages",
+                headers=auth_headers,
+            )
+            assert tcp_fallback_history.status_code == 200, tcp_fallback_history.text
+            tcp_messages = tcp_fallback_history.json()["messages"]
+            assert tcp_messages[-2]["role"] == "user"
+            assert tcp_messages[-2]["content"] == tcp_fallback_message
+            assert tcp_messages[-1]["role"] == "assistant"
+            assert tcp_messages[-1]["provider_id"] == provider_id
+            assert tcp_messages[-1]["model_id"] == model_id
+            assert tcp_messages[-1]["fallback_used"] is True
+            assert tcp_messages[-1]["fallback_from_provider_id"] == primary_probe_provider_id
+            assert tcp_messages[-1]["fallback_from_model_id"] == probe_model_id
+            assert tcp_messages[-1]["fallback_reason"] == "primary_connection_unavailable"
+
+            assert len(captured_chat_requests) == 4
+            assert any(
+                item.get("role") == "user"
+                and item.get("content") == tcp_fallback_message
+                for item in captured_chat_requests[-1]["messages"]
+            )
+
+            deleted_primary = client.delete(
+                "/v1/lila/providers/" + primary_probe_provider_id,
+                headers=auth_headers,
+            )
+            assert deleted_primary.status_code == 200, deleted_primary.text
     finally:
         jwks_server.shutdown()
         jwks_server.server_close()
