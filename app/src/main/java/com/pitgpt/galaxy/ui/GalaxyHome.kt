@@ -803,11 +803,7 @@ private fun ConversationScreen(
                     }
                     generatedImages = app.generatedImages.listForConversation(conversationId)
                     imageHistoryReady = true
-                    imageHistorySyncWarning = if (sync.skippedAssets > 0) {
-                        "Часть результатов осталась в Lila Core: импорт ограничен 10 изображениями и 50 МиБ за синхронизацию."
-                    } else {
-                        null
-                    }
+                    imageHistorySyncWarning = coreImageHistorySyncWarning(sync)
                     imageHistoryLoadError = false
                     shouldPoll = coreHistory.any { shouldPollCoreImageJobState(it.state) }
                 } else {
