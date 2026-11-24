@@ -6,6 +6,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.GalaxyApplication
 import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
+import com.pitgpt.galaxy.ui.lilaFallbackNoticeText
+import com.pitgpt.galaxy.ui.mergeRemoteHistory
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -267,6 +269,156 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertTrue(restoredSelection.selected)
             assertEquals(openAiProviderId, restoredSelection.providerId)
             assertEquals(modelId, restoredSelection.modelId)
+
+            // Configure an explicit fallback while both independently running
+            // providers are enabled and their models have already been discovered.
+            val fallbackSelection = catalogStep("select-explicit-fallback") {
+                catalog.setConversationModel(
+                    conversationId = conversationId,
+                    providerId = providerId,
+                    modelId = modelId,
+                    fallbackProviderId = openAiProviderId,
+                    fallbackModelId = modelId
+                )
+            }
+            assertTrue(fallbackSelection.selected)
+            assertEquals(providerId, fallbackSelection.providerId)
+            assertEquals(openAiProviderId, fallbackSelection.fallbackProviderId)
+            assertEquals(modelId, fallbackSelection.fallbackModelId)
+
+            // Disable only the test-owned primary provider after the selection has
+            // been validated. Core must use the explicitly selected fallback and
+            // must not silently choose any third provider.
+            val disabledPrimary = catalogStep("disable-primary-provider") {
+                catalog.updateProvider(
+                    providerId = providerId,
+                    providerType = "local",
+                    baseUrl = providerBaseUrl,
+                    modelId = modelId,
+                    apiKey = null,
+                    clearApiKey = false,
+                    timeoutSeconds = 120.0,
+                    enabled = false
+                )
+            }
+            assertTrue(!disabledPrimary.enabled)
+
+            val fallbackMessage = "Продолжим тот же разговор через явно выбранную резервную модель."
+            val fallbackIdempotencyKey = UUID.randomUUID().toString()
+            val fallbackCreatedAt = System.currentTimeMillis()
+            val fallbackPendingId = "lila-pending-$fallbackIdempotencyKey"
+            app.conversations.append(
+                ConversationMessage(
+                    id = fallbackPendingId,
+                    characterId = storageCharacterId,
+                    role = MessageRole.USER,
+                    content = fallbackMessage,
+                    createdAtEpochMillis = fallbackCreatedAt
+                )
+            )
+            val fallbackResult = turnProvider.sendTurn(
+                conversationId = conversationId,
+                message = fallbackMessage,
+                idempotencyKey = fallbackIdempotencyKey
+            )
+            assertEquals(conversationId, fallbackResult.conversationId)
+            assertEquals(openAiProviderId, fallbackResult.providerId)
+            assertEquals(modelId, fallbackResult.modelId)
+            assertTrue(fallbackResult.fallbackUsed)
+            assertEquals(providerId, fallbackResult.fallbackFromProviderId)
+            assertEquals(modelId, fallbackResult.fallbackFromModelId)
+            assertEquals("primary_provider_unavailable", fallbackResult.fallbackReason)
+            assertTrue(fallbackResult.text.isNotBlank())
+
+            val fallbackRemoteHistory = turnProvider.loadAllHistory(conversationId)
+            assertEquals(6, fallbackRemoteHistory.size)
+            assertEquals(
+                listOf("user", "assistant", "user", "assistant", "user", "assistant"),
+                fallbackRemoteHistory.map { it.role }
+            )
+            val fallbackHistoryAssistant = fallbackRemoteHistory.last()
+            assertEquals(fallbackMessage, fallbackRemoteHistory[4].content)
+            assertEquals(fallbackResult.text, fallbackHistoryAssistant.content)
+            assertEquals(openAiProviderId, fallbackHistoryAssistant.providerId)
+            assertEquals(modelId, fallbackHistoryAssistant.modelId)
+            assertTrue(fallbackHistoryAssistant.fallbackUsed)
+            assertEquals(providerId, fallbackHistoryAssistant.fallbackFromProviderId)
+            assertEquals(modelId, fallbackHistoryAssistant.fallbackFromModelId)
+            assertEquals("primary_provider_unavailable", fallbackHistoryAssistant.fallbackReason)
+
+            app.conversations.commitPendingTurn(
+                pendingMessageId = fallbackPendingId,
+                userMessage = ConversationMessage(
+                    id = "lila-$conversationId-user-$fallbackIdempotencyKey",
+                    characterId = storageCharacterId,
+                    role = MessageRole.USER,
+                    content = fallbackMessage,
+                    createdAtEpochMillis = fallbackCreatedAt
+                ),
+                assistantMessage = ConversationMessage(
+                    id = "lila-$conversationId-assistant-$fallbackIdempotencyKey",
+                    characterId = storageCharacterId,
+                    role = MessageRole.CHARACTER,
+                    content = fallbackResult.text,
+                    createdAtEpochMillis = fallbackCreatedAt + 1
+                )
+            )
+
+            val noticeText = lilaFallbackNoticeText(
+                fallbackUsed = fallbackResult.fallbackUsed,
+                providerId = fallbackResult.providerId,
+                modelId = fallbackResult.modelId,
+                fallbackFromProviderId = fallbackResult.fallbackFromProviderId,
+                fallbackFromModelId = fallbackResult.fallbackFromModelId,
+                fallbackReason = fallbackResult.fallbackReason
+            )
+            assertNotNull(noticeText)
+            assertTrue(noticeText!!.contains("основной провайдер был недоступен до отправки"))
+            assertTrue(noticeText.contains("$openAiProviderId · $modelId"))
+
+            // Exercise the same remote-history merge used when Galaxy reopens a
+            // conversation after process restart. The durable Core disclosure must
+            // recreate exactly one visible system notice without local cache state.
+            val restoredAfterRestart = mergeRemoteHistory(
+                characterId = storageCharacterId,
+                conversationId = conversationId,
+                local = emptyList(),
+                remote = fallbackRemoteHistory
+            )
+            assertEquals(7, restoredAfterRestart.size)
+            assertEquals(
+                listOf(
+                    MessageRole.USER,
+                    MessageRole.CHARACTER,
+                    MessageRole.USER,
+                    MessageRole.CHARACTER,
+                    MessageRole.USER,
+                    MessageRole.CHARACTER,
+                    MessageRole.SYSTEM
+                ),
+                restoredAfterRestart.map { it.role }
+            )
+            assertEquals(noticeText, restoredAfterRestart.last().content)
+            app.conversations.replaceForCharacter(storageCharacterId, restoredAfterRestart)
+            val persistedRestoredHistory = app.conversations.getForCharacter(storageCharacterId)
+            assertEquals(restoredAfterRestart, persistedRestoredHistory)
+
+            val fallbackReplay = turnProvider.sendTurn(
+                conversationId = conversationId,
+                message = fallbackMessage,
+                idempotencyKey = fallbackIdempotencyKey
+            )
+            assertEquals(fallbackResult, fallbackReplay)
+            assertEquals(6, turnProvider.loadAllHistory(conversationId).size)
+
+            val restoredFallbackSelection = catalogStep("restore-fallback-selection") {
+                catalog.getConversationModel(conversationId)
+            }
+            assertTrue(restoredFallbackSelection.selected)
+            assertEquals(providerId, restoredFallbackSelection.providerId)
+            assertEquals(modelId, restoredFallbackSelection.modelId)
+            assertEquals(openAiProviderId, restoredFallbackSelection.fallbackProviderId)
+            assertEquals(modelId, restoredFallbackSelection.fallbackModelId)
 
             val integrity = app.database.openHelper.writableDatabase
                 .query("PRAGMA integrity_check").use { cursor ->
