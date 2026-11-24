@@ -537,7 +537,14 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
                 for index, route in enumerate(route_attempts)
                 if route == fallback_generation_request
             )
-            assert primary_probe_requests == [("GET", "/v1/models")]
+            # Selection validation may repeat the non-generative model probe.
+            # Every request that reached the listener must remain a GET /models;
+            # the generation attempt happens only after the listener is closed.
+            assert primary_probe_requests
+            assert all(
+                method == "GET" and path == "/v1/models"
+                for method, path in primary_probe_requests
+            )
 
             tcp_fallback_history = client.get(
                 "/v1/lila/conversations/" + conversation_id + "/messages",
