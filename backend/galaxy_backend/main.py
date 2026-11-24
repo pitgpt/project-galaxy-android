@@ -119,7 +119,7 @@ async def _read_bounded_json_response(response: httpx.Response, max_bytes: int) 
             raw.extend(chunk)
         return json.loads(raw)
     finally:
-        raw[:] = b"\\x00" * len(raw)
+        raw[:] = b"\x00" * len(raw)
 
 
 SERVER_INSTRUCTIONS = (
