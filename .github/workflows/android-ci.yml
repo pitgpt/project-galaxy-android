@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, feature/galaxy-lila-core-chat-client ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, feature/lila-core-openai-compatible-composition ]
 
 jobs:
   test:
