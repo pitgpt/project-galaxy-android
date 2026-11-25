@@ -11,7 +11,8 @@ import com.pitgpt.galaxy.core.model.RealtimeSessionCredential
 interface RealtimeSessionProvider {
     suspend fun createSession(
         characterId: String,
-        voiceId: String?
+        voiceId: String?,
+        personaInstructions: String? = null
     ): RealtimeSessionCredential
 
     /** Renews the authenticated account's lease for this Galaxy-generated session ID. */

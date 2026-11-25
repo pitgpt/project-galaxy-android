@@ -12,14 +12,14 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 export OPENAI_API_KEY="..."
-export AUTH_JWKS_URL="https://YOUR_AUTH_ISSUER/.well-known/jwks.json"
-export AUTH_ISSUER="https://YOUR_AUTH_ISSUER/"
-export AUTH_AUDIENCE="galaxy-android"
+export AUTH_JWKS_URL="https://YOUR_PROJECT_REF.supabase.co/auth/v1/.well-known/jwks.json"
+export AUTH_ISSUER="https://YOUR_PROJECT_REF.supabase.co/auth/v1"
+export AUTH_AUDIENCE="authenticated"
 export SAFETY_IDENTIFIER_HMAC_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 uvicorn galaxy_backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-The auth issuer, audience and JWKS URL must belong to the authentication provider selected for Galaxy. The service deliberately fails closed when those values or secrets are missing. Do not use a fake token verifier in production.
+The Android app currently uses Supabase Auth. For a Supabase project, set `AUTH_JWKS_URL=https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json`, `AUTH_ISSUER=https://<project-ref>.supabase.co/auth/v1`, and `AUTH_AUDIENCE=authenticated`. Use an asymmetric ES256 or RS256 signing key. Set `GALAXY_ALLOWED_CHARACTER_IDS=*` to permit authenticated users to use their locally created character profiles; otherwise list the allowed character IDs explicitly. Persona instructions are user-provided and capped at 8,000 characters. The service deliberately fails closed when required values or secrets are missing. Do not use a fake token verifier in production.
 
 ## API
 
@@ -40,7 +40,7 @@ Request body:
 
 The backend verifies the JWT signature (RS256 or ES256), issuer, audience, expiry and subject. Legacy Galaxy profile voice IDs are mapped server-side to supported provider voices (`voice.feminine_warm` → `coral`, `voice.feminine_calm` → `shimmer`, `voice.neutral` → `alloy`); new profiles should store provider voice IDs directly. It then applies per-user minute and daily credential-issuance quotas, validates the character against `GALAXY_ALLOWED_CHARACTER_IDS` and the voice against `GALAXY_ALLOWED_VOICES`, and creates a short-lived client secret using the server-only OpenAI API key.
 
-The client cannot choose the model, instructions, tools, or arbitrary provider session fields. The character ID is currently an opaque application identifier; character-to-instruction policy is server-owned and must be added before custom character instructions are supported.
+The client cannot choose the model, tools, or arbitrary provider session fields. It may send a bounded character persona (up to 8,000 characters); the backend combines it with fixed server instructions and explicitly treats it as user-provided style guidance that cannot override safety, privacy, or system requirements.
 
 Response contains only `client_secret`, `expires_at_epoch_millis`, and `session_id`. Treat the client secret as sensitive and memory-only.
 
@@ -50,7 +50,7 @@ Response contains only `client_secret`, `expires_at_epoch_millis`, and `session_
 - `AUTH_JWKS_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`: selected identity provider's JWT validation settings.
 - `SAFETY_IDENTIFIER_HMAC_KEY`: independent random secret used to derive privacy-preserving OpenAI safety identifiers.
 - `GALAXY_ALLOWED_VOICES`: comma-separated OpenAI voice allow-list (for example `alloy,coral,shimmer`).
-- `GALAXY_ALLOWED_CHARACTER_IDS`: comma-separated character ID allow-list; defaults to `galaxy.default`.
+- `GALAXY_ALLOWED_CHARACTER_IDS`: comma-separated character ID allow-list; `*` permits authenticated users to use locally created character profiles. The example environment uses `*`.
 - `REALTIME_MODEL`: server-selected model; defaults to `gpt-realtime`.
 - `REALTIME_CLIENT_SECRET_TTL_SECONDS`: 10–7200 seconds; defaults to 600.
 - `REALTIME_REQUESTS_PER_MINUTE`: per-user fixed-window limit; defaults to 5 per minute.
