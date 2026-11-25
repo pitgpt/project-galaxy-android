@@ -943,9 +943,9 @@ def test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart
         ).fetchall()
     assert job_ciphertexts
     assert asset_ciphertexts
-        png_signature not in bytes(row[0])
+    assert all(prompt.encode("utf-8") not in bytes(row[0]) for row in job_ciphertexts)
     assert all(
-        b"\\x89PNG\\r\\n\\x1a\\n" not in bytes(row[0])
+        png_signature not in bytes(row[0])
         for row in asset_ciphertexts
     )
 
