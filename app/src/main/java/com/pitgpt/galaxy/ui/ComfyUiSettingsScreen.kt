@@ -32,6 +32,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pitgpt.galaxy.GalaxyApplication
+import org.json.JSONObject
 import com.pitgpt.galaxy.data.remote.LilaComfyUiProviderConfiguration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +58,7 @@ fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
     var configured by remember { mutableStateOf(false) }
     var workflowId by remember { mutableStateOf("") }
     var workflowJson by remember { mutableStateOf("") }
+    var checkpointName by remember { mutableStateOf("") }
     var positiveNodeId by remember { mutableStateOf("") }
     var positiveInputName by remember { mutableStateOf("text") }
     var negativeNodeId by remember { mutableStateOf("") }
@@ -84,6 +86,16 @@ fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
         val workflow = configuration.workflow
         workflowId = workflow?.id.orEmpty()
         workflowJson = workflow?.workflowJson.orEmpty()
+        checkpointName = if (workflow?.id == SDXL_WORKFLOW_ID) {
+            runCatching {
+                JSONObject(workflow.workflowJson)
+                    .getJSONObject("4")
+                    .getJSONObject("inputs")
+                    .getString("ckpt_name")
+            }.getOrDefault("")
+        } else {
+            ""
+        }
         positiveNodeId = workflow?.positivePrompt?.nodeId.orEmpty()
         positiveInputName = workflow?.positivePrompt?.inputName ?: "text"
         negativeNodeId = workflow?.negativePrompt?.nodeId.orEmpty()
@@ -220,7 +232,45 @@ fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
                     )
                 }
 
-                Text("ШАБЛОН WORKFLOW", color = ComfyAccent, fontSize = 13.sp)
+                Text("БЫСТРЫЙ ШАБЛОН SDXL", color = ComfyAccent, fontSize = 13.sp)
+                Text(
+                    "Для SDXL checkpoint из ComfyUI/models/checkpoints. Шаблон использует 1024×1024, 30 шагов, DPM++ 2M / Karras. Имя файла должно совпадать с ComfyUI.",
+                    color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
+                )
+                OutlinedTextField(
+                    value = checkpointName,
+                    onValueChange = { checkpointName = it; configured = false; status = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("SDXL checkpoint filename") }
+                )
+                Button(
+                    enabled = !saving && !checking && !importingWorkflow && baseUrl.isNotBlank() && checkpointName.isNotBlank(),
+                    onClick = {
+                        try {
+                            val template = buildSdxlWorkflowTemplate(checkpointName)
+                            workflowId = template.id
+                            workflowJson = template.workflowJson
+                            positiveNodeId = template.positivePrompt.nodeId
+                            positiveInputName = template.positivePrompt.inputName
+                            negativeNodeId = template.negativePrompt?.nodeId.orEmpty()
+                            negativeInputName = template.negativePrompt?.inputName ?: "text"
+                            widthNodeId = template.width?.nodeId.orEmpty()
+                            widthInputName = template.width?.inputName ?: "width"
+                            heightNodeId = template.height?.nodeId.orEmpty()
+                            heightInputName = template.height?.inputName ?: "height"
+                            seedNodeId = template.seed?.nodeId.orEmpty()
+                            seedInputName = template.seed?.inputName ?: "seed"
+                            configured = false
+                            status = "SDXL workflow создан. Сохрани его в Lila Core и проверь ComfyUI."
+                        } catch (_: Exception) {
+                            status = "Некорректное имя checkpoint. Укажи относительный путь без .. и обратных слешей."
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("СОЗДАТЬ SDXL WORKFLOW") }
+
+                Text("ИЛИ ИМПОРТИРОВАТЬ СВОЙ WORKFLOW", color = ComfyAccent, fontSize = 13.sp)
                 Text(
                     "Импортируй API-format JSON из ComfyUI. Galaxy не угадывает узлы: явно укажи ID узла и имя входа для каждого поля.",
                     color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
