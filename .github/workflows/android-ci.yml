@@ -361,7 +361,7 @@ jobs:
         env:
           LILA_LIVE_COMFYUI_URL: http://127.0.0.1:8188
           REDIS_URL: redis://127.0.0.1:6379/14
-          PYTHONPATH: \${{ github.workspace }}/backend
+          PYTHONPATH: ${{ github.workspace }}/backend
         run: |
           "$RUNNER_TEMP/backend-venv/bin/python" -m pytest -q \
             backend/tests/test_lila_core_images.py::test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart -vv
@@ -370,7 +370,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lila-live-comfyui-runtime-log
-          path: \${{ runner.temp }}/comfyui.log
+          path: ${{ runner.temp }}/comfyui.log
           if-no-files-found: ignore
           retention-days: 3
       - name: Stop ComfyUI and Redis
