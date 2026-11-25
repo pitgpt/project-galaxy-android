@@ -271,8 +271,102 @@ jobs:
           docker rm -f lila-live-ollama-openai lila-live-ollama lila-live-redis 2>/dev/null || true
           docker volume rm lila-live-ollama-models 2>/dev/null || true
 
+  live-comfyui-e2e:
+    name: Live ComfyUI Core image lifecycle E2E (CPU smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Create isolated Python environments
+        run: |
+          python -m venv "$RUNNER_TEMP/comfyui-venv"
+          python -m venv "$RUNNER_TEMP/backend-venv"
+      - name: Install pinned CPU PyTorch for ComfyUI
+        run: |
+          "$RUNNER_TEMP/comfyui-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/comfyui-venv/bin/python" -m pip install \
+            torch==2.7.1+cpu torchvision==0.22.1+cpu torchaudio==2.7.1+cpu \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Check out pinned official ComfyUI v0.46.0
+        run: |
+          git clone --depth 1 --branch v0.46.0 https://github.com/Comfy-Org/ComfyUI.git "$RUNNER_TEMP/ComfyUI"
+          test "$(git -C "$RUNNER_TEMP/ComfyUI" rev-parse HEAD)" = "a277b5bf213e8a44fa34817b7770b54f86ef4cea"
+      - name: Install pinned ComfyUI runtime dependencies
+        run: |
+          cd "$RUNNER_TEMP/ComfyUI"
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          excluded = {"torch", "torchvision", "torchaudio"}
+          kept = []
+          for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                  kept.append(line)
+                  continue
+              package = re.split(r"[<=>~!;\\[]", stripped, maxsplit=1)[0].strip().lower()
+              if package not in excluded:
+                  kept.append(line)
+          destination = Path(os.environ["RUNNER_TEMP"]) / "comfyui-requirements-ci.txt"
+          destination.write_text("\\n".join(kept) + "\\n", encoding="utf-8")
+          PY
+          "$RUNNER_TEMP/comfyui-venv/bin/python" -m pip install -r "$RUNNER_TEMP/comfyui-requirements-ci.txt"
+      - name: Install backend test dependencies
+        run: |
+          "$RUNNER_TEMP/backend-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/backend-venv/bin/python" -m pip install -r backend/requirements.txt
+      - name: Start real ComfyUI CPU API server
+        run: |
+          "$RUNNER_TEMP/comfyui-venv/bin/python" "$RUNNER_TEMP/ComfyUI/main.py" \
+            --cpu --listen 127.0.0.1 --port 8188 --disable-auto-launch \
+            > "$RUNNER_TEMP/comfyui.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/comfyui.pid"
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/comfyui.pid")" 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            tail -n 160 "$RUNNER_TEMP/comfyui.log"
+            exit 1
+          fi
+      - name: Run authenticated Core image lifecycle and restart E2E
+        env:
+          LILA_LIVE_COMFYUI_URL: http://127.0.0.1:8188
+          PYTHONPATH: ${{ github.workspace }}/backend
+        run: |
+          "$RUNNER_TEMP/backend-venv/bin/python" -m pytest -q \
+            backend/tests/test_lila_core_images.py::test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart -vv
+      - name: Upload ComfyUI runtime log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lila-live-comfyui-runtime-log
+          path: ${{ runner.temp }}/comfyui.log
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: Stop ComfyUI
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/comfyui.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/comfyui.pid")" 2>/dev/null || true
+          fi
+
   build:
-    needs: [test, backend-test, instrumented-test, windows-e2e-script, live-ollama-e2e]
+    needs: [test, backend-test, instrumented-test, windows-e2e-script, live-ollama-e2e, live-comfyui-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
