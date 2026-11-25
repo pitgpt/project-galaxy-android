@@ -311,11 +311,12 @@ jobs:
               if not stripped or stripped.startswith("#") or stripped.startswith("-"):
                   kept.append(line)
                   continue
-              package = re.split(r"[<=>~!;\\[]", stripped, maxsplit=1)[0].strip().lower()
+              match = re.match(r"^([A-Za-z0-9_.-]+)", stripped)
+              package = match.group(1).lower() if match else ""
               if package not in excluded:
                   kept.append(line)
           destination = Path(os.environ["RUNNER_TEMP"]) / "comfyui-requirements-ci.txt"
-          destination.write_text("\\n".join(kept) + "\\n", encoding="utf-8")
+          destination.write_text(chr(10).join(kept) + chr(10), encoding="utf-8")
           PY
           "$RUNNER_TEMP/comfyui-venv/bin/python" -m pip install -r "$RUNNER_TEMP/comfyui-requirements-ci.txt"
       - name: Install backend test dependencies

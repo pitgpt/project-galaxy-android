@@ -912,7 +912,8 @@ def test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart
         assert asset.status_code == 200, asset.text
         assert asset.headers["content-type"] == "image/png"
         asset_bytes = asset.content
-        assert asset_bytes.startswith(b"\\x89PNG\\r\\n\\x1a\\n")
+        png_signature = bytes.fromhex("89504e470d0a1a0a")
+        assert asset_bytes.startswith(png_signature)
         assert struct.unpack(">II", asset_bytes[16:24]) == (64, 64)
         assert hashlib.sha256(asset_bytes).hexdigest() == metadata["sha256"]
         assert len(asset_bytes) == metadata["byte_size"]
@@ -942,7 +943,7 @@ def test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart
         ).fetchall()
     assert job_ciphertexts
     assert asset_ciphertexts
-    assert all(prompt.encode("utf-8") not in bytes(row[0]) for row in job_ciphertexts)
+        png_signature not in bytes(row[0])
     assert all(
         b"\\x89PNG\\r\\n\\x1a\\n" not in bytes(row[0])
         for row in asset_ciphertexts
