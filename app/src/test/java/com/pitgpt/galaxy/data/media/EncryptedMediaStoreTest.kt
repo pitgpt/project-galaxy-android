@@ -3,6 +3,8 @@ package com.pitgpt.galaxy.data.media
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileFilter
+import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
@@ -10,6 +12,7 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.Assert.assertThrows
@@ -41,6 +44,42 @@ class EncryptedMediaStoreTest {
             java.security.MessageDigest.getInstance("SHA-256").digest(plaintext)
                 .joinToString("") { "%02x".format(it) },
             metadata.sha256
+        )
+    }
+
+    @Test
+    fun failedAtomicPromotionRemovesCiphertextTemporaryFile() {
+        val plaintext = "private-image-payload-that-must-never-reach-a-temporary-file".toByteArray()
+        var temporaryFile: File? = null
+        var temporaryBytes: ByteArray? = null
+        val promotionFailure = IOException("simulated atomic promotion failure")
+        val failingStore = EncryptedMediaStore(directory, keyProvider, 1024) { source, destination ->
+            temporaryFile = source
+            temporaryBytes = source.readBytes()
+            assertTrue("Ciphertext must be fully written before promotion", source.isFile)
+            assertTrue("The temporary file must use the encrypted-media prefix", source.name.startsWith("galaxy-media-"))
+            assertFalse("The final asset must not exist before promotion", destination.exists())
+            throw promotionFailure
+        }
+
+        val actualFailure = assertThrows(IOException::class.java) {
+            failingStore.save("asset_13", "image/png", plaintext)
+        }
+
+        assertSame("The original promotion failure must propagate", promotionFailure, actualFailure)
+        val writtenBytes = requireNotNull(temporaryBytes)
+        assertTrue("The temporary payload must include the encrypted header and GCM tag", writtenBytes.size > plaintext.size)
+        assertFalse(
+            "The temporary file must contain ciphertext, never the plaintext image bytes",
+            String(writtenBytes, Charsets.ISO_8859_1).contains(
+                String(plaintext, Charsets.ISO_8859_1)
+            )
+        )
+        assertFalse("The failed temporary file must be removed", requireNotNull(temporaryFile).exists())
+        assertFalse("A failed promotion must not leave a committed asset", File(directory, "asset_13.gcm").exists())
+        assertTrue(
+            "No temporary encrypted-media files may remain after a failed promotion",
+            directory.listFiles().orEmpty().none { it.name.endsWith(".tmp") }
         )
     }
 
@@ -112,6 +151,129 @@ class EncryptedMediaStoreTest {
             "The reader may consume only the configured limit plus one detection byte",
             1,
             input.available()
+        )
+    }
+
+    @Test
+    fun zeroizingAccumulatorWipesReplacedBackingBufferWhenGrowing() {
+        val accumulator = ZeroizingByteArrayOutputStream(initialSize = 2)
+        val originalBuffer = accumulator.backingBufferForTesting
+        val expected = byteArrayOf(1, 2, 3, 4, 5)
+
+        accumulator.write(expected, 0, expected.size)
+
+        assertTrue("The previous backing buffer must be wiped during growth", originalBuffer.all { it == 0.toByte() })
+        assertArrayEquals(expected, accumulator.copyAndWipe())
+        assertTrue("The replacement backing buffer must also be wiped", accumulator.isWiped)
+    }
+
+    @Test
+    fun boundedReadZeroizesAccumulatorWhenLimitIsInvalidBeforeReadingInput() {
+        val sensitive = "preexisting-secret-buffer".toByteArray()
+        val accumulator = ZeroizingByteArrayOutputStream(sensitive.size)
+        accumulator.write(sensitive)
+        val originalBackingBuffer = accumulator.backingBufferForTesting
+        var inputRead = false
+        val input = object : InputStream() {
+            override fun read(): Int {
+                inputRead = true
+                return -1
+            }
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            EncryptedMediaStore.readBounded(input, -1, accumulator)
+        }
+
+        assertFalse("Input must not be read when the limit is invalid", inputRead)
+        assertTrue("The pre-existing accumulator contents must be wiped", accumulator.isWiped)
+        assertTrue(
+            "The original backing array must be wiped",
+            originalBackingBuffer.all { it == 0.toByte() }
+        )
+    }
+
+    @Test
+    fun boundedReadZeroizesScratchAndAccumulatorBuffersAfterSuccess() {
+        val expected = "encrypted-media-buffer".toByteArray()
+        var scratchBuffer: ByteArray? = null
+        var consumed = false
+        val input = object : InputStream() {
+            override fun read(): Int = -1
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                scratchBuffer = buffer
+                if (consumed) return -1
+                consumed = true
+                expected.copyInto(buffer, offset)
+                return expected.size
+            }
+        }
+        val accumulator = ZeroizingByteArrayOutputStream(expected.size)
+
+        val result = EncryptedMediaStore.readBounded(input, expected.size, accumulator)
+
+        assertArrayEquals(expected, result)
+        assertTrue("The accumulator backing array must be zeroized", accumulator.isWiped)
+        assertTrue(
+            "The reusable stream scratch buffer must be zeroized",
+            requireNotNull(scratchBuffer).all { it == 0.toByte() }
+        )
+    }
+
+    @Test
+    fun boundedReadZeroizesScratchAndAccumulatorBuffersAfterOversizeFailure() {
+        val maximumBytes = 32
+        var scratchBuffer: ByteArray? = null
+        val input = object : InputStream() {
+            override fun read(): Int = -1
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                scratchBuffer = buffer
+                repeat(maximumBytes + 1) { index ->
+                    buffer[offset + index] = 0x5a
+                }
+                return maximumBytes + 1
+            }
+        }
+        val accumulator = ZeroizingByteArrayOutputStream(maximumBytes)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            EncryptedMediaStore.readBounded(input, maximumBytes, accumulator)
+        }
+
+        assertTrue("The accumulator must be zeroized after rejection", accumulator.isWiped)
+        assertTrue(
+            "The scratch buffer must be zeroized after rejection",
+            requireNotNull(scratchBuffer).all { it == 0.toByte() }
+        )
+    }
+
+    @Test
+    fun decryptWipesEncodedCiphertextAndTemporaryCryptoBuffersAfterSuccess() {
+        val plaintext = "private decrypted media".toByteArray()
+        store.save("asset_14", "image/png", plaintext)
+        val encoded = File(directory, "asset_14.gcm").readBytes()
+
+        val decrypted = store.decryptEncoded("asset_14", "image/png", encoded)
+
+        assertArrayEquals(plaintext, decrypted)
+        assertTrue("The owned encoded ciphertext buffer must be zeroized", encoded.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun decryptWipesEncodedCiphertextAfterAuthenticationFailure() {
+        store.save("asset_15", "image/png", byteArrayOf(1, 3, 5, 7))
+        val encoded = File(directory, "asset_15.gcm").readBytes()
+        encoded[encoded.lastIndex] = (encoded.last().toInt() xor 0x01).toByte()
+
+        assertThrows(Exception::class.java) {
+            store.decryptEncoded("asset_15", "image/png", encoded)
+        }
+
+        assertTrue(
+            "The owned encoded ciphertext buffer must be zeroized on failure",
+            encoded.all { it == 0.toByte() }
         )
     }
 
