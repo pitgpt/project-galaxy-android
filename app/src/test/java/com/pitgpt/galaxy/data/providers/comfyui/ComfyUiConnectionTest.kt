@@ -24,6 +24,19 @@ class ComfyUiConnectionTest {
     }
 
     @Test
+    fun rejectsDnsHostnamesForCleartextEvenWhenTheyUseLocalSuffixes() {
+        listOf(
+            "http://comfy.local:8188",
+            "http://printer.localhost:8188",
+            "http://render-node.local:8188"
+        ).forEach { url ->
+            assertThrows(IllegalArgumentException::class.java) {
+                ComfyUiConnectionConfig(url)
+            }
+        }
+    }
+
+    @Test
     fun acceptsPublicHostOnlyWhenUsingHttps() {
         assertEquals("https://comfy.example.com", ComfyUiConnectionConfig("https://comfy.example.com/").normalizedBaseUrl)
         assertThrows(IllegalArgumentException::class.java) {
