@@ -17,7 +17,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ZeroizingSqlCipherOpenHelperFactoryInstrumentedTest {
     @Test
-    fun passphraseBufferIsZeroedAfterOpenAndFreshBufferSupportsReopen() {
+    fun passphraseBufferRemainsValidForOpenConnectionPoolAndFreshBufferSupportsReopen() {
         System.loadLibrary("sqlcipher")
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val databaseName = "sqlcipher-passphrase-" + UUID.randomUUID() + ".db"
@@ -53,8 +53,8 @@ class ZeroizingSqlCipherOpenHelperFactoryInstrumentedTest {
             val firstDatabase = helper.writableDatabase
             assertEquals(1, issuedPassphrases.size)
             assertTrue(
-                "The passphrase buffer must be zeroed as soon as SQLCipher opens the database",
-                issuedPassphrases[0].all { it == 0.toByte() }
+                "The passphrase must remain valid while SQLCipher's connection pool is open",
+                issuedPassphrases[0].any { it != 0.toByte() }
             )
 
             firstDatabase.execSQL(
@@ -69,6 +69,10 @@ class ZeroizingSqlCipherOpenHelperFactoryInstrumentedTest {
 
             helper.close()
             assertFalse("Closing the helper must close its database", firstDatabase.isOpen)
+            assertTrue(
+                "Closing the helper must zero the passphrase after the connection pool closes",
+                issuedPassphrases[0].all { it == 0.toByte() }
+            )
 
             val reopenedDatabase = helper.writableDatabase
             assertEquals(
@@ -77,8 +81,8 @@ class ZeroizingSqlCipherOpenHelperFactoryInstrumentedTest {
                 issuedPassphrases.size
             )
             assertTrue(
-                "The fresh passphrase buffer must also be zeroed after opening",
-                issuedPassphrases[1].all { it == 0.toByte() }
+                "The fresh passphrase must remain valid while the reopened pool is open",
+                issuedPassphrases[1].any { it != 0.toByte() }
             )
             reopenedDatabase.query(
                 "SELECT value FROM passphrase_lifecycle"
@@ -87,6 +91,12 @@ class ZeroizingSqlCipherOpenHelperFactoryInstrumentedTest {
                 assertEquals("survives-reopen", cursor.getString(0))
                 assertFalse(cursor.moveToNext())
             }
+
+            helper.close()
+            assertTrue(
+                "Closing the reopened helper must zero the fresh passphrase",
+                issuedPassphrases[1].all { it == 0.toByte() }
+            )
         } finally {
             try {
                 helper.close()

@@ -7,11 +7,12 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 /**
  * Supplies a disposable passphrase buffer to SQLCipher.
  *
- * sqlcipher-android retains the supplied byte array in its SQLiteOpenHelper. The buffer is
- * therefore zeroed immediately after a successful open. If the database is later closed,
- * the delegate is discarded and a fresh buffer is requested for the next open.
- *
- * The third SupportOpenHelperFactory argument controls WAL; it does not clear the passphrase.
+ * SQLCipher 4.20 retains the supplied byte array in SQLiteOpenHelper and in the database
+ * connection-pool configuration. WAL may open additional native connections after the first
+ * connection has been created, and each connection uses that same array to apply the key.
+ * Therefore the buffer must remain valid for the full helper lifetime and can only be zeroed
+ * after the delegate is closed. This is a deliberate availability/security tradeoff: the
+ * passphrase remains in the app heap while the database helper is open.
  */
 internal class ZeroizingSqlCipherOpenHelperFactory(
     private val passphraseProvider: () -> ByteArray,
@@ -33,6 +34,7 @@ internal class ZeroizingSqlCipherOpenHelper(
 ) : SupportSQLiteOpenHelper {
     private var delegate: SupportSQLiteOpenHelper? = null
     private var openedDatabase: SupportSQLiteDatabase? = null
+    private var activePassphrase: ByteArray? = null
     private var writeAheadLoggingEnabled = enableWriteAheadLogging
 
     override val databaseName: String?
@@ -95,13 +97,12 @@ internal class ZeroizingSqlCipherOpenHelper(
         }
 
         delegate = helper
+        activePassphrase = passphrase
         return try {
             openDatabase(helper).also { openedDatabase = it }
         } catch (failure: Throwable) {
             discardDelegate(failure)
             throw failure
-        } finally {
-            passphrase.fill(0)
         }
     }
 
@@ -109,16 +110,18 @@ internal class ZeroizingSqlCipherOpenHelper(
         val currentDelegate = delegate
         delegate = null
         openedDatabase = null
-        if (currentDelegate == null) return
 
         try {
-            currentDelegate.close()
+            currentDelegate?.close()
         } catch (closeFailure: Throwable) {
             if (primaryFailure != null) {
                 primaryFailure.addSuppressed(closeFailure)
             } else {
                 throw closeFailure
             }
+        } finally {
+            activePassphrase?.fill(0)
+            activePassphrase = null
         }
     }
 }
