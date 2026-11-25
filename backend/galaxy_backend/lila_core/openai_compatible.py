@@ -243,7 +243,7 @@ class OpenAICompatibleModelAdapter:
                     "The configured Lila model provider returned an unsupported model catalog"
                 ) from None
         finally:
-            response_body[:] = b"\\0" * len(response_body)
+            response_body[:] = b"\0" * len(response_body)
 
     def _messages(self, context: AssembledContext) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = [
@@ -367,4 +367,4 @@ class OpenAICompatibleModelAdapter:
                 model_id=self._config.model_id,
             )
         finally:
-            response_body[:] = b"\\0" * len(response_body)
+            response_body[:] = b"\0" * len(response_body)
