@@ -272,7 +272,7 @@ jobs:
           docker volume rm lila-live-ollama-models 2>/dev/null || true
 
   live-comfyui-e2e:
-    name: Live ComfyUI Core image lifecycle E2E (CPU smoke)
+    name: Production JWT and Redis ComfyUI Core image lifecycle E2E (CPU smoke)
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -323,6 +323,19 @@ jobs:
         run: |
           "$RUNNER_TEMP/backend-venv/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/backend-venv/bin/python" -m pip install -r backend/requirements.txt
+      - name: Start ephemeral Redis for production image E2E
+        run: |
+          docker run -d --name lila-live-comfyui-redis \
+            -p 127.0.0.1:6379:6379 \
+            redis:7.4-alpine redis-server --save "" --appendonly no
+          for attempt in $(seq 1 30); do
+            if docker exec lila-live-comfyui-redis redis-cli ping 2>/dev/null | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Redis did not become ready" >&2
+          exit 1
       - name: Start real ComfyUI CPU API server
         run: |
           "$RUNNER_TEMP/comfyui-venv/bin/python" "$RUNNER_TEMP/ComfyUI/main.py" \
@@ -344,10 +357,11 @@ jobs:
             tail -n 160 "$RUNNER_TEMP/comfyui.log"
             exit 1
           fi
-      - name: Run authenticated Core image lifecycle and restart E2E
+      - name: Run production-authenticated Core image lifecycle, Redis quotas and restart E2E
         env:
           LILA_LIVE_COMFYUI_URL: http://127.0.0.1:8188
-          PYTHONPATH: ${{ github.workspace }}/backend
+          REDIS_URL: redis://127.0.0.1:6379/14
+          PYTHONPATH: \${{ github.workspace }}/backend
         run: |
           "$RUNNER_TEMP/backend-venv/bin/python" -m pytest -q \
             backend/tests/test_lila_core_images.py::test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart -vv
@@ -356,15 +370,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lila-live-comfyui-runtime-log
-          path: ${{ runner.temp }}/comfyui.log
+          path: \${{ runner.temp }}/comfyui.log
           if-no-files-found: ignore
           retention-days: 3
-      - name: Stop ComfyUI
+      - name: Stop ComfyUI and Redis
         if: always()
         run: |
           if [ -f "$RUNNER_TEMP/comfyui.pid" ]; then
             kill "$(cat "$RUNNER_TEMP/comfyui.pid")" 2>/dev/null || true
           fi
+          docker rm -f lila-live-comfyui-redis 2>/dev/null || true
 
   build:
     needs: [test, backend-test, instrumented-test, windows-e2e-script, live-ollama-e2e, live-comfyui-e2e]

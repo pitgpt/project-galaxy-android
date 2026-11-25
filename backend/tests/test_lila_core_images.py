@@ -4,12 +4,17 @@ import json
 import os
 import sqlite3
 import struct
+import threading
 import time
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -33,6 +38,68 @@ from galaxy_backend.main import create_app
 
 
 KEY = bytes.fromhex("3031323334353637383961626364656630313233343536373839616263646566")
+
+
+class LiveJwksServer:
+    """Ephemeral RS256 issuer for production-authenticator integration tests."""
+
+    def __init__(self, issuer: str, audience: str) -> None:
+        self.issuer = issuer
+        self.audience = audience
+        self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self.key_id = uuid4().hex
+        public_jwk = json.loads(
+            jwt.algorithms.RSAAlgorithm.to_jwk(self.private_key.public_key())
+        )
+        public_jwk.update({"kid": self.key_id, "use": "sig", "alg": "RS256"})
+        jwks = {"keys": [public_jwk]}
+
+        class JwksHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != "/.well-known/jwks.json":
+                    self.send_error(404)
+                    return
+                payload = json.dumps(jwks, separators=(",", ":")).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format, *args):
+                return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), JwksHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return (
+            "http://127.0.0.1:"
+            + str(self.server.server_port)
+            + "/.well-known/jwks.json"
+        )
+
+    def token_for(self, subject: str) -> str:
+        now = int(time.time())
+        return jwt.encode(
+            {
+                "sub": subject,
+                "iss": self.issuer,
+                "aud": self.audience,
+                "iat": now,
+                "exp": now + 600,
+            },
+            self.private_key,
+            algorithm="RS256",
+            headers={"kid": self.key_id},
+        )
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
 
 
 def run(coro):
@@ -774,15 +841,15 @@ def test_image_jobs_share_the_existing_lila_core_database_without_breaking_chat_
 
 
 @pytest.mark.skipif(
-    not os.environ.get("LILA_LIVE_COMFYUI_URL"),
-    reason="requires the pinned live ComfyUI CPU smoke runtime",
+    not all(os.environ.get(name) for name in ("LILA_LIVE_COMFYUI_URL", "REDIS_URL")),
+    reason="requires the pinned ComfyUI CPU runtime and ephemeral Redis",
 )
 def test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart(tmp_path):
-    """Exercise the real ComfyUI API without downloading a diffusion checkpoint.
+    """Exercise real ComfyUI with production JWT/JWKS and Redis image quotas.
 
     EmptyImage -> SaveImage is a deterministic runtime smoke workflow, not a
-    text-to-image quality test. It verifies Core submission, polling, PNG
-    retrieval, owner isolation, encrypted persistence, and restart recovery.
+    text-to-image quality test. The test uses the production app composition,
+    JwtAuthenticator and Redis-backed write/read limiters.
     """
     base_url = os.environ["LILA_LIVE_COMFYUI_URL"].rstrip("/")
     parsed = urlsplit(base_url)
@@ -794,13 +861,31 @@ def test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart
         parsed.query,
         parsed.fragment,
     ) == ("http", "127.0.0.1", 8188, "", "", "")
+    redis_url = os.environ["REDIS_URL"]
 
+    issuer = "https://lila-live-comfyui.example/"
+    audience = "galaxy-android"
+    jwks = LiveJwksServer(issuer, audience)
     database_path = tmp_path / "lila-live-comfyui.sqlite3"
-    settings = make_settings()
+    settings = Settings(
+        openai_api_key=None,
+        auth_jwks_url=jwks.url,
+        auth_issuer=issuer,
+        auth_audience=audience,
+        safety_identifier_hmac_key=None,
+        allowed_voices=frozenset({"alloy"}),
+        allowed_character_ids=frozenset({"galaxy.default"}),
+        environment="production",
+        redis_url=redis_url,
+        lila_database_path=str(database_path),
+        lila_storage_encryption_key=os.urandom(32),
+    )
+    owner_a = "comfyui-owner-a-" + uuid4().hex
+    owner_b = "comfyui-owner-b-" + uuid4().hex
+    auth_headers = {"Authorization": "Bearer " + jwks.token_for(owner_a)}
+    other_owner_headers = {"Authorization": "Bearer " + jwks.token_for(owner_b)}
     conversation_id = str(uuid4())
     prompt = "lila-comfyui-ci-" + uuid4().hex
-    auth_headers = {"Authorization": "Bearer owner-a-token"}
-    other_owner_headers = {"Authorization": "Bearer owner-b-token"}
     workflow = {
         "workflow_id": "lila-ci-empty-image-v1",
         "workflow_json": json.dumps(
@@ -829,145 +914,202 @@ def test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart
         "height": {"node_id": "1", "input_name": "height"},
     }
 
-    def new_client():
-        store = SqliteLilaImageStore(database_path, KEY)
-        service = LilaImageGenerationService(store)
-        app = create_app(
-            settings=settings,
-            authenticator=FakeAuthenticator(),
-            lila_turn_rate_limiter=NoopLimiter(),
-            lila_image_read_rate_limiter=NoopLimiter(),
-            lila_image_store=store,
-            lila_image_service=service,
-        )
-        return TestClient(app)
+    def new_client(active_settings=settings):
+        return TestClient(create_app(settings=active_settings))
 
-    asset_bytes = None
-    job_id = None
-    with new_client() as client:
-        configured = client.put(
-            "/v1/lila/image-providers/comfyui",
-            headers=auth_headers,
-            json={"base_url": base_url, "workflow": workflow},
-        )
-        assert configured.status_code == 200, configured.text
-        assert configured.json()["configured"] is True
-        assert configured.json()["has_bearer_token"] is False
+    try:
+        with new_client() as client:
+            assert client.get("/v1/lila/image-providers/comfyui").status_code == 401
+            invalid_token = client.get(
+                "/v1/lila/image-providers/comfyui",
+                headers={"Authorization": "Bearer invalid-token"},
+            )
+            assert invalid_token.status_code == 401
 
-        connection = client.post(
-            "/v1/lila/image-providers/comfyui/test",
-            headers=auth_headers,
-        )
-        assert connection.status_code == 200, connection.text
-        assert connection.json()["connection_reachable"] is True
+            configured = client.put(
+                "/v1/lila/image-providers/comfyui",
+                headers=auth_headers,
+                json={"base_url": base_url, "workflow": workflow},
+            )
+            assert configured.status_code == 200, configured.text
+            assert configured.json()["configured"] is True
+            assert configured.json()["has_bearer_token"] is False
 
-        created = client.post(
-            "/v1/lila/images",
-            headers={**auth_headers, "Idempotency-Key": str(uuid4())},
-            json={
-                "conversation_id": conversation_id,
-                "prompt": prompt,
-                "negative_prompt": "",
-                "width": 64,
-                "height": 64,
-            },
-        )
-        assert created.status_code == 200, created.text
-        job_id = created.json()["job_id"]
-        assert created.json()["state"] in {"queued", "running", "completed"}
-
-        deadline = time.monotonic() + 120
-        current = created.json()
-        while time.monotonic() < deadline:
-            refreshed = client.get(
-                f"/v1/lila/images/{job_id}",
+            connection = client.post(
+                "/v1/lila/image-providers/comfyui/test",
                 headers=auth_headers,
             )
-            assert refreshed.status_code == 200, refreshed.text
-            current = refreshed.json()
-            if current["state"] in {"completed", "failed", "cancelled"}:
-                break
-            time.sleep(0.5)
-        assert current["state"] == "completed", current
+            assert connection.status_code == 200, connection.text
+            assert connection.json()["connection_reachable"] is True
 
-        history = client.get(
-            "/v1/lila/images",
-            headers=auth_headers,
-            params={"conversation_id": conversation_id, "limit": 50},
-        )
-        assert history.status_code == 200, history.text
-        jobs = history.json()["jobs"]
-        assert len(jobs) == 1
-        assert jobs[0]["job_id"] == job_id
-        assert jobs[0]["state"] == "completed"
-        metadata = jobs[0]["asset"]
-        assert metadata["mime_type"] == "image/png"
-        assert metadata["width"] == 64
-        assert metadata["height"] == 64
+            created = client.post(
+                "/v1/lila/images",
+                headers={**auth_headers, "Idempotency-Key": str(uuid4())},
+                json={
+                    "conversation_id": conversation_id,
+                    "prompt": prompt,
+                    "negative_prompt": "",
+                    "width": 64,
+                    "height": 64,
+                },
+            )
+            assert created.status_code == 200, created.text
+            job_id = created.json()["job_id"]
+            assert created.json()["state"] in {"queued", "running", "completed"}
 
-        asset = client.get(
-            f"/v1/lila/images/{job_id}/asset",
-            headers=auth_headers,
-        )
-        assert asset.status_code == 200, asset.text
-        assert asset.headers["content-type"] == "image/png"
-        asset_bytes = asset.content
-        png_signature = bytes.fromhex("89504e470d0a1a0a")
-        assert asset_bytes.startswith(png_signature)
-        assert struct.unpack(">II", asset_bytes[16:24]) == (64, 64)
-        assert hashlib.sha256(asset_bytes).hexdigest() == metadata["sha256"]
-        assert len(asset_bytes) == metadata["byte_size"]
+            deadline = time.monotonic() + 120
+            current = created.json()
+            while time.monotonic() < deadline:
+                refreshed = client.get(
+                    f"/v1/lila/images/{job_id}",
+                    headers=auth_headers,
+                )
+                assert refreshed.status_code == 200, refreshed.text
+                current = refreshed.json()
+                if current["state"] in {"completed", "failed", "cancelled"}:
+                    break
+                time.sleep(0.5)
+            assert current["state"] == "completed", current
 
-        assert client.get(
-            f"/v1/lila/images/{job_id}",
-            headers=other_owner_headers,
-        ).status_code == 404
-        assert client.get(
-            f"/v1/lila/images/{job_id}/asset",
-            headers=other_owner_headers,
-        ).status_code == 404
-        other_history = client.get(
-            "/v1/lila/images",
-            headers=other_owner_headers,
-            params={"conversation_id": conversation_id, "limit": 50},
-        )
-        assert other_history.status_code == 200
-        assert other_history.json()["jobs"] == []
+            history = client.get(
+                "/v1/lila/images",
+                headers=auth_headers,
+                params={"conversation_id": conversation_id, "limit": 50},
+            )
+            assert history.status_code == 200, history.text
+            jobs = history.json()["jobs"]
+            assert len(jobs) == 1
+            assert jobs[0]["job_id"] == job_id
+            assert jobs[0]["state"] == "completed"
+            metadata = jobs[0]["asset"]
+            assert metadata["mime_type"] == "image/png"
+            assert metadata["width"] == 64
+            assert metadata["height"] == 64
 
-    with sqlite3.connect(database_path) as connection:
-        job_ciphertexts = connection.execute(
-            "SELECT ciphertext FROM lila_image_jobs"
-        ).fetchall()
-        asset_ciphertexts = connection.execute(
-            "SELECT ciphertext FROM lila_image_assets"
-        ).fetchall()
-    assert job_ciphertexts
-    assert asset_ciphertexts
-    assert all(prompt.encode("utf-8") not in bytes(row[0]) for row in job_ciphertexts)
-    assert all(
-        png_signature not in bytes(row[0])
-        for row in asset_ciphertexts
-    )
+            asset = client.get(
+                f"/v1/lila/images/{job_id}/asset",
+                headers=auth_headers,
+            )
+            assert asset.status_code == 200, asset.text
+            assert asset.headers["content-type"] == "image/png"
+            asset_bytes = asset.content
+            png_signature = bytes.fromhex("89504e470d0a1a0a")
+            assert asset_bytes.startswith(png_signature)
+            assert struct.unpack(">II", asset_bytes[16:24]) == (64, 64)
+            assert hashlib.sha256(asset_bytes).hexdigest() == metadata["sha256"]
+            assert len(asset_bytes) == metadata["byte_size"]
 
-    with new_client() as restarted:
-        restored_history = restarted.get(
-            "/v1/lila/images",
-            headers=auth_headers,
-            params={"conversation_id": conversation_id, "limit": 50},
-        )
-        assert restored_history.status_code == 200, restored_history.text
-        restored_jobs = restored_history.json()["jobs"]
-        assert len(restored_jobs) == 1
-        assert restored_jobs[0]["job_id"] == job_id
-        assert restored_jobs[0]["state"] == "completed"
+            assert client.get(
+                f"/v1/lila/images/{job_id}",
+                headers=other_owner_headers,
+            ).status_code == 404
+            assert client.get(
+                f"/v1/lila/images/{job_id}/asset",
+                headers=other_owner_headers,
+            ).status_code == 404
+            other_history = client.get(
+                "/v1/lila/images",
+                headers=other_owner_headers,
+                params={"conversation_id": conversation_id, "limit": 50},
+            )
+            assert other_history.status_code == 200
+            assert other_history.json()["jobs"] == []
+            other_provider = client.get(
+                "/v1/lila/image-providers/comfyui",
+                headers=other_owner_headers,
+            )
+            assert other_provider.status_code == 200
+            assert other_provider.json()["configured"] is False
 
-        restored_asset = restarted.get(
-            f"/v1/lila/images/{job_id}/asset",
-            headers=auth_headers,
-        )
-        assert restored_asset.status_code == 200, restored_asset.text
-        assert restored_asset.content == asset_bytes
-        assert restarted.get(
-            f"/v1/lila/images/{job_id}/asset",
-            headers=other_owner_headers,
-        ).status_code == 404
+        with sqlite3.connect(database_path) as connection:
+            job_ciphertexts = connection.execute(
+                "SELECT ciphertext FROM lila_image_jobs"
+            ).fetchall()
+            asset_ciphertexts = connection.execute(
+                "SELECT ciphertext FROM lila_image_assets"
+            ).fetchall()
+        assert job_ciphertexts
+        assert asset_ciphertexts
+        assert all(prompt.encode("utf-8") not in bytes(row[0]) for row in job_ciphertexts)
+        assert all(png_signature not in bytes(row[0]) for row in asset_ciphertexts)
+
+        with new_client() as restarted:
+            restored_history = restarted.get(
+                "/v1/lila/images",
+                headers=auth_headers,
+                params={"conversation_id": conversation_id, "limit": 50},
+            )
+            assert restored_history.status_code == 200, restored_history.text
+            restored_jobs = restored_history.json()["jobs"]
+            assert len(restored_jobs) == 1
+            assert restored_jobs[0]["job_id"] == job_id
+            assert restored_jobs[0]["state"] == "completed"
+
+            restored_asset = restarted.get(
+                f"/v1/lila/images/{job_id}/asset",
+                headers=auth_headers,
+            )
+            assert restored_asset.status_code == 200, restored_asset.text
+            assert restored_asset.content == asset_bytes
+            assert restarted.get(
+                f"/v1/lila/images/{job_id}/asset",
+                headers=other_owner_headers,
+            ).status_code == 404
+
+        # Verify the production Redis-backed image-read quota is owner-scoped.
+        read_limited_settings = replace(settings, lila_image_reads_per_day=1)
+        read_owner_headers = {
+            "Authorization": "Bearer " + jwks.token_for("read-limit-" + uuid4().hex)
+        }
+        read_other_headers = {
+            "Authorization": "Bearer " + jwks.token_for("read-other-" + uuid4().hex)
+        }
+        with new_client(read_limited_settings) as limited:
+            first_read = limited.get(
+                "/v1/lila/image-providers/comfyui",
+                headers=read_owner_headers,
+            )
+            other_read = limited.get(
+                "/v1/lila/image-providers/comfyui",
+                headers=read_other_headers,
+            )
+            blocked_read = limited.get(
+                "/v1/lila/image-providers/comfyui",
+                headers=read_owner_headers,
+            )
+            assert first_read.status_code == 200, first_read.text
+            assert other_read.status_code == 200, other_read.text
+            assert blocked_read.status_code == 429, blocked_read.text
+            assert blocked_read.headers.get("retry-after") == "86400"
+
+        # Image mutations share the production Lila-turn Redis quota.
+        write_limited_settings = replace(settings, lila_turns_per_day=1)
+        write_owner_headers = {
+            "Authorization": "Bearer " + jwks.token_for("write-limit-" + uuid4().hex)
+        }
+        write_other_headers = {
+            "Authorization": "Bearer " + jwks.token_for("write-other-" + uuid4().hex)
+        }
+        provider_payload = {"base_url": base_url, "workflow": workflow}
+        with new_client(write_limited_settings) as limited:
+            first_write = limited.put(
+                "/v1/lila/image-providers/comfyui",
+                headers=write_owner_headers,
+                json=provider_payload,
+            )
+            other_write = limited.put(
+                "/v1/lila/image-providers/comfyui",
+                headers=write_other_headers,
+                json=provider_payload,
+            )
+            blocked_write = limited.put(
+                "/v1/lila/image-providers/comfyui",
+                headers=write_owner_headers,
+                json=provider_payload,
+            )
+            assert first_write.status_code == 200, first_write.text
+            assert other_write.status_code == 200, other_write.text
+            assert blocked_write.status_code == 429, blocked_write.text
+            assert blocked_write.headers.get("retry-after") == "86400"
+    finally:
+        jwks.close()
