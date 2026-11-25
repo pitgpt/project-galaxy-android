@@ -25,7 +25,7 @@ internal fun buildSdxlWorkflowTemplate(checkpointName: String): ComfyUiWorkflowT
         checkpoint.isNotEmpty() &&
             checkpoint.length <= 255 &&
             !checkpoint.startsWith("/") &&
-            !checkpoint.contains('\\\\') &&
+            !checkpoint.contains('\\') &&
             !checkpoint.contains(':') &&
             checkpoint.none { it.code < 0x20 || it.code == 0x7f } &&
             checkpoint.split('/').none { it.isBlank() || it == "." || it == ".." }
