@@ -7,13 +7,62 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
+
+/**
+ * Bounded response accumulator that clears every owned byte array, including replaced
+ * buffers created during growth. The returned copy is owned by the caller.
+ */
+internal open class ZeroizingByteAccumulator(
+    initialCapacity: Int,
+    private val maxCapacity: Int
+) : AutoCloseable {
+    protected var backingBuffer: ByteArray
+    protected var byteCount: Int = 0
+
+    init {
+        require(maxCapacity > 0)
+        require(initialCapacity in 1..maxCapacity)
+        backingBuffer = ByteArray(initialCapacity)
+    }
+
+    val size: Int
+        get() = byteCount
+
+    fun write(source: ByteArray, offset: Int, length: Int) {
+        require(offset >= 0 && length >= 0 && offset <= source.size - length)
+        val required = byteCount + length
+        require(required <= maxCapacity) { "Response exceeds the configured size limit" }
+        ensureCapacity(required)
+        source.copyInto(backingBuffer, byteCount, offset, offset + length)
+        byteCount = required
+    }
+
+    fun toByteArray(): ByteArray = backingBuffer.copyOf(byteCount)
+
+    override fun close() {
+        backingBuffer.fill(0)
+        byteCount = 0
+    }
+
+    private fun ensureCapacity(required: Int) {
+        if (required <= backingBuffer.size) return
+        var newCapacity = backingBuffer.size
+        while (newCapacity < required) {
+            val doubled = if (newCapacity > maxCapacity / 2) maxCapacity else newCapacity * 2
+            newCapacity = maxOf(required, doubled)
+        }
+        val replacement = ByteArray(newCapacity)
+        backingBuffer.copyInto(replacement, 0, 0, byteCount)
+        backingBuffer.fill(0)
+        backingBuffer = replacement
+    }
+}
 
 data class ComfyUiApiResponse(val statusCode: Int, val body: String) {
     /** API error/history bodies can contain user prompts or workflow details; never stringify them. */
@@ -65,7 +114,12 @@ class UrlConnectionComfyUiApiTransport : ComfyUiApiTransport {
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val bytes = stream?.use { readLimited(it, maxResponseBytes) } ?: ByteArray(0)
-            ComfyUiApiResponse(status, String(bytes, StandardCharsets.UTF_8))
+            try {
+                ComfyUiApiResponse(status, String(bytes, StandardCharsets.UTF_8))
+            } finally {
+                // The immutable String is caller-facing; clear the temporary decoded byte copy.
+                bytes.fill(0)
+            }
         }
     }
 
@@ -124,19 +178,25 @@ class UrlConnectionComfyUiApiTransport : ComfyUiApiTransport {
         })
     }
 
-    private fun readLimited(input: java.io.InputStream, maxBytes: Int): ByteArray {
+    internal fun readLimited(input: java.io.InputStream, maxBytes: Int): ByteArray {
         require(maxBytes in 1..MAX_BINARY_RESPONSE_BYTES) { "Invalid ComfyUI response size limit" }
-        val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
+        val output = ZeroizingByteAccumulator(minOf(maxBytes, 64 * 1024), maxBytes)
         val buffer = ByteArray(8 * 1024)
-        var total = 0
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            total += count
-            if (total > maxBytes) throw IOException("ComfyUI response exceeded the size limit")
-            output.write(buffer, 0, count)
+        try {
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (count == 0) continue
+                if (output.size > maxBytes - count) {
+                    throw IOException("ComfyUI response exceeded the size limit")
+                }
+                output.write(buffer, 0, count)
+            }
+            return output.toByteArray()
+        } finally {
+            buffer.fill(0)
+            output.close()
         }
-        return output.toByteArray()
     }
 
     private companion object {

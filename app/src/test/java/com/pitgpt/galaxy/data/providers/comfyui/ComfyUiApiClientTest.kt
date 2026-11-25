@@ -1,6 +1,8 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.util.ArrayDeque
 import com.pitgpt.galaxy.core.model.ImageGenerationState
 import kotlinx.coroutines.runBlocking
@@ -44,6 +46,46 @@ class ComfyUiApiClientTest {
         height = ComfyUiNodeInput("3", "height"),
         seed = ComfyUiNodeInput("4", "seed")
     )
+
+    @Test
+    fun boundedReadClearsScratchBufferAfterSuccess() {
+        val payload = "private image response".toByteArray()
+        val input = CapturingInputStream(payload)
+
+        val result = UrlConnectionComfyUiApiTransport().readLimited(input, 64)
+
+        assertTrue(result.contentEquals(payload))
+        assertTrue(input.lastReadBuffer?.all { it == 0.toByte() } == true)
+    }
+
+    @Test
+    fun boundedReadClearsScratchBufferWhenResponseExceedsLimit() {
+        val input = CapturingInputStream(ByteArray(32) { it.toByte() })
+
+        assertThrows(IOException::class.java) {
+            UrlConnectionComfyUiApiTransport().readLimited(input, 8)
+        }
+
+        assertTrue(input.lastReadBuffer?.all { it == 0.toByte() } == true)
+    }
+
+    @Test
+    fun zeroizingAccumulatorClearsReplacedAndFinalBuffers() {
+        val accumulator = InspectableZeroizingAccumulator(initialCapacity = 2, maxCapacity = 16)
+        accumulator.write(byteArrayOf(1, 2), 0, 2)
+        val originalBuffer = accumulator.currentBuffer()
+
+        accumulator.write(byteArrayOf(3, 4, 5), 0, 3)
+        val currentBuffer = accumulator.currentBuffer()
+
+        assertTrue(originalBuffer.all { it == 0.toByte() })
+        assertTrue(accumulator.toByteArray().contentEquals(byteArrayOf(1, 2, 3, 4, 5)))
+
+        accumulator.close()
+
+        assertTrue(currentBuffer.all { it == 0.toByte() })
+        assertEquals(0, accumulator.size)
+    }
 
     @Test
     fun mapsOnlyExplicitWorkflowInputs() {
@@ -258,6 +300,22 @@ class ComfyUiApiClientTest {
         }
         assertFalse(error.message.orEmpty().contains("secret-token-must-not-leak"))
         assertEquals(401, error.httpStatusCode)
+    }
+
+    private class CapturingInputStream(bytes: ByteArray) : ByteArrayInputStream(bytes) {
+        var lastReadBuffer: ByteArray? = null
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            lastReadBuffer = buffer
+            return super.read(buffer, offset, length)
+        }
+    }
+
+    private class InspectableZeroizingAccumulator(
+        initialCapacity: Int,
+        maxCapacity: Int
+    ) : ZeroizingByteAccumulator(initialCapacity, maxCapacity) {
+        fun currentBuffer(): ByteArray = backingBuffer
     }
 
     private class FakeTransport : ComfyUiApiTransport {
