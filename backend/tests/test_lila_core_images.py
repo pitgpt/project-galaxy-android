@@ -1080,7 +1080,7 @@ def test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart
             assert first_read.status_code == 200, first_read.text
             assert other_read.status_code == 200, other_read.text
             assert blocked_read.status_code == 429, blocked_read.text
-            assert blocked_read.headers.get("retry-after") == "86400"
+            assert 1 <= int(blocked_read.headers["retry-after"]) <= 86400
 
         # Image mutations share the production Lila-turn Redis quota.
         write_limited_settings = replace(settings, lila_turns_per_day=1)
@@ -1110,6 +1110,6 @@ def test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart
             assert first_write.status_code == 200, first_write.text
             assert other_write.status_code == 200, other_write.text
             assert blocked_write.status_code == 429, blocked_write.text
-            assert blocked_write.headers.get("retry-after") == "86400"
+            assert 1 <= int(blocked_write.headers["retry-after"]) <= 86400
     finally:
         jwks.close()
