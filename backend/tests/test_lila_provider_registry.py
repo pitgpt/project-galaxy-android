@@ -1008,7 +1008,8 @@ def test_ambiguous_turn_failure_is_marked_and_never_generates_again(tmp_path):
     assert "provider-secret" not in failed.text
     assert "private-provider-detail" not in failed.text
     assert replay.status_code == 409
-    assert "still processing" in replay.json()["detail"]
+    assert "unresolved" in replay.json()["detail"]
+    assert "query its status before retrying" in replay.json()["detail"]
     assert outbound == [
         ("GET", "/v1/models"),
         ("POST", "/v1/chat/completions"),
