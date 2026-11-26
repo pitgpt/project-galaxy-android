@@ -3,6 +3,7 @@ package com.pitgpt.galaxy.data.providers.comfyui
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.ImageGenerationState
 import com.pitgpt.galaxy.core.model.ImageGenerationStatus
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
@@ -97,6 +98,18 @@ interface ComfyUiApiTransport {
     ): ComfyUiBinaryResponse
 }
 
+/**
+ * Delivers a resource-bearing result without leaking it when cancellation wins the
+ * race after the blocking HTTP operation has produced the value but before dispatch.
+ */
+internal fun <T> resumeCancellableWithCleanup(
+    continuation: CancellableContinuation<T>,
+    value: T,
+    onUndelivered: (T) -> Unit
+) {
+    continuation.resume(value) { _, undelivered, _ -> onUndelivered(undelivered) }
+}
+
 /** Redirect-free URLConnection transport used for JSON API requests and bounded image downloads. */
 class UrlConnectionComfyUiApiTransport : ComfyUiApiTransport {
     override suspend fun execute(
@@ -130,7 +143,8 @@ class UrlConnectionComfyUiApiTransport : ComfyUiApiTransport {
         readTimeoutMillis: Int,
         maxResponseBytes: Int
     ): ComfyUiBinaryResponse = withConnection(
-        url, "GET", null, bearerToken, connectTimeoutMillis, readTimeoutMillis
+        url, "GET", null, bearerToken, connectTimeoutMillis, readTimeoutMillis,
+        onUndelivered = { it.body.fill(0) }
     ) { connection ->
         val status = connection.responseCode
         val stream = if (status in 200..299) connection.inputStream else connection.errorStream
@@ -145,6 +159,7 @@ class UrlConnectionComfyUiApiTransport : ComfyUiApiTransport {
         bearerToken: String?,
         connectTimeoutMillis: Int,
         readTimeoutMillis: Int,
+        onUndelivered: (T) -> Unit = {},
         block: (HttpURLConnection) -> T
     ): T = suspendCancellableCoroutine { continuation ->
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -169,7 +184,8 @@ class UrlConnectionComfyUiApiTransport : ComfyUiApiTransport {
             }
             try {
                 if (body != null) connection.outputStream.use { it.write(body) }
-                continuation.resumeWith(Result.success(block(connection)))
+                val value = block(connection)
+                resumeCancellableWithCleanup(continuation, value, onUndelivered)
             } catch (error: Exception) {
                 continuation.resumeWith(Result.failure(error))
             } finally {
