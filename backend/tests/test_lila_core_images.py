@@ -400,7 +400,7 @@ def test_comfyui_checkpoint_discovery_filters_paths_and_caps_results(tmp_path):
         "../outside.safetensors",
         "/outside.safetensors",
         "models/../outside.safetensors",
-        "bad\\\\path.safetensors",
+        "bad\\path.safetensors",
         "",
         "x" * 513,
         "sdxl.safetensors",
@@ -418,7 +418,7 @@ def test_comfyui_checkpoint_discovery_filters_paths_and_caps_results(tmp_path):
     assert len(result.available_checkpoints) == 256
     assert result.checkpoint_list_truncated is True
     assert all(".." not in name.split("/") for name in result.available_checkpoints)
-    assert all("\\\\" not in name for name in result.available_checkpoints)
+    assert all("\\" not in name for name in result.available_checkpoints)
 
 
 def test_comfyui_checkpoint_discovery_is_optional_for_older_runtimes(tmp_path):

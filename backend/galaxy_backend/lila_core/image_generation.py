@@ -372,7 +372,7 @@ class ComfyUiImageAdapter:
                 not name
                 or len(name) > MAX_COMFYUI_CHECKPOINT_NAME_CHARS
                 or name.startswith("/")
-                or "\\\\" in name
+                or "\\" in name
                 or any(ord(character) < 32 or ord(character) == 127 for character in name)
             ):
                 continue

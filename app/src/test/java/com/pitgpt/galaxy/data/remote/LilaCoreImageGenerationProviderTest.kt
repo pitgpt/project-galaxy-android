@@ -54,7 +54,7 @@ class LilaCoreImageGenerationProviderTest {
                         .put("sdxl.safetensors")
                         .put("models/refiner.safetensors")
                         .put("../outside.safetensors")
-                        .put("bad\\\\path.safetensors"))
+                        .put("bad\\path.safetensors"))
                     .put("checkpoint_list_truncated", true)
             )
         }

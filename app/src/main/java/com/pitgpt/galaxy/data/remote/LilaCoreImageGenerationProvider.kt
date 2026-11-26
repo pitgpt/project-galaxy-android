@@ -211,7 +211,7 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
             val safe = name.isNotBlank() &&
                 name.length <= MAX_CHECKPOINT_NAME_LENGTH &&
                 !name.startsWith('/') &&
-                '\\\\' !in name &&
+                '\\' !in name &&
                 name.none { it.code < 32 || it.code == 127 } &&
                 segments.all { it.isNotBlank() && it != "." && it != ".." }
             if (safe && name !in checkpoints) checkpoints += name
