@@ -40,6 +40,9 @@ import java.util.UUID
 private val MemoryScreenText = Color(0xFFB8D9FF)
 private val MemoryScreenMuted = Color(0xFF9AA8C5)
 
+internal fun lilaMemoryDeleteNotice(deleted: Boolean): String =
+    if (deleted) "Воспоминание удалено." else "Запись уже отсутствует или недоступна."
+
 @Composable
 fun LilaMemorySettingsScreen(
     client: HttpLilaMemoryClient,
@@ -79,7 +82,7 @@ fun LilaMemorySettingsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("НАЗАД", color = MemoryScreenText) }
+            TextButton(onClick = onBack, enabled = !isSaving) { Text("НАЗАД", color = MemoryScreenText) }
             Spacer(Modifier.weight(1f))
             Text("LILA CORE", color = MemoryScreenMuted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
@@ -103,7 +106,7 @@ fun LilaMemorySettingsScreen(
             singleLine = true
         )
         Button(
-            enabled = !isLoading,
+            enabled = !isLoading && !isSaving,
             onClick = { scope.launch { reload() } },
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp)
@@ -161,7 +164,7 @@ fun LilaMemorySettingsScreen(
                         Text(if (isSaving) "СОХРАНЕНИЕ…" else "СОХРАНИТЬ")
                     }
                     if (editingMemoryId != null) {
-                        TextButton(onClick = {
+                        TextButton(enabled = !isSaving, onClick = {
                             editingMemoryId = null
                             draft = ""
                         }) {
@@ -194,7 +197,7 @@ fun LilaMemorySettingsScreen(
                         Text(memory.content, color = MemoryScreenText, fontSize = 14.sp)
                         Text(memory.memoryId, color = MemoryScreenMuted, fontSize = 9.sp)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = {
+                            TextButton(enabled = !isSaving && !isLoading, onClick = {
                                 editingMemoryId = memory.memoryId
                                 draft = memory.content
                                 notice = null
@@ -202,7 +205,7 @@ fun LilaMemorySettingsScreen(
                             }) {
                                 Text("ИЗМЕНИТЬ", color = MemoryScreenText)
                             }
-                            TextButton(onClick = { pendingDelete = memory }) {
+                            TextButton(enabled = !isSaving && !isLoading, onClick = { pendingDelete = memory }) {
                                 Text("УДАЛИТЬ", color = Color(0xFFFF9B9B))
                             }
                         }
@@ -215,23 +218,23 @@ fun LilaMemorySettingsScreen(
 
     pendingDelete?.let { target ->
         AlertDialog(
-            onDismissRequest = { pendingDelete = null },
+            onDismissRequest = { if (!isSaving) pendingDelete = null },
             title = { Text("Удалить воспоминание?") },
             text = { Text("Эта запись будет удалена из долговременной памяти Lila Core.") },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(enabled = !isSaving, onClick = {
                     scope.launch {
                         isSaving = true
                         error = null
                         notice = null
                         try {
-                            client.delete(target.memoryId)
+                            val deleted = client.delete(target.memoryId)
                             if (editingMemoryId == target.memoryId) {
                                 editingMemoryId = null
                                 draft = ""
                             }
                             pendingDelete = null
-                            notice = "Воспоминание удалено."
+                            notice = lilaMemoryDeleteNotice(deleted)
                             reload()
                         } catch (exception: CancellationException) {
                             throw exception
@@ -247,7 +250,7 @@ fun LilaMemorySettingsScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("ОТМЕНА") }
+                TextButton(enabled = !isSaving, onClick = { pendingDelete = null }) { Text("ОТМЕНА") }
             }
         )
     }
