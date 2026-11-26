@@ -915,10 +915,15 @@ def test_lila_memory_api_is_owner_scoped_and_survives_store_reopen(tmp_path):
 def test_lila_memory_routes_reject_invalid_ids_before_storage_lookup(method, memory_id):
     with make_client() as client:
         path = f"/v1/lila/memories/{memory_id}"
+        headers = {"Authorization": "Bearer user-a-token"}
         if method == "put":
-            response = client.put(path, json={"content": "Valid memory content"})
+            response = client.put(
+                path,
+                headers=headers,
+                json={"content": "Valid memory content"},
+            )
         else:
-            response = client.delete(path)
+            response = client.delete(path, headers=headers)
 
     assert response.status_code == 422
     assert response.json()["detail"] == "Lila memory identifier is invalid"
