@@ -6,8 +6,13 @@ import java.io.IOException
 import java.util.ArrayDeque
 import com.pitgpt.galaxy.core.model.ImageGenerationState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.CoroutineContext
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -50,24 +55,34 @@ class ComfyUiApiClientTest {
     )
 
     @Test
-    fun binaryResponseBodyIsClearedWhenCancellationWinsBeforeDelivery() = runBlocking {
+    fun binaryResponseBodyIsClearedWhenParentCancellationWinsBeforeDispatch() {
+        val dispatcher = QueuedDispatcher()
+        val parentJob = Job()
+        val scope = CoroutineScope(parentJob + dispatcher)
         val body = "private image response".toByteArray()
         val response = ComfyUiBinaryResponse(200, "image/png", body)
 
-        val failure = runCatching {
+        val job = scope.launch {
             suspendCancellableCoroutine<ComfyUiBinaryResponse> { continuation ->
                 resumeCancellableWithCleanup(continuation, response) { undelivered ->
                     undelivered.body.fill(0)
                 }
-                assertTrue(
-                    "Cancellation before dispatch must win over the pending binary result",
-                    continuation.cancel(CancellationException("cancel before delivery"))
-                )
             }
-        }.exceptionOrNull()
+        }
 
-        assertTrue("The suspended caller must observe cancellation", failure is CancellationException)
+        // Run the coroutine until the continuation has resumed and queued its
+        // dispatcher delivery, but deliberately do not execute that delivery yet.
+        dispatcher.runNext()
+        assertEquals("The resumed value must still be queued for dispatch", 1, dispatcher.pendingTasks)
+
+        // Cancellation of the owning Job now wins the prompt-cancellation check
+        // performed by the dispatcher when it attempts to deliver the value.
+        job.cancel(CancellationException("cancel before dispatch"))
+        dispatcher.runUntilIdle()
+
+        assertTrue("The suspended caller must observe cancellation", job.isCancelled)
         assertTrue("An undelivered binary response must be wiped", body.all { it == 0.toByte() })
+        parentJob.cancel()
     }
 
     @Test
@@ -357,6 +372,33 @@ class ComfyUiApiClientTest {
         }
         assertFalse(error.message.orEmpty().contains("secret-token-must-not-leak"))
         assertEquals(401, error.httpStatusCode)
+    }
+
+    private class QueuedDispatcher : CoroutineDispatcher() {
+        private val tasks = ArrayDeque<Runnable>()
+
+        val pendingTasks: Int
+            get() = synchronized(tasks) { tasks.size }
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            synchronized(tasks) { tasks.addLast(block) }
+        }
+
+        fun runNext() {
+            val next = synchronized(tasks) { tasks.pollFirst() }
+                ?: error("No queued coroutine task is available")
+            next.run()
+        }
+
+        fun runUntilIdle() {
+            repeat(10) {
+                val next = synchronized(tasks) { tasks.pollFirst() } ?: return
+                next.run()
+            }
+            check(synchronized(tasks) { tasks.isEmpty() }) {
+                "Queued dispatcher did not become idle"
+            }
+        }
     }
 
     private class CapturingInputStream(bytes: ByteArray) : ByteArrayInputStream(bytes) {
