@@ -95,8 +95,9 @@ class _JwksHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     ollama_url = os.environ["LILA_LIVE_OLLAMA_URL"].rstrip("/")
-    second_provider_url = os.environ["LILA_LIVE_OLLAMA_SECOND_URL"].rstrip("/")
+    llama_cpp_url = os.environ["LILA_LIVE_LLAMA_CPP_URL"].rstrip("/")
     model_id = os.environ["LILA_LIVE_OLLAMA_MODEL"]
+    llama_cpp_model_id = os.environ["LILA_LIVE_LLAMA_CPP_MODEL"]
     redis_url = os.environ["REDIS_URL"]
     tls_cert = os.environ["LILA_ANDROID_E2E_TLS_CERT"]
     tls_key = os.environ["LILA_ANDROID_E2E_TLS_KEY"]
@@ -122,17 +123,22 @@ def main() -> None:
         parsed.fragment,
     ) != ("http", "127.0.0.1", 11434, "", "", ""):
         raise RuntimeError("The Android E2E native model endpoint must be the isolated local Ollama service")
-    parsed_second = urlsplit(second_provider_url)
+    parsed_llama_cpp = urlsplit(llama_cpp_url)
     if (
-        parsed_second.scheme,
-        parsed_second.hostname,
-        parsed_second.port,
-        parsed_second.path,
-        parsed_second.query,
-        parsed_second.fragment,
-    ) != ("http", "127.0.0.1", 1234, "/v1", "", ""):
-        raise RuntimeError("The Android E2E OpenAI-compatible endpoint must use the isolated second Ollama service")
-    if not model_id.strip() or not Path(tls_cert).is_file() or not Path(tls_key).is_file():
+        parsed_llama_cpp.scheme,
+        parsed_llama_cpp.hostname,
+        parsed_llama_cpp.port,
+        parsed_llama_cpp.path,
+        parsed_llama_cpp.query,
+        parsed_llama_cpp.fragment,
+    ) != ("http", "127.0.0.1", 8080, "/v1", "", ""):
+        raise RuntimeError("The Android E2E llama.cpp endpoint must use the isolated local server")
+    if (
+        not model_id.strip()
+        or not llama_cpp_model_id.strip()
+        or not Path(tls_cert).is_file()
+        or not Path(tls_key).is_file()
+    ):
         raise RuntimeError("The Android E2E runtime configuration is incomplete")
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -162,7 +168,7 @@ def main() -> None:
     )
 
     provider_id = "ollama-android-" + uuid.uuid4().hex[:12]
-    openai_provider_id = "ollama-openai-android-" + uuid.uuid4().hex[:12]
+    llama_cpp_provider_id = "llama-cpp-android-" + uuid.uuid4().hex[:12]
     database_directory = runner_temp / "lila-android-e2e-private"
     database_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(database_directory, 0o700)
@@ -197,9 +203,10 @@ def main() -> None:
         "character_id": "galaxy.default",
         "provider_id": provider_id,
         "provider_base_url": ollama_url,
-        "openai_provider_id": openai_provider_id,
-        "second_provider_base_url": second_provider_url,
+        "llama_cpp_provider_id": llama_cpp_provider_id,
+        "second_provider_base_url": llama_cpp_url,
         "model_id": model_id,
+        "second_model_id": llama_cpp_model_id,
     }
     descriptor = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
