@@ -440,7 +440,7 @@ def test_provider_api_accepts_custom_local_port_only_when_operator_allowlisted(t
     )
 
     default_dir = tmp_path / "default"
-    default_dir.mkdir()
+    default_dir.mkdir(mode=0o700)
     default_client, _ = make_client(default_dir)
     with default_client:
         rejected_by_default = default_client.post(
@@ -450,7 +450,7 @@ def test_provider_api_accepts_custom_local_port_only_when_operator_allowlisted(t
         )
 
     custom_dir = tmp_path / "custom"
-    custom_dir.mkdir()
+    custom_dir.mkdir(mode=0o700)
     custom_client, _ = make_client(
         custom_dir,
         settings=make_settings(local_ports=DEFAULT_LOCAL_PROVIDER_PORTS | {custom_port}),
