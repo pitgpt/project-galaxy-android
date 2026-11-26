@@ -35,6 +35,7 @@ param(
     [int]$Width = 512,
     [ValidateRange(64, 2048)]
     [int]$Height = 512,
+    [ValidateRange(-1, 4294967295)]
     [long]$Seed = -1,
     [ValidateRange(1, 30)]
     [int]$PollIntervalSeconds = 3,
@@ -356,6 +357,31 @@ function Get-Sha256Hex {
     }
 }
 
+function Get-ImageSeedForIdempotencyKey {
+    param([Parameter(Mandatory = $true)][string]$IdempotencyKey)
+
+    if ([string]::IsNullOrWhiteSpace($IdempotencyKey) -or $IdempotencyKey.Length -gt 128) {
+        throw 'Image idempotency key is invalid.'
+    }
+    $canonicalKey = ([Guid]::Parse($IdempotencyKey)).ToString('D').ToLowerInvariant()
+    $inputBytes = [System.Text.Encoding]::UTF8.GetBytes($canonicalKey)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $digest = $null
+    try {
+        $digest = $sha.ComputeHash($inputBytes)
+        # Match Android/Core: unsigned big-endian first 32 bits of SHA-256.
+        return ([long]$digest[0] * 16777216) +
+            ([long]$digest[1] * 65536) +
+            ([long]$digest[2] * 256) +
+            [long]$digest[3]
+    }
+    finally {
+        $sha.Dispose()
+        [Array]::Clear($inputBytes, 0, $inputBytes.Length)
+        if ($null -ne $digest) { [Array]::Clear($digest, 0, $digest.Length) }
+    }
+}
+
 function Assert-RequiredWorkflowId {
     param(
         [string]$ActualWorkflowId,
@@ -527,6 +553,12 @@ function Invoke-SelfTest {
     if (-not $rejected) { throw 'Non-loopback HTTP was not rejected.' }
 
     Assert-RequiredWorkflowId -ActualWorkflowId 'lila.sdxl.v1' -RequiredWorkflowId 'lila.sdxl.v1'
+    $firstSeed = Get-ImageSeedForIdempotencyKey -IdempotencyKey '00000000-0000-0000-0000-000000000001'
+    $secondSeed = Get-ImageSeedForIdempotencyKey -IdempotencyKey '00000000-0000-0000-0000-000000000002'
+    $uppercaseSeed = Get-ImageSeedForIdempotencyKey -IdempotencyKey '00000000-0000-0000-0000-000000000001'.ToUpperInvariant()
+    if ($firstSeed -ne 2059516119L -or $secondSeed -ne 2429923490L -or $uppercaseSeed -ne $firstSeed) {
+        throw 'Shared Android/Core image seed contract failed.'
+    }
     Assert-RequiredWorkflowId -ActualWorkflowId 'custom-v1' -RequiredWorkflowId ''
     $wrongWorkflowRejected = $false
     try {
@@ -645,6 +677,7 @@ function Invoke-SelfTest {
     }
 
     Write-Output 'Required ComfyUI workflow ID guard: PASS'
+    Write-Output 'Shared Android/Core image seed vectors: PASS'
     Write-Output 'Built-in SDXL graph/checkpoint validation: PASS'
     Write-Output 'Lila ComfyUI live-E2E script self-test passed.'
 }
@@ -715,9 +748,15 @@ try {
         height = $Height
     }
     if ($Seed -ge 0) { $payload.seed = $Seed }
-    $idempotencyKey = [Guid]::NewGuid().ToString()
+    $idempotencyKey = [Guid]::NewGuid().ToString('D').ToLowerInvariant()
+    $expectedSeed = if ($Seed -ge 0) { [long]$Seed } else {
+        Get-ImageSeedForIdempotencyKey -IdempotencyKey $idempotencyKey
+    }
 
     $job = Invoke-CoreJson -Method 'POST' -Path '/v1/lila/images' -Body $payload -IdempotencyKey $idempotencyKey -MaxResponseBytes 262144
+    if ($null -eq $job.seed -or [long]$job.seed -ne $expectedSeed) {
+        throw 'Lila Core returned an image seed that does not match the idempotency contract.'
+    }
     $jobId = [string]$job.job_id
     if ($job.conversation_id -ne $conversationId -or
         [string]::IsNullOrWhiteSpace($jobId) -or
@@ -730,6 +769,9 @@ try {
         $job = Invoke-CoreJson -Method 'GET' -Path ('/v1/lila/images/' + $jobId) -MaxResponseBytes 262144
         if ($job.job_id -ne $jobId -or $job.conversation_id -ne $conversationId) {
             throw 'Lila Core returned an image job outside the selected conversation.'
+        }
+        if ($null -eq $job.seed -or [long]$job.seed -ne $expectedSeed) {
+            throw 'The persisted image job seed changed while polling.'
         }
 
         $state = [string]$job.state
@@ -770,6 +812,9 @@ try {
     if ($null -eq $historyJob -or $historyJob.state -ne 'completed') {
         throw 'The completed image job was not found in the durable Core conversation history.'
     }
+    if ($null -eq $historyJob.seed -or [long]$historyJob.seed -ne $expectedSeed) {
+        throw 'The durable image history seed does not match the submitted request.'
+    }
 
     $savedPath = $null
     if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
@@ -793,6 +838,7 @@ try {
         ConversationId = $conversationId
         JobId = $jobId
         State = 'completed'
+        Seed = $expectedSeed
         Width = $dimensions.Width
         Height = $dimensions.Height
         ByteSize = $assetBytes.LongLength
