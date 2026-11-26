@@ -328,6 +328,7 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals(768, asset.height)
         assertEquals(png.size.toLong(), asset.byteSize)
         assertEquals(64, asset.sha256.length)
+        assertTrue("Metadata-only result must clear its discarded plaintext bytes", png.all { it == 0.toByte() })
     }
 
     @Test fun completedImageReturnsMetadataAndBytesFromOneDownload() = runBlocking {
@@ -354,6 +355,51 @@ class ComfyUiImageGenerationProviderTest {
         assertEquals("image/png", result.mimeType)
         assertTrue(result.bytes.contentEquals(png))
         assertEquals(1, transport.urls.count { it.contains("/view?") })
+        assertTrue("Successful completedImage transfers the buffer to its caller", png.any { it != 0.toByte() })
+    }
+
+    @Test fun completedImageClearsBytesWhenPngDimensionsAreInvalid() = runBlocking {
+        val png = ByteArray(24)
+        byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a).copyInto(png)
+        "IHDR".toByteArray().copyInto(png, 12)
+        // Width remains zero, so the signature is valid but PNG metadata is rejected.
+        png[22] = 0; png[23] = 768.toByte()
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """
+                {"prompt-123":{"status":{"status_str":"success","completed":true},
+                "outputs":{"9":{"images":[{"filename":"lila.png","subfolder":"renders","type":"output"}]}}}}
+            """.trimIndent()))
+            binary = ComfyUiBinaryResponse(200, "image/png", png)
+        }
+        val store = InMemoryComfyUiJobStore().apply {
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis, submissionStarted = true))
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { provider(transport, store).completedImage("prompt-123") }
+        }
+
+        assertTrue("Rejected PNG bytes must be cleared before returning", png.all { it == 0.toByte() })
+    }
+
+    @Test fun completedImageClearsBytesWhenProviderRejectsNonPngImage() = runBlocking {
+        val jpeg = byteArrayOf(0xff.toByte(), 0xd8.toByte(), 0xff.toByte(), 1, 2, 3)
+        val transport = FakeTransport().apply {
+            responses.add(ComfyUiApiResponse(200, """
+                {"prompt-123":{"status":{"status_str":"success","completed":true},
+                "outputs":{"9":{"images":[{"filename":"lila.jpg","subfolder":"renders","type":"output"}]}}}}
+            """.trimIndent()))
+            binary = ComfyUiBinaryResponse(200, "image/jpeg", jpeg)
+        }
+        val store = InMemoryComfyUiJobStore().apply {
+            put(ComfyUiJobRecord("prompt-123", request.id, request.createdAtEpochMillis, submissionStarted = true))
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { provider(transport, store).completedImage("prompt-123") }
+        }
+
+        assertTrue("Unsupported provider image bytes must be cleared", jpeg.all { it == 0.toByte() })
     }
 
     private class PausingMarkCancelledJobStore(

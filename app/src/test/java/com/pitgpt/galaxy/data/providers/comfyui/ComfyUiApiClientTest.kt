@@ -252,17 +252,51 @@ class ComfyUiApiClientTest {
     }
 
     @Test
-    fun rejectsImageWithMismatchedContentTypeAndSignature() {
-        runBlocking {
-            val transport = FakeTransport().apply {
-                binaryResponse = ComfyUiBinaryResponse(200, "image/png", "<html>".toByteArray())
-            }
-            assertThrows(IllegalArgumentException::class.java) {
-                runBlocking {
-                    ComfyUiApiClient(transport).download(config, ComfyUiImageReference("fake.png"))
-                }
+    fun clearsBinaryResponseBodyWhenHttpStatusIsNotSuccessful() = runBlocking {
+        val body = "private ComfyUI error response".toByteArray()
+        val transport = FakeTransport().apply {
+            binaryResponse = ComfyUiBinaryResponse(503, "text/plain", body)
+        }
+
+        assertThrows(ComfyUiApiException::class.java) {
+            runBlocking {
+                ComfyUiApiClient(transport).download(config, ComfyUiImageReference("failed.png"))
             }
         }
+
+        assertTrue("HTTP error response bytes must be cleared", body.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun clearsBinaryResponseBodyWhenMimeTypeIsUnsupported() = runBlocking {
+        val body = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+        val transport = FakeTransport().apply {
+            binaryResponse = ComfyUiBinaryResponse(200, "application/octet-stream", body)
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                ComfyUiApiClient(transport).download(config, ComfyUiImageReference("unsupported.bin"))
+            }
+        }
+
+        assertTrue("Unsupported MIME response bytes must be cleared", body.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun rejectsImageWithMismatchedContentTypeAndSignatureAndClearsBody() = runBlocking {
+        val body = "<html>".toByteArray()
+        val transport = FakeTransport().apply {
+            binaryResponse = ComfyUiBinaryResponse(200, "image/png", body)
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                ComfyUiApiClient(transport).download(config, ComfyUiImageReference("fake.png"))
+            }
+        }
+
+        assertTrue("Invalid image signature bytes must be cleared", body.all { it == 0.toByte() })
     }
 
     @Test
