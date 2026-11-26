@@ -514,6 +514,11 @@ def create_app(
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
     ):
+        if not memory_id.strip() or len(memory_id) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Lila memory identifier is invalid",
+            )
         writer = await require_lila_memory_component(request, user_id, writer=True)
         try:
             memory = MemorySnippet(memory_id=memory_id, content=payload.content)
@@ -572,12 +577,12 @@ def create_app(
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
     ):
-        writer = await require_lila_memory_component(request, user_id, writer=True)
         if not memory_id.strip() or len(memory_id) > 128:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Lila memory identifier is invalid",
             )
+        writer = await require_lila_memory_component(request, user_id, writer=True)
         try:
             deleted = await writer.delete_memory(
                 principal_id=user_id,

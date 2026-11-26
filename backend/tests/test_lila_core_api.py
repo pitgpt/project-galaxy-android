@@ -812,3 +812,114 @@ def test_lila_provider_probe_sanitizes_provider_failures(
     assert response.status_code == expected_status
     assert response.json()["detail"] == expected_detail
     assert "private-provider-detail" not in response.text
+
+def test_lila_memory_routes_require_bearer_authentication(tmp_path):
+    store = SqliteLilaStore(tmp_path / "lila.sqlite3", STORE_KEY)
+    with make_client(lila_store=store) as client:
+        saved = client.put(
+            "/v1/lila/memories/private-memory",
+            json={"content": "The user enjoys nebula photography"},
+        )
+        searched = client.get(
+            "/v1/lila/memories/search",
+            params={"query": "nebula"},
+        )
+        deleted = client.delete("/v1/lila/memories/private-memory")
+
+    assert saved.status_code == 401
+    assert searched.status_code == 401
+    assert deleted.status_code == 401
+
+
+def test_lila_memory_api_is_owner_scoped_and_survives_store_reopen(tmp_path):
+    database_path = tmp_path / "lila.sqlite3"
+    owner_a = {"Authorization": "Bearer user-a-token"}
+    owner_b = {"Authorization": "Bearer user-b-token"}
+
+    with make_client(
+        lila_store=SqliteLilaStore(database_path, STORE_KEY)
+    ) as client:
+        saved = client.put(
+            "/v1/lila/memories/shared-memory",
+            headers=owner_a,
+            json={"content": "The user enjoys nebula photography and astronomy"},
+        )
+        assert saved.status_code == 200
+        assert saved.json() == {"memory_id": "shared-memory", "saved": True}
+
+        other_owner_search = client.get(
+            "/v1/lila/memories/search",
+            headers=owner_b,
+            params={"query": "nebula"},
+        )
+        assert other_owner_search.status_code == 200
+        assert other_owner_search.json()["memories"] == []
+
+        other_owner_delete = client.delete(
+            "/v1/lila/memories/shared-memory",
+            headers=owner_b,
+        )
+        assert other_owner_delete.status_code == 200
+        assert other_owner_delete.json()["deleted"] is False
+
+        owner_search = client.get(
+            "/v1/lila/memories/search",
+            headers=owner_a,
+            params={"query": "nebula"},
+        )
+        assert owner_search.status_code == 200
+        assert owner_search.json()["memories"] == [
+            {
+                "memory_id": "shared-memory",
+                "content": "The user enjoys nebula photography and astronomy",
+            }
+        ]
+
+    # A new store instance models a backend restart against the same durable file.
+    with make_client(
+        lila_store=SqliteLilaStore(database_path, STORE_KEY)
+    ) as client:
+        restored = client.get(
+            "/v1/lila/memories/search",
+            headers=owner_a,
+            params={"query": "nebula"},
+        )
+        assert restored.status_code == 200
+        assert restored.json()["memories"][0]["memory_id"] == "shared-memory"
+
+        deleted = client.delete(
+            "/v1/lila/memories/shared-memory",
+            headers=owner_a,
+        )
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+
+        after_delete = client.get(
+            "/v1/lila/memories/search",
+            headers=owner_a,
+            params={"query": "nebula"},
+        )
+        assert after_delete.status_code == 200
+        assert after_delete.json()["memories"] == []
+
+
+@pytest.mark.parametrize(
+    ("method", "memory_id"),
+    [
+        ("put", "%20"),
+        ("delete", "%20"),
+        ("put", "x" * 129),
+        ("delete", "x" * 129),
+    ],
+)
+def test_lila_memory_routes_reject_invalid_ids_before_storage_lookup(method, memory_id):
+    with make_client() as client:
+        path = f"/v1/lila/memories/{memory_id}"
+        if method == "put":
+            response = client.put(path, json={"content": "Valid memory content"})
+        else:
+            response = client.delete(path)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Lila memory identifier is invalid"
+
