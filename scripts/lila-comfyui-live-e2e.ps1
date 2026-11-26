@@ -476,9 +476,13 @@ function Assert-RequiredSdxlWorkflow {
     if ([int]$latent.inputs.width -ne 1024 -or
         [int]$latent.inputs.height -ne 1024 -or
         [int]$latent.inputs.batch_size -ne 1 -or
+        [int]$sampler.inputs.seed -ne 0 -or
         [int]$sampler.inputs.steps -ne 30 -or
+        [double]$sampler.inputs.cfg -ne 5.5 -or
         [string]$sampler.inputs.sampler_name -cne 'dpmpp_2m' -or
-        [string]$sampler.inputs.scheduler -cne 'karras') {
+        [string]$sampler.inputs.scheduler -cne 'karras' -or
+        [double]$sampler.inputs.denoise -ne 1.0 -or
+        [string]$save.inputs.filename_prefix -cne 'lila') {
         throw 'Saved SDXL workflow does not match the built-in Galaxy SDXL preset.'
     }
 
@@ -557,6 +561,28 @@ function Invoke-SelfTest {
         seed = [pscustomobject]@{ node_id = '3'; input_name = 'seed' }
     }
     Assert-RequiredSdxlWorkflow -Workflow $sdxlWorkflow -RequiredCheckpointName 'sdxl.safetensors'
+
+    $wrongSamplerGraph = ConvertFrom-Json -InputObject $sdxlWorkflow.workflow_json
+    $wrongSamplerGraph.'3'.inputs.cfg = 7.0
+    $wrongSamplerWorkflow = [pscustomobject]@{
+        workflow_id = $sdxlWorkflow.workflow_id
+        workflow_json = ConvertTo-Json -InputObject $wrongSamplerGraph -Depth 12 -Compress
+        positive_prompt = $sdxlWorkflow.positive_prompt
+        negative_prompt = $sdxlWorkflow.negative_prompt
+        width = $sdxlWorkflow.width
+        height = $sdxlWorkflow.height
+        seed = $sdxlWorkflow.seed
+    }
+    $wrongSamplerRejected = $false
+    try {
+        Assert-RequiredSdxlWorkflow -Workflow $wrongSamplerWorkflow -RequiredCheckpointName 'sdxl.safetensors'
+    }
+    catch {
+        $wrongSamplerRejected = $true
+    }
+    if (-not $wrongSamplerRejected) {
+        throw 'SDXL graph validation accepted a modified CFG preset.'
+    }
 
     $wrongCheckpointRejected = $false
     try {
