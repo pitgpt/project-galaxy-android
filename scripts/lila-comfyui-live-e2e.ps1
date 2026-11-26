@@ -10,6 +10,10 @@ submits one idempotent image job, waits for its terminal state, downloads the
 Core-stored PNG, verifies metadata/SHA-256/dimensions, and confirms the job is
 present in the durable conversation history.
 
+When -RequiredCheckpointName is supplied, the script also validates the saved
+built-in SDXL API graph wiring and requires the exact checkpoint to appear in
+ComfyUI's authenticated checkpoint discovery response before submitting a job.
+
 The bearer token is read from LILA_ACCESS_TOKEN or requested as a SecureString.
 It is never written to disk or output. TLS certificate validation remains enabled;
 redirects are disabled. Plain HTTP is accepted only for loopback Core URLs.
@@ -38,6 +42,8 @@ param(
     [int]$MaxWaitSeconds = 900,
     [string]$OutputPath,
     [string]$RequiredWorkflowId,
+    [ValidateLength(1, 512)]
+    [string]$RequiredCheckpointName,
     [switch]$SelfTest
 )
 
@@ -362,6 +368,149 @@ function Assert-RequiredWorkflowId {
     }
 }
 
+
+function Get-RequiredSdxlNode {
+    param(
+        [Parameter(Mandatory = $true)][object]$Graph,
+        [Parameter(Mandatory = $true)][string]$NodeId,
+        [Parameter(Mandatory = $true)][string]$ClassType
+    )
+
+    $property = $Graph.PSObject.Properties[$NodeId]
+    if ($null -eq $property) {
+        throw 'Configured SDXL graph is missing a required node.'
+    }
+    $node = $property.Value
+    if ($null -eq $node -or [string]$node.class_type -cne $ClassType -or $null -eq $node.inputs) {
+        throw 'Configured SDXL graph contains an unexpected node type or missing inputs.'
+    }
+    return $node
+}
+
+function Assert-SdxlNodeLink {
+    param(
+        [Parameter(Mandatory = $true)][object]$Node,
+        [Parameter(Mandatory = $true)][string]$InputName,
+        [Parameter(Mandatory = $true)][string]$ExpectedNodeId,
+        [Parameter(Mandatory = $true)][int]$ExpectedOutput
+    )
+
+    $property = $Node.inputs.PSObject.Properties[$InputName]
+    if ($null -eq $property) {
+        throw 'Configured SDXL graph is missing a required connection.'
+    }
+    $link = @($property.Value)
+    if ($link.Count -ne 2 -or
+        [string]$link[0] -cne $ExpectedNodeId -or
+        [int]$link[1] -ne $ExpectedOutput) {
+        throw 'Configured SDXL graph has an unexpected node connection.'
+    }
+}
+
+function Assert-RequiredSdxlWorkflow {
+    param(
+        [Parameter(Mandatory = $true)][object]$Workflow,
+        [Parameter(Mandatory = $true)][ValidateLength(1, 512)][string]$RequiredCheckpointName
+    )
+
+    $checkpointName = $RequiredCheckpointName.Trim()
+    if ([string]::IsNullOrWhiteSpace($checkpointName) -or
+        $checkpointName.StartsWith('/') -or
+        $checkpointName.Contains('\') -or
+        $checkpointName.Contains(':')) {
+        throw 'Required checkpoint name must be a safe relative ComfyUI model path.'
+    }
+    foreach ($character in $checkpointName.ToCharArray()) {
+        if ([int]$character -lt 32 -or [int]$character -eq 127) {
+            throw 'Required checkpoint name contains a control character.'
+        }
+    }
+    foreach ($segment in $checkpointName.Split('/')) {
+        if ([string]::IsNullOrWhiteSpace($segment) -or $segment -eq '.' -or $segment -eq '..') {
+            throw 'Required checkpoint name contains an unsafe path segment.'
+        }
+    }
+
+    if ([string]$Workflow.workflow_id -cne 'lila.sdxl.v1') {
+        throw 'Required checkpoint validation only supports the built-in lila.sdxl.v1 workflow.'
+    }
+    $workflowJson = [string]$Workflow.workflow_json
+    if ([string]::IsNullOrWhiteSpace($workflowJson) -or $workflowJson.Length -gt 2097152) {
+        throw 'Saved SDXL workflow JSON is missing or exceeds the configured limit.'
+    }
+    try {
+        $graph = ConvertFrom-Json -InputObject $workflowJson -ErrorAction Stop
+    }
+    catch {
+        throw 'Saved SDXL workflow JSON is invalid.'
+    }
+
+    $checkpoint = Get-RequiredSdxlNode -Graph $graph -NodeId '4' -ClassType 'CheckpointLoaderSimple'
+    if ([string]$checkpoint.inputs.ckpt_name -cne $checkpointName) {
+        throw 'Saved SDXL workflow does not use the required checkpoint filename.'
+    }
+    $positive = Get-RequiredSdxlNode -Graph $graph -NodeId '5' -ClassType 'CLIPTextEncode'
+    $negative = Get-RequiredSdxlNode -Graph $graph -NodeId '6' -ClassType 'CLIPTextEncode'
+    $latent = Get-RequiredSdxlNode -Graph $graph -NodeId '7' -ClassType 'EmptyLatentImage'
+    $sampler = Get-RequiredSdxlNode -Graph $graph -NodeId '3' -ClassType 'KSampler'
+    $decode = Get-RequiredSdxlNode -Graph $graph -NodeId '8' -ClassType 'VAEDecode'
+    $save = Get-RequiredSdxlNode -Graph $graph -NodeId '9' -ClassType 'SaveImage'
+
+    foreach ($entry in @(
+        @{ Node = $positive; Input = 'text' },
+        @{ Node = $negative; Input = 'text' },
+        @{ Node = $latent; Input = 'width' },
+        @{ Node = $latent; Input = 'height' },
+        @{ Node = $sampler; Input = 'seed' },
+        @{ Node = $sampler; Input = 'steps' },
+        @{ Node = $sampler; Input = 'cfg' },
+        @{ Node = $sampler; Input = 'sampler_name' },
+        @{ Node = $sampler; Input = 'scheduler' },
+        @{ Node = $save; Input = 'filename_prefix' }
+    )) {
+        if ($null -eq $entry.Node.inputs.PSObject.Properties[$entry.Input]) {
+            throw 'Saved SDXL workflow is missing a required node input.'
+        }
+    }
+
+    if ([int]$latent.inputs.width -ne 1024 -or
+        [int]$latent.inputs.height -ne 1024 -or
+        [int]$latent.inputs.batch_size -ne 1 -or
+        [int]$sampler.inputs.steps -ne 30 -or
+        [string]$sampler.inputs.sampler_name -cne 'dpmpp_2m' -or
+        [string]$sampler.inputs.scheduler -cne 'karras') {
+        throw 'Saved SDXL workflow does not match the built-in Galaxy SDXL preset.'
+    }
+
+    Assert-SdxlNodeLink -Node $positive -InputName 'clip' -ExpectedNodeId '4' -ExpectedOutput 1
+    Assert-SdxlNodeLink -Node $negative -InputName 'clip' -ExpectedNodeId '4' -ExpectedOutput 1
+    Assert-SdxlNodeLink -Node $sampler -InputName 'model' -ExpectedNodeId '4' -ExpectedOutput 0
+    Assert-SdxlNodeLink -Node $sampler -InputName 'positive' -ExpectedNodeId '5' -ExpectedOutput 0
+    Assert-SdxlNodeLink -Node $sampler -InputName 'negative' -ExpectedNodeId '6' -ExpectedOutput 0
+    Assert-SdxlNodeLink -Node $sampler -InputName 'latent_image' -ExpectedNodeId '7' -ExpectedOutput 0
+    Assert-SdxlNodeLink -Node $decode -InputName 'samples' -ExpectedNodeId '3' -ExpectedOutput 0
+    Assert-SdxlNodeLink -Node $decode -InputName 'vae' -ExpectedNodeId '4' -ExpectedOutput 2
+    Assert-SdxlNodeLink -Node $save -InputName 'images' -ExpectedNodeId '8' -ExpectedOutput 0
+
+    if ($null -eq $Workflow.positive_prompt -or
+        [string]$Workflow.positive_prompt.node_id -cne '5' -or
+        [string]$Workflow.positive_prompt.input_name -cne 'text' -or
+        $null -eq $Workflow.negative_prompt -or
+        [string]$Workflow.negative_prompt.node_id -cne '6' -or
+        [string]$Workflow.negative_prompt.input_name -cne 'text' -or
+        $null -eq $Workflow.width -or
+        [string]$Workflow.width.node_id -cne '7' -or
+        [string]$Workflow.width.input_name -cne 'width' -or
+        $null -eq $Workflow.height -or
+        [string]$Workflow.height.node_id -cne '7' -or
+        [string]$Workflow.height.input_name -cne 'height' -or
+        $null -eq $Workflow.seed -or
+        [string]$Workflow.seed.node_id -cne '3' -or
+        [string]$Workflow.seed.input_name -cne 'seed') {
+        throw 'Saved SDXL workflow mappings do not match the built-in graph.'
+    }
+}
+
 function Invoke-SelfTest {
     $https = Get-ValidatedBackendUri -Value 'https://example.invalid'
     if ($https.Scheme -ne 'https') { throw 'HTTPS URL validation failed.' }
@@ -386,6 +535,74 @@ function Invoke-SelfTest {
         throw 'Required workflow ID guard accepted a different workflow.'
     }
 
+    $sdxlGraph = [ordered]@{
+        '4' = @{ class_type = 'CheckpointLoaderSimple'; inputs = @{ ckpt_name = 'sdxl.safetensors' } }
+        '5' = @{ class_type = 'CLIPTextEncode'; inputs = @{ text = ''; clip = @('4', 1) } }
+        '6' = @{ class_type = 'CLIPTextEncode'; inputs = @{ text = ''; clip = @('4', 1) } }
+        '7' = @{ class_type = 'EmptyLatentImage'; inputs = @{ width = 1024; height = 1024; batch_size = 1 } }
+        '3' = @{ class_type = 'KSampler'; inputs = @{
+            seed = 0; steps = 30; cfg = 5.5; sampler_name = 'dpmpp_2m'; scheduler = 'karras'
+            denoise = 1.0; model = @('4', 0); positive = @('5', 0); negative = @('6', 0); latent_image = @('7', 0)
+        } }
+        '8' = @{ class_type = 'VAEDecode'; inputs = @{ samples = @('3', 0); vae = @('4', 2) } }
+        '9' = @{ class_type = 'SaveImage'; inputs = @{ images = @('8', 0); filename_prefix = 'lila' } }
+    }
+    $sdxlWorkflow = [pscustomobject]@{
+        workflow_id = 'lila.sdxl.v1'
+        workflow_json = ConvertTo-Json -InputObject $sdxlGraph -Depth 12 -Compress
+        positive_prompt = [pscustomobject]@{ node_id = '5'; input_name = 'text' }
+        negative_prompt = [pscustomobject]@{ node_id = '6'; input_name = 'text' }
+        width = [pscustomobject]@{ node_id = '7'; input_name = 'width' }
+        height = [pscustomobject]@{ node_id = '7'; input_name = 'height' }
+        seed = [pscustomobject]@{ node_id = '3'; input_name = 'seed' }
+    }
+    Assert-RequiredSdxlWorkflow -Workflow $sdxlWorkflow -RequiredCheckpointName 'sdxl.safetensors'
+
+    $wrongCheckpointRejected = $false
+    try {
+        Assert-RequiredSdxlWorkflow -Workflow $sdxlWorkflow -RequiredCheckpointName 'missing.safetensors'
+    }
+    catch {
+        $wrongCheckpointRejected = $true
+    }
+    if (-not $wrongCheckpointRejected) {
+        throw 'SDXL graph validation accepted a different checkpoint.'
+    }
+
+    $unsafeCheckpointRejected = $false
+    try {
+        Assert-RequiredSdxlWorkflow -Workflow $sdxlWorkflow -RequiredCheckpointName '../outside.safetensors'
+    }
+    catch {
+        $unsafeCheckpointRejected = $true
+    }
+    if (-not $unsafeCheckpointRejected) {
+        throw 'SDXL graph validation accepted an unsafe checkpoint path.'
+    }
+
+    $brokenWorkflow = [pscustomobject]@{
+        workflow_id = $sdxlWorkflow.workflow_id
+        workflow_json = $sdxlWorkflow.workflow_json.Replace('"images":["8",0]', '"images":["3",0]')
+        positive_prompt = $sdxlWorkflow.positive_prompt
+        negative_prompt = $sdxlWorkflow.negative_prompt
+        width = $sdxlWorkflow.width
+        height = $sdxlWorkflow.height
+        seed = $sdxlWorkflow.seed
+    }
+    if ($brokenWorkflow.workflow_json -ceq $sdxlWorkflow.workflow_json) {
+        throw 'SDXL graph self-test could not construct the broken output link.'
+    }
+    $brokenGraphRejected = $false
+    try {
+        Assert-RequiredSdxlWorkflow -Workflow $brokenWorkflow -RequiredCheckpointName 'sdxl.safetensors'
+    }
+    catch {
+        $brokenGraphRejected = $true
+    }
+    if (-not $brokenGraphRejected) {
+        throw 'SDXL graph validation accepted a disconnected output.'
+    }
+
     $png = New-Object byte[] 24
     $signature = [byte[]](137, 80, 78, 71, 13, 10, 26, 10)
     [Array]::Copy($signature, $png, 8)
@@ -402,6 +619,7 @@ function Invoke-SelfTest {
     }
 
     Write-Output 'Required ComfyUI workflow ID guard: PASS'
+    Write-Output 'Built-in SDXL graph/checkpoint validation: PASS'
     Write-Output 'Lila ComfyUI live-E2E script self-test passed.'
 }
 
@@ -438,9 +656,29 @@ try {
     }
     Assert-RequiredWorkflowId -ActualWorkflowId ([string]$provider.workflow_id) -RequiredWorkflowId $RequiredWorkflowId
 
+    if (-not [string]::IsNullOrWhiteSpace($RequiredCheckpointName)) {
+        if ([string]$RequiredWorkflowId -cne 'lila.sdxl.v1') {
+            throw 'Pass -RequiredWorkflowId lila.sdxl.v1 when requiring a checkpoint.'
+        }
+        $configuration = Invoke-CoreJson -Method 'GET' -Path '/v1/lila/image-providers/comfyui/config'
+        if (-not $configuration.configured -or $null -eq $configuration.workflow) {
+            throw 'Lila Core did not return the saved SDXL workflow configuration.'
+        }
+        Assert-RequiredSdxlWorkflow -Workflow $configuration.workflow -RequiredCheckpointName $RequiredCheckpointName
+    }
+
     $probe = Invoke-CoreJson -Method 'POST' -Path '/v1/lila/image-providers/comfyui/test'
     if (-not $probe.connection_reachable -or $probe.workflow_id -ne $provider.workflow_id) {
         throw 'Lila Core could not confirm the configured ComfyUI workflow.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RequiredCheckpointName)) {
+        if (-not $probe.checkpoint_discovery_supported) {
+            throw 'ComfyUI checkpoint discovery is required for this SDXL acceptance run.'
+        }
+        $discoveredCheckpoints = @($probe.available_checkpoints)
+        if ($discoveredCheckpoints -cnotcontains $RequiredCheckpointName) {
+            throw 'The required SDXL checkpoint was not discovered by the configured ComfyUI runtime; no image job was submitted.'
+        }
     }
 
     $payload = @{
@@ -525,6 +763,7 @@ try {
         Result = 'PASS'
         Provider = 'comfyui'
         WorkflowId = [string]$provider.workflow_id
+        CheckpointName = [string]$RequiredCheckpointName
         ConversationId = $conversationId
         JobId = $jobId
         State = 'completed'
