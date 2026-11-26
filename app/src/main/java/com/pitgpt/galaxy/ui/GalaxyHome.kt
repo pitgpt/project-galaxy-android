@@ -1226,6 +1226,15 @@ private fun ConversationScreen(
                                             fontSize = if (isSystem) 11.sp else 15.sp,
                                             lineHeight = if (isSystem) 16.sp else 21.sp
                                         )
+                                        if (remoteImageHistoryEnabled && !pendingDelivery && !isSystem) {
+                                            Spacer(Modifier.height(2.dp))
+                                            ConversationMessageMemoryAction(
+                                                client = app.lilaMemoryClient,
+                                                conversationId = conversationId,
+                                                message = message,
+                                                characterName = characterName
+                                            )
+                                        }
                                     }
                                 }
                             }

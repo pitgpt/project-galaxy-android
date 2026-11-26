@@ -116,6 +116,46 @@ class GalaxyHomeHistoryTest {
         assertEquals("ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ", coreImageJobStatusLabel("submission_unknown"))
     }
 
+    @Test
+    fun conversationMessageMemoryIdIsStableAndScopedToConversation() {
+        val first = conversationMessageMemoryId("conversation-a", "message-1")
+
+        assertEquals(first, conversationMessageMemoryId("conversation-a", "message-1"))
+        assertTrue(first.startsWith("chat-"))
+        assertTrue(first.length <= 128)
+        assertTrue(first != conversationMessageMemoryId("conversation-b", "message-1"))
+        assertTrue(first != conversationMessageMemoryId("conversation-a", "message-2"))
+    }
+
+    @Test
+    fun conversationMessageMemoryContentPreservesSpeakerAndRejectsUnsupportedOrOversizedMessages() {
+        val userMessage = ConversationMessage(
+            id = "message-user",
+            characterId = "character-a",
+            role = MessageRole.USER,
+            content = "Люблю астрономию",
+            createdAtEpochMillis = 1_000L
+        )
+        val assistantMessage = userMessage.copy(
+            id = "message-assistant",
+            role = MessageRole.CHARACTER,
+            content = "Я сохраню это воспоминание."
+        )
+        val systemMessage = userMessage.copy(role = MessageRole.SYSTEM)
+        val oversizedMessage = assistantMessage.copy(content = "x".repeat(4_000))
+
+        assertEquals(
+            "Ты: Люблю астрономию",
+            conversationMessageMemoryContent(userMessage, "Лила")
+        )
+        assertEquals(
+            "Лила: Я сохраню это воспоминание.",
+            conversationMessageMemoryContent(assistantMessage, "Лила")
+        )
+        assertEquals(null, conversationMessageMemoryContent(systemMessage, "Лила"))
+        assertEquals(null, conversationMessageMemoryContent(oversizedMessage, "Лила"))
+    }
+
     private fun imageJob(
         jobId: String,
         state: String,
