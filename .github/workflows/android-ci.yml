@@ -114,7 +114,7 @@ jobs:
           .\scripts\lila-comfyui-live-e2e.ps1 -SelfTest
 
   live-ollama-e2e:
-    name: Live Ollama model E2E
+    name: Live Ollama + llama.cpp model E2E
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -144,7 +144,7 @@ jobs:
           done
           echo "Redis did not become ready" >&2
           exit 1
-      - name: Start two isolated Ollama runtimes and pull the bounded CPU model
+      - name: Start isolated Ollama runtime and pull the bounded CPU model
         run: |
           docker volume create lila-live-ollama-models >/dev/null
           docker run -d --name lila-live-ollama \
@@ -162,24 +162,6 @@ jobs:
           curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
           docker exec lila-live-ollama ollama pull qwen2.5:0.5b
           docker exec lila-live-ollama ollama list
-
-          # A second independent server process exposes the OpenAI-compatible
-          # endpoint on LM Studio's standard local port. It shares only the
-          # pulled model store, not the HTTP runtime or process.
-          docker run -d --name lila-live-ollama-openai \
-            -p 127.0.0.1:1234:11434 \
-            -v lila-live-ollama-models:/root/.ollama \
-            -e OLLAMA_HOST=0.0.0.0:11434 \
-            -e OLLAMA_KEEP_ALIVE=5m \
-            ollama/ollama:0.33.2
-          for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:1234/api/tags >/dev/null; then
-              break
-            fi
-            sleep 2
-          done
-          curl -fsS http://127.0.0.1:1234/api/tags | python -c 'import json,sys; tags=json.load(sys.stdin).get("models",[]); assert any(item.get("name")=="qwen2.5:0.5b" for item in tags), "second Ollama runtime cannot see the bounded model"'
-          docker exec lila-live-ollama-openai ollama list
       - name: Run authenticated production-composition model E2E
         working-directory: backend
         env:
@@ -187,6 +169,83 @@ jobs:
           LILA_LIVE_OLLAMA_MODEL: qwen2.5:0.5b
           REDIS_URL: redis://127.0.0.1:6379/15
         run: pytest -q tests/test_lila_live_ollama_e2e.py -vv
+      - name: Build pinned llama.cpp CPU server and download verified GGUF
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          llama_commit="5d7bb89f4719243dc52fe387bcb67c3518256565"
+          llama_dir="$RUNNER_TEMP/llama.cpp"
+          model_file="$RUNNER_TEMP/lila-qwen2.5-0.5b-instruct-q4_k_m.gguf"
+          mkdir -p "$llama_dir"
+          git -C "$llama_dir" init
+          git -C "$llama_dir" remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C "$llama_dir" fetch --depth 1 origin "$llama_commit"
+          git -C "$llama_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$llama_dir" rev-parse HEAD)" = "$llama_commit"
+
+          cmake -S "$llama_dir" -B "$llama_dir/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_BUILD_UI=OFF
+          cmake --build "$llama_dir/build" --config Release --target llama-server --parallel 2
+          test -x "$llama_dir/build/bin/llama-server"
+
+          curl --fail --location --retry 3 --retry-all-errors \
+            --connect-timeout 20 --max-time 600 \
+            "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/21ef23001f314d0895bd8439b08157c2d4cd9bb7/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" \
+            --output "$model_file"
+          printf '%s  %s\\n' \
+            "6eb923e7d26e9cea28811e1a8e852009b21242fb157b26149d3b188f3a8c8653" \
+            "$model_file" | sha256sum --check -
+      - name: Start llama.cpp OpenAI-compatible server
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          model_file="$RUNNER_TEMP/lila-qwen2.5-0.5b-instruct-q4_k_m.gguf"
+          server_bin="$RUNNER_TEMP/llama.cpp/build/bin/llama-server"
+          "$server_bin" \
+            --model "$model_file" \
+            --alias "qwen2.5-0.5b-llama-cpp" \
+            --ctx-size 2048 \
+            --threads 2 \
+            --parallel 1 \
+            --host 127.0.0.1 \
+            --port 8080 \
+            > "$RUNNER_TEMP/lila-llama-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/lila-llama-server.pid"
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8080/v1/models \
+              -o "$RUNNER_TEMP/lila-llama-models.json" \
+              && python - "$RUNNER_TEMP/lila-llama-models.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          models = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("data", [])
+          if any(item.get("id") == "qwen2.5-0.5b-llama-cpp" for item in models):
+              raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+            then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/lila-llama-server.pid")" 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            tail -n 120 "$RUNNER_TEMP/lila-llama-server.log"
+            echo "Pinned llama.cpp server did not expose the expected model" >&2
+            exit 1
+          fi
       - name: Set up JDK 17 for live Android/Core E2E
         if: env.RUN_LILA_ANDROID_E2E == 'true'
         uses: actions/setup-java@v4
@@ -234,7 +293,8 @@ jobs:
           ANDROID_I_WANT_MY_TCG: "yes"
           PYTHONPATH: ${{ github.workspace }}/backend
           LILA_LIVE_OLLAMA_URL: http://127.0.0.1:11434
-          LILA_LIVE_OLLAMA_SECOND_URL: http://127.0.0.1:1234/v1
+          LILA_LIVE_LLAMA_CPP_URL: http://127.0.0.1:8080/v1
+          LILA_LIVE_LLAMA_CPP_MODEL: qwen2.5-0.5b-llama-cpp
           LILA_LIVE_OLLAMA_MODEL: qwen2.5:0.5b
           REDIS_URL: redis://127.0.0.1:6379/15
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
@@ -268,7 +328,14 @@ jobs:
             "$RUNNER_TEMP/lila-android-e2e/requests.jsonl" \
             "$RUNNER_TEMP/lila-android-e2e/provider-requests.jsonl"
           rm -rf "$RUNNER_TEMP/lila-android-e2e-private"
-          docker rm -f lila-live-ollama-openai lila-live-ollama lila-live-redis 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/lila-llama-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/lila-llama-server.pid")" 2>/dev/null || true
+          fi
+          rm -f "$RUNNER_TEMP/lila-llama-server.pid" \
+            "$RUNNER_TEMP/lila-qwen2.5-0.5b-instruct-q4_k_m.gguf" \
+            "$RUNNER_TEMP/lila-llama-models.json"
+          rm -rf "$RUNNER_TEMP/llama.cpp"
+          docker rm -f lila-live-ollama lila-live-redis 2>/dev/null || true
           docker volume rm lila-live-ollama-models 2>/dev/null || true
 
   live-comfyui-e2e:
