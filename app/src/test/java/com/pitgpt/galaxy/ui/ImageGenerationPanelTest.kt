@@ -18,6 +18,18 @@ import org.junit.Test
 
 class ImageGenerationPanelTest {
     @Test
+    fun stableImageGenerationSeedMatchesCoreContractAndIsDeterministic() {
+        val firstRequestId = "00000000-0000-0000-0000-000000000001"
+        val secondRequestId = "00000000-0000-0000-0000-000000000002"
+
+        val firstSeed = stableImageGenerationSeed(firstRequestId)
+        assertEquals(2059516119L, firstSeed)
+        assertEquals(firstSeed, stableImageGenerationSeed(firstRequestId.uppercase()))
+        assertEquals(2429923490L, stableImageGenerationSeed(secondRequestId))
+        assertTrue(firstSeed in 0L..4_294_967_295L)
+    }
+
+    @Test
     fun historySyncWarningDistinguishesImportLimitsFromFailedJobs() {
         val limitOnly = coreImageHistorySyncWarning(
             CoreImageHistorySyncResult(importedImages = emptyList(), skippedAssets = 2)

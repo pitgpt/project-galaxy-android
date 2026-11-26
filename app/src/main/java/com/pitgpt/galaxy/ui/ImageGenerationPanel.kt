@@ -41,6 +41,8 @@ import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobRecord
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
 import com.pitgpt.galaxy.data.remote.LilaCoreImageGenerationProvider
 import com.pitgpt.galaxy.data.remote.LilaImageHistoryJob
+import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -124,6 +126,22 @@ internal suspend fun <T> refreshStatusPreservingCancellation(
     } catch (_: Exception) {
         currentStatus
     }
+
+/**
+ * Matches Lila Core's image_seed_for_idempotency_key contract:
+ * unsigned big-endian first 32 bits of SHA-256 over the canonical request UUID.
+ * The request is persisted before submission, so retries reuse the same seed.
+ */
+internal fun stableImageGenerationSeed(requestId: String): Long {
+    val canonicalRequestId = UUID.fromString(requestId).toString()
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(canonicalRequestId.toByteArray(Charsets.UTF_8))
+    return try {
+        ByteBuffer.wrap(digest, 0, Int.SIZE_BYTES).int.toLong() and 0xFFFF_FFFFL
+    } finally {
+        digest.fill(0)
+    }
+}
 
 private const val MAX_GENERATED_IMAGE_DIMENSION = 8_192
 private const val MAX_GENERATED_IMAGE_PIXELS = 16L * 1_024 * 1_024
@@ -453,14 +471,16 @@ internal fun ImageGenerationPanel(
             enabled = providerConfigured && prompt.isNotBlank() && request == null && !isSubmitting && !isRestoring,
             onClick = {
                 val requestToSubmit = try {
+                    val requestId = UUID.randomUUID().toString()
                     ImageGenerationRequest(
-                        id = UUID.randomUUID().toString(),
+                        id = requestId,
                         conversationId = conversationId,
                         characterId = characterId,
                         prompt = prompt.trim(),
                         preferredMimeType = "image/png",
                         width = 1024,
                         height = 1024,
+                        seed = stableImageGenerationSeed(requestId),
                         createdAtEpochMillis = System.currentTimeMillis()
                     )
                 } catch (_: IllegalArgumentException) {

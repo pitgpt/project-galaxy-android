@@ -25,6 +25,7 @@ from galaxy_backend.lila_core.image_generation import (
     ComfyUiProviderConfigRequest,
     ComfyUiWorkflowConfig,
     ImageGenerationRequest,
+    image_seed_for_idempotency_key,
     ImageJobNotCancellable,
     LilaImageGenerationService,
 )
@@ -632,6 +633,35 @@ def test_submission_unknown_is_never_resubmitted_on_idempotent_retry(tmp_path):
     assert first.state == "submission_unknown"
     assert second.state == "submission_unknown"
     assert state["post_prompt"] == 1
+
+
+def test_missing_image_seed_is_stable_for_idempotency_key_and_explicit_seed_is_preserved(tmp_path):
+    service, _store, state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+
+    request_key = "00000000-0000-0000-0000-000000000001"
+    request_without_seed = request_payload().model_copy(update={"seed": None})
+    first = run(service.submit(
+        principal_id="owner", idempotency_key=request_key, request=request_without_seed
+    ))
+    retry = run(service.submit(
+        principal_id="owner", idempotency_key=request_key,
+        request=request_payload().model_copy(update={"seed": None}),
+    ))
+
+    assert image_seed_for_idempotency_key(request_key) == 2059516119
+    assert first.seed == 2059516119
+    assert retry.seed == first.seed
+    assert retry.job_id == first.job_id
+    assert state["post_prompt"] == 1
+
+    explicit = run(service.submit(
+        principal_id="owner",
+        idempotency_key="00000000-0000-0000-0000-000000000002",
+        request=request_payload().model_copy(update={"seed": 1234}),
+    ))
+    assert explicit.seed == 1234
+    assert state["post_prompt"] == 2
 
 
 def test_only_confirmed_queued_jobs_can_be_cancelled(tmp_path):

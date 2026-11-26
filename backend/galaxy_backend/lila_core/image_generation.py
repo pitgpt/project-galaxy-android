@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from contextlib import asynccontextmanager
@@ -28,6 +29,14 @@ MAX_COMFYUI_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_COMFYUI_CHECKPOINTS = 256
 MAX_COMFYUI_CHECKPOINT_NAME_CHARS = 512
 COMFYUI_LOCAL_PORTS = frozenset({8188})
+
+
+def image_seed_for_idempotency_key(idempotency_key: str) -> int:
+    """Return the shared unsigned 32-bit SHA-256 seed for an image request key."""
+    if not isinstance(idempotency_key, str) or len(idempotency_key) > 128:
+        raise ValueError("Image idempotency key is invalid")
+    digest = hashlib.sha256(idempotency_key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], byteorder="big", signed=False)
 
 
 class ImageProviderNotConfigured(RuntimeError):
@@ -719,6 +728,10 @@ class LilaImageGenerationService:
         config = await self.store.get_provider_config(principal_id=principal_id)
         if config is None:
             raise ImageProviderNotConfigured
+        if request.seed is None:
+            request = request.model_copy(
+                update={"seed": image_seed_for_idempotency_key(idempotency_key)}
+            )
         request_data = request.model_dump(mode="json", exclude={"conversation_id"})
         job, _created = await self.store.create_job(
             principal_id=principal_id,
