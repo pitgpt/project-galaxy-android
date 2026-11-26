@@ -4,6 +4,7 @@ import time
 import uuid
 from uuid import UUID
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Annotated, Any
 
 import httpx
@@ -196,6 +197,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.settings = settings or Settings.from_env()
+        if app.state.lila_provider_http_client_factory is None:
+            app.state.lila_provider_http_client_factory = partial(
+                create_provider_http_client,
+                local_allowed_ports=app.state.settings.lila_local_provider_ports,
+            )
         app.state.http_client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0))
         app.state.owns_http_client = http_client is None
         app.state.authenticator = authenticator or JwtAuthenticator(app.state.settings)
@@ -339,6 +345,7 @@ def create_app(
                 default_adapter=default_adapter,
                 system_prompt=app.state.settings.lila_system_prompt,
                 http_client_factory=app.state.lila_provider_http_client_factory,
+                local_allowed_ports=app.state.settings.lila_local_provider_ports,
             )
             app.state.lila_core_service = CoreTurnService(
                 ContextAssembler(store, store),
@@ -384,9 +391,7 @@ def create_app(
     app.state.lila_image_store = lila_image_store
     app.state.lila_image_service = lila_image_service
     app.state.lila_image_read_rate_limiter = lila_image_read_rate_limiter
-    app.state.lila_provider_http_client_factory = (
-        lila_provider_http_client_factory or create_provider_http_client
-    )
+    app.state.lila_provider_http_client_factory = lila_provider_http_client_factory
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -632,8 +637,13 @@ def create_app(
         capabilities: list[str],
         enabled: bool,
         system_prompt: str,
+        local_allowed_ports: frozenset[int],
     ) -> dict[str, object]:
-        validate_provider_endpoint(provider_type, base_url)
+        validate_provider_endpoint(
+            provider_type,
+            base_url,
+            local_allowed_ports=local_allowed_ports,
+        )
         # Reuse the adapter's strict URL, identifier, credential and timeout
         # validation without making an outbound request.
         OpenAICompatibleConfig(
@@ -692,6 +702,7 @@ def create_app(
                 capabilities=list(payload.capabilities),
                 enabled=payload.enabled,
                 system_prompt=request.app.state.settings.lila_system_prompt,
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
             )
             await registry.save_provider(
                 principal_id=user_id, provider=record, create_only=True
@@ -754,6 +765,7 @@ def create_app(
                 capabilities=list(payload.capabilities),
                 enabled=payload.enabled,
                 system_prompt=request.app.state.settings.lila_system_prompt,
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
             )
             await registry.save_provider(
                 principal_id=user_id, provider=record, create_only=False
@@ -851,7 +863,11 @@ def create_app(
 
         try:
             provider_type = str(record["provider_type"])
-            validate_provider_endpoint(provider_type, str(record["base_url"]))
+            validate_provider_endpoint(
+                provider_type,
+                str(record["base_url"]),
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
+            )
             config = OpenAICompatibleConfig(
                 provider_id=str(record["provider_id"]),
                 base_url=str(record["base_url"]),
@@ -964,7 +980,11 @@ def create_app(
                 timeout_seconds=timeout_seconds,
                 system_prompt=request.app.state.settings.lila_system_prompt,
             )
-            validate_provider_endpoint(provider_type, config.base_url)
+            validate_provider_endpoint(
+                provider_type,
+                config.base_url,
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
+            )
         except (KeyError, TypeError, ValueError):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1115,7 +1135,11 @@ def create_app(
 
         try:
             provider_type = str(record["provider_type"])
-            validate_provider_endpoint(provider_type, str(record["base_url"]))
+            validate_provider_endpoint(
+                provider_type,
+                str(record["base_url"]),
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
+            )
             config = OpenAICompatibleConfig(
                 provider_id=payload.provider_id,
                 base_url=str(record["base_url"]),
@@ -1184,7 +1208,11 @@ def create_app(
                 fallback_type = str(fallback_record["provider_type"])
                 fallback_url = str(fallback_record["base_url"])
                 fallback_timeout = float(fallback_record["timeout_seconds"])
-                validate_provider_endpoint(fallback_type, fallback_url)
+                validate_provider_endpoint(
+                    fallback_type,
+                    fallback_url,
+                    local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
+                )
                 fallback_config = OpenAICompatibleConfig(
                     provider_id=payload.fallback_provider_id,
                     base_url=fallback_url,
