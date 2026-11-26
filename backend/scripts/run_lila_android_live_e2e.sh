@@ -87,16 +87,24 @@ native_chat = any(
     item.get("port") == 11434 and item.get("path") == "/api/chat"
     for item in records
 )
-openai_chat = any(
-    item.get("port") == 1234 and item.get("path") == "/v1/chat/completions"
+llama_cpp_discovery = any(
+    item.get("method") == "GET"
+    and item.get("port") == 8080
+    and item.get("path") == "/v1/models"
     for item in records
 )
-if not native_chat or not openai_chat:
+llama_cpp_chat = any(
+    item.get("method") == "POST"
+    and item.get("port") == 8080
+    and item.get("path") == "/v1/chat/completions"
+    for item in records
+)
+if not native_chat or not llama_cpp_discovery or not llama_cpp_chat:
     raise SystemExit(
-        "Live provider routing did not reach both independent Ollama ports "
-        "(native 11434 and OpenAI-compatible 1234)"
+        "Live provider routing did not reach native Ollama 11434 and llama.cpp "
+        "discovery/chat endpoints on 8080"
     )
-print("Verified live model requests reached independent Ollama ports 11434 and 1234")
+print("Verified live model requests reached Ollama native 11434 and llama.cpp 8080")
 PY
 fi
 
