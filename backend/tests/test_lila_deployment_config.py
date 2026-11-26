@@ -153,6 +153,7 @@ def test_env_example_does_not_store_lila_secrets():
     assert values["OPENAI_API_KEY"] == ""
     assert values["SAFETY_IDENTIFIER_HMAC_KEY"] == ""
     assert values["LILA_DATABASE_PATH"] == LILA_DATABASE_PATH
+    assert values["LILA_LOCAL_PROVIDER_PORTS"] == "1234,8080,11434"
     assert values["AUTH_JWKS_URL"] == "https://YOUR_PROJECT_REF.supabase.co/auth/v1/.well-known/jwks.json"
     assert values["AUTH_ISSUER"] == "https://YOUR_PROJECT_REF.supabase.co/auth/v1"
     assert values["AUTH_AUDIENCE"] == "authenticated"
@@ -272,6 +273,7 @@ def _set_minimal_development_settings_environment(monkeypatch):
         "LILA_MODEL_ID",
         "LILA_PROVIDER_API_KEY",
         "LILA_PROVIDER_API_KEY_FILE",
+        "LILA_LOCAL_PROVIDER_PORTS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -338,3 +340,48 @@ def test_settings_keep_direct_realtime_secret_environment_compatibility(monkeypa
     assert settings.openai_api_key == "direct-openai-secret"
     assert settings.safety_identifier_hmac_key == "direct-safety-secret"
 
+
+
+
+def test_settings_default_and_custom_operator_local_provider_ports(monkeypatch):
+    from galaxy_backend.config import Settings
+    from galaxy_backend.lila_core.provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    default_settings = Settings.from_env()
+    assert default_settings.lila_local_provider_ports == DEFAULT_LOCAL_PROVIDER_PORTS
+
+    monkeypatch.setenv("LILA_LOCAL_PROVIDER_PORTS", "1234, 8080, 11434, 12345, 8188")
+    custom_settings = Settings.from_env()
+    assert custom_settings.lila_local_provider_ports == frozenset(
+        {1234, 8080, 11434, 12345, 8188}
+    )
+
+    max_ports = ",".join(str(port) for port in range(20000, 20032))
+    monkeypatch.setenv("LILA_LOCAL_PROVIDER_PORTS", max_ports)
+    assert len(Settings.from_env().lila_local_provider_ports) == 32
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "1234,",
+        "1234,,8080",
+        "1234,1234",
+        "80",
+        "65536",
+        "-1",
+        "1e3",
+        "１２３４",
+        ",".join(str(port) for port in range(20000, 20033)),
+    ],
+)
+def test_settings_reject_invalid_operator_local_provider_ports(monkeypatch, value):
+    from galaxy_backend.config import Settings
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    monkeypatch.setenv("LILA_LOCAL_PROVIDER_PORTS", value)
+
+    with pytest.raises(RuntimeError, match="LILA_LOCAL_PROVIDER_PORTS"):
+        Settings.from_env()
