@@ -18,7 +18,7 @@ from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleModelAdapter,
 )
-from .provider_registry import validate_provider_endpoint
+from .provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS, validate_provider_endpoint
 from .ollama import OllamaModelAdapter
 
 
@@ -177,12 +177,14 @@ class OwnerScopedModelAdapterResolver:
         default_adapter: ModelAdapter | None,
         system_prompt: str,
         http_client_factory: Callable[[str, float], httpx.AsyncClient],
+        local_allowed_ports: frozenset[int] = DEFAULT_LOCAL_PROVIDER_PORTS,
     ) -> None:
         self._registry = registry
         self._selection_store = selection_store
         self._default_adapter = default_adapter
         self._system_prompt = system_prompt
         self._http_client_factory = http_client_factory
+        self._local_allowed_ports = frozenset(local_allowed_ports)
 
     async def _managed_adapter(
         self,
@@ -206,7 +208,11 @@ class OwnerScopedModelAdapterResolver:
             provider_type = str(record["provider_type"])
             base_url = str(record["base_url"])
             timeout_seconds = float(record["timeout_seconds"])
-            validate_provider_endpoint(provider_type, base_url)
+            validate_provider_endpoint(
+                provider_type,
+                base_url,
+                local_allowed_ports=self._local_allowed_ports,
+            )
             config = OpenAICompatibleConfig(
                 provider_id=provider_id,
                 base_url=base_url,
