@@ -1695,8 +1695,11 @@ def create_app(
         except IdempotentTurnInProgress:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="A turn with this Idempotency-Key is still processing; retry the same request.",
-                headers={"Retry-After": "2"},
+                detail="A turn with this Idempotency-Key is unresolved; query its status before retrying.",
+                headers={
+                    "Retry-After": "2",
+                    "X-Lila-Outcome-Unknown": "true",
+                },
             ) from None
         except ProviderSelectionRequired:
             raise HTTPException(

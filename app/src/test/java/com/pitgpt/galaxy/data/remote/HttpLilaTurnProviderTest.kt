@@ -230,6 +230,27 @@ class HttpLilaTurnProviderTest {
         assertEquals("GET", pending.requestMethod)
         assertTrue(pending.requestBody.size() == 0)
 
+        val unknown = FakeConnection(
+            URL("https://api.example.test/v1/lila/conversations/00000000-0000-4000-8000-000000000501/turns/$idempotencyKey"),
+            200,
+            JSONObject()
+                .put("conversation_id", "00000000-0000-4000-8000-000000000501")
+                .put("status", "outcome_unknown")
+                .put("response", JSONObject.NULL)
+                .toString()
+        )
+        val unknownProvider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "test-access-token" },
+            connectionFactory = { unknown }
+        )
+        assertEquals(
+            LilaTurnStatus.OUTCOME_UNKNOWN,
+            unknownProvider.getTurnStatus("00000000-0000-4000-8000-000000000501", idempotencyKey)?.status
+        )
+        assertEquals("GET", unknown.requestMethod)
+        assertTrue(unknown.requestBody.size() == 0)
+
         val notFound = FakeConnection(
             URL("https://api.example.test/v1/lila/conversations/00000000-0000-4000-8000-000000000501/turns/$idempotencyKey"),
             404,

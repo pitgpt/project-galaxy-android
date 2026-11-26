@@ -1,4 +1,6 @@
 import asyncio
+import sqlite3
+import time
 from uuid import uuid4
 
 import pytest
@@ -14,7 +16,10 @@ from galaxy_backend.lila_core.openai_compatible import (
     ModelProviderUnavailable,
 )
 from galaxy_backend.lila_core.service import CoreTurnService, ModelAdapterContractError
-from galaxy_backend.lila_core.sqlite_store import SqliteLilaStore
+from galaxy_backend.lila_core.sqlite_store import (
+    IDEMPOTENT_TURN_UNKNOWN_AFTER_MS,
+    SqliteLilaStore,
+)
 from galaxy_backend.main import create_app
 
 
@@ -151,7 +156,13 @@ def build_service(*, adapter=None):
     return service, history, memories, model
 
 
-def make_client(service=None, turn_limiter=None, history_reader=None, provider_adapter=None):
+def make_client(
+    service=None,
+    turn_limiter=None,
+    history_reader=None,
+    provider_adapter=None,
+    lila_store=None,
+):
     app = create_app(
         settings=make_settings(),
         http_client=FakeHttpClient(),
@@ -160,6 +171,7 @@ def make_client(service=None, turn_limiter=None, history_reader=None, provider_a
         lila_turn_rate_limiter=turn_limiter,
         lila_history_reader=history_reader,
         lila_provider_adapter=provider_adapter,
+        lila_store=lila_store,
     )
     return TestClient(app)
 
@@ -477,8 +489,52 @@ def test_pending_idempotency_key_blocks_duplicate_provider_execution(tmp_path):
     assert first.status_code == 503
     assert retry.status_code == 409
     assert retry.headers["Retry-After"] == "2"
+    assert retry.headers["X-Lila-Outcome-Unknown"] == "true"
     assert len(adapter.contexts) == 1
     assert "ambiguous provider outcome" not in retry.text
+
+
+def test_stale_pending_turn_status_is_explicit_and_retry_stays_blocked(tmp_path):
+    database_path = tmp_path / "lila.sqlite3"
+    service, store, adapter = build_persistent_service(database_path)
+    key = str(uuid4())
+    values = {
+        "principal_id": "user-a",
+        "conversation_id": "conversation-1",
+        "idempotency_key": key,
+        "user_message": "Привет, Лила",
+    }
+    assert asyncio.run(store.reserve_idempotent_turn(**values)) is None
+
+    database = sqlite3.connect(database_path)
+    database.execute(
+        "UPDATE lila_turn_requests SET updated_at_ms=?",
+        (int(time.time() * 1000) - IDEMPOTENT_TURN_UNKNOWN_AFTER_MS - 1,),
+    )
+    database.commit()
+    database.close()
+
+    auth = {"Authorization": "Bearer user-a-token"}
+    with make_client(service, lila_store=store) as client:
+        status = client.get(
+            f"/v1/lila/conversations/conversation-1/turns/{key}",
+            headers=auth,
+        )
+        retry = client.post(
+            "/v1/lila/turns",
+            headers={**auth, "Idempotency-Key": key},
+            json=turn_payload(),
+        )
+
+    assert status.status_code == 200
+    assert status.json() == {
+        "conversation_id": "conversation-1",
+        "status": "outcome_unknown",
+        "response": None,
+    }
+    assert retry.status_code == 409
+    assert retry.headers["X-Lila-Outcome-Unknown"] == "true"
+    assert adapter.contexts == []
 
 
 def test_idempotency_keys_are_scoped_by_authenticated_owner(tmp_path):

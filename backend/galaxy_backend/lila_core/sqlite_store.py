@@ -36,6 +36,12 @@ from .memory import (
 )
 
 
+# The provider HTTP timeout is capped at 120 seconds. Five minutes leaves room
+# for request scheduling and durable completion while making abandoned
+# reservations visible. This is observational only: it never unlocks a retry.
+IDEMPOTENT_TURN_UNKNOWN_AFTER_MS = 5 * 60 * 1000
+
+
 class ProviderAlreadyExists(RuntimeError):
     """An owner already has a provider with this identifier."""
 
@@ -629,13 +635,22 @@ class SqliteLilaStore:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT conversation_key, state, response_nonce, response_ciphertext "
+                "SELECT conversation_key, state, response_nonce, response_ciphertext, updated_at_ms "
                 "FROM lila_turn_requests WHERE owner_key=? AND request_key=?",
                 (owner_key, request_key),
             ).fetchone()
             if row is None or row["conversation_key"] != conversation_key:
                 return "not_found", None
             if row["state"] == "pending":
+                pending_age_ms = max(
+                    0,
+                    int(time.time() * 1000) - int(row["updated_at_ms"]),
+                )
+                if pending_age_ms >= IDEMPOTENT_TURN_UNKNOWN_AFTER_MS:
+                    # The upstream outcome may be unknown after process death.
+                    # Keep the durable reservation pending so no retry can
+                    # trigger a second potentially billable generation.
+                    return "outcome_unknown", None
                 return "pending", None
             if (
                 row["state"] != "completed"

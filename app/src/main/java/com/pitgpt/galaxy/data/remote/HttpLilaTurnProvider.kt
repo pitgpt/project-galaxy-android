@@ -51,6 +51,7 @@ data class LilaHistoryMessage(
 
 enum class LilaTurnStatus {
     PENDING,
+    OUTCOME_UNKNOWN,
     COMPLETED,
     NOT_FOUND
 }
@@ -59,6 +60,10 @@ data class LilaTurnReconciliation(
     val status: LilaTurnStatus,
     val result: LilaTurnResult? = null
 )
+
+private fun LilaTurnReconciliation?.hasUnresolvedOutcome(): Boolean =
+    this?.status == LilaTurnStatus.PENDING ||
+        this?.status == LilaTurnStatus.OUTCOME_UNKNOWN
 
 /**
  * Stable across Galaxy and Desktop for the same authenticated owner partition
@@ -199,7 +204,7 @@ class HttpLilaTurnProvider(
                         if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                             return@withContext reconciliation.result!!
                         }
-                        if (reconciliation?.status == LilaTurnStatus.PENDING) {
+                        if (reconciliation.hasUnresolvedOutcome()) {
                             throw GalaxyApiException(status, OUTCOME_UNKNOWN_MESSAGE)
                         }
                     }
@@ -243,7 +248,7 @@ class HttpLilaTurnProvider(
                     if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                         return@withContext reconciliation.result!!
                     }
-                    if (reconciliation?.status == LilaTurnStatus.PENDING) {
+                    if (reconciliation.hasUnresolvedOutcome()) {
                         throw GalaxyApiException(null, OUTCOME_UNKNOWN_MESSAGE)
                     }
                 }
@@ -258,7 +263,7 @@ class HttpLilaTurnProvider(
                     if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                         return@withContext reconciliation.result!!
                     }
-                    if (reconciliation?.status == LilaTurnStatus.PENDING) {
+                    if (reconciliation.hasUnresolvedOutcome()) {
                         throw GalaxyApiException(null, OUTCOME_UNKNOWN_MESSAGE)
                     }
                 }
@@ -337,6 +342,7 @@ class HttpLilaTurnProvider(
             if (payload.optString("conversation_id", "") != conversationId) return null
             return when (payload.optString("status", "")) {
                 "pending" -> LilaTurnReconciliation(LilaTurnStatus.PENDING)
+                "outcome_unknown" -> LilaTurnReconciliation(LilaTurnStatus.OUTCOME_UNKNOWN)
                 "completed" -> {
                     val response = payload.optJSONObject("response") ?: return null
                     val responseConversationId = response.optString("conversation_id", "")

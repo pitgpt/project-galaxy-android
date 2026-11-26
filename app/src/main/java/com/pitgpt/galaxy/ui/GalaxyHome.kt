@@ -157,6 +157,14 @@ internal fun coreImageJobStatusLabel(state: String): String = when (state) {
     else -> "СТАТУС НЕИЗВЕСТЕН"
 }
 
+internal fun lilaTurnReconciliationWarning(status: LilaTurnStatus?): String? = when (status) {
+    LilaTurnStatus.PENDING ->
+        "Запрос Лилы ещё обрабатывается. Не отправляй это сообщение повторно: Core сохраняет защиту от повторной генерации."
+    LilaTurnStatus.OUTCOME_UNKNOWN ->
+        "Результат запроса Лилы не подтверждён. Автоматический повтор отключён, чтобы избежать второй генерации. Нажми «Обновить» позже, чтобы проверить сохранённый результат."
+    else -> null
+}
+
 @Composable
 fun GalaxyHome() {
     val context = LocalContext.current
@@ -247,6 +255,9 @@ fun GalaxyHome() {
                     throw error
                 } catch (_: Exception) {
                     null
+                }
+                lilaTurnReconciliationWarning(reconciliation?.status)?.let {
+                    historySyncWarning = it
                 }
                 if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                     val recovered = reconciliation.result ?: return@forEach

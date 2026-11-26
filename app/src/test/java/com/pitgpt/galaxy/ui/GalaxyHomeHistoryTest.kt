@@ -5,12 +5,27 @@ import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
 import com.pitgpt.galaxy.data.remote.LilaImageHistoryJob
+import com.pitgpt.galaxy.data.remote.LilaTurnStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GalaxyHomeHistoryTest {
+
+    @Test
+    fun unresolvedTurnStatusesShowSafeRecoveryGuidance() {
+        assertTrue(
+            lilaTurnReconciliationWarning(LilaTurnStatus.PENDING).orEmpty()
+                .contains("Не отправляй")
+        )
+        assertTrue(
+            lilaTurnReconciliationWarning(LilaTurnStatus.OUTCOME_UNKNOWN).orEmpty()
+                .contains("не подтверждён")
+        )
+        assertEquals(null, lilaTurnReconciliationWarning(LilaTurnStatus.COMPLETED))
+        assertEquals(null, lilaTurnReconciliationWarning(LilaTurnStatus.NOT_FOUND))
+    }
 
     @Test
     fun timelineMergesMessagesImagesAndCoreJobsInChronologicalOrder() {

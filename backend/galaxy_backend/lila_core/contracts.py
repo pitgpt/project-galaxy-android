@@ -119,7 +119,7 @@ class IdempotentTurnStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conversation_id: str = Field(min_length=1, max_length=128)
-    status: Literal["pending", "completed"]
+    status: Literal["pending", "outcome_unknown", "completed"]
     response: CoreTurnResponse | None = None
 
     @model_validator(mode="after")

@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 import stat
+import time
 
 import pytest
 
@@ -10,7 +11,11 @@ from galaxy_backend.lila_core.memory import (
     IdempotentTurnInProgress,
     MemorySnippet,
 )
-from galaxy_backend.lila_core.sqlite_store import LilaStoreIntegrityError, SqliteLilaStore
+from galaxy_backend.lila_core.sqlite_store import (
+    IDEMPOTENT_TURN_UNKNOWN_AFTER_MS,
+    LilaStoreIntegrityError,
+    SqliteLilaStore,
+)
 
 KEY = bytes.fromhex("3031323334353637383961626364656630313233343536373839616263646566")
 
@@ -393,6 +398,42 @@ def test_empty_memory_query_decrypts_only_requested_recent_window(tmp_path, monk
     assert len(results) == 2
     assert decrypt_calls == 2
 
+
+
+def test_stale_pending_turn_status_is_unknown_without_unlocking_reservation(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    store = SqliteLilaStore(path, KEY)
+    values = {
+        "principal_id": "owner-a",
+        "conversation_id": "chat",
+        "idempotency_key": "00000000-0000-4000-8000-000000000126",
+        "user_message": "possibly generated turn",
+    }
+
+    assert run(store.reserve_idempotent_turn(**values)) is None
+    assert run(store.get_idempotent_turn_result(
+        principal_id=values["principal_id"],
+        conversation_id=values["conversation_id"],
+        idempotency_key=values["idempotency_key"],
+    )) == ("pending", None)
+
+    database = sqlite3.connect(path)
+    database.execute(
+        "UPDATE lila_turn_requests SET updated_at_ms=?",
+        (int(time.time() * 1000) - IDEMPOTENT_TURN_UNKNOWN_AFTER_MS - 1,),
+    )
+    database.commit()
+    database.close()
+
+    assert run(store.get_idempotent_turn_result(
+        principal_id=values["principal_id"],
+        conversation_id=values["conversation_id"],
+        idempotency_key=values["idempotency_key"],
+    )) == ("outcome_unknown", None)
+
+    # Reporting ambiguity must never release the at-most-once reservation.
+    with pytest.raises(IdempotentTurnInProgress):
+        run(store.reserve_idempotent_turn(**values))
 
 
 def test_idempotent_turn_replays_encrypted_response_and_rejects_key_reuse(tmp_path):
