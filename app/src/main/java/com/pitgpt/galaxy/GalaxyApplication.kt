@@ -15,6 +15,7 @@ import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.remote.GalaxyAccessTokenProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaTurnProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaProviderCatalog
+import com.pitgpt.galaxy.data.remote.HttpLilaMemoryClient
 import com.pitgpt.galaxy.data.remote.LilaCoreImageGenerationProvider
 import com.pitgpt.galaxy.data.remote.HttpRealtimeSessionProvider
 import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
@@ -60,6 +61,9 @@ class GalaxyApplication : Application() {
     @Volatile
     private var currentLilaProviderCatalog: HttpLilaProviderCatalog? = null
 
+    @Volatile
+    private var currentLilaMemoryClient: HttpLilaMemoryClient? = null
+
     private val initializeGalaxy by lazy { InitializeGalaxy(characters) }
 
     val auth: SupabaseAuthService?
@@ -70,6 +74,9 @@ class GalaxyApplication : Application() {
 
     val lilaProviderCatalog: HttpLilaProviderCatalog
         get() = checkNotNull(currentLilaProviderCatalog) { "Galaxy application has not been initialized." }
+
+    val lilaMemoryClient: HttpLilaMemoryClient
+        get() = checkNotNull(currentLilaMemoryClient) { "Galaxy application has not been initialized." }
 
     /** Authenticated image adapter; ComfyUI credentials remain in the Core vault. */
     val lilaCoreImageGenerationProvider: LilaCoreImageGenerationProvider
@@ -111,7 +118,11 @@ class GalaxyApplication : Application() {
         currentAuth = SupabaseClientFactory.createOrNull(this, configuration)
         val apiBaseUrl = configuration?.galaxyApiBaseUrl ?: BuildConfig.GALAXY_API_BASE_URL
         currentLilaTurnProvider = HttpLilaTurnProvider(apiBaseUrl, currentAuth)
-        currentLilaProviderCatalog = HttpLilaProviderCatalog(apiBaseUrl, currentAuth)
+        val providerCatalog = HttpLilaProviderCatalog(apiBaseUrl, currentAuth)
+        currentLilaProviderCatalog = providerCatalog
+        currentLilaMemoryClient = HttpLilaMemoryClient { method, path, body ->
+            providerCatalog.requestJson(method, path, body)
+        }
     }
 
     fun createComfyUiRuntime(config: ComfyUiConnectionConfig, template: ComfyUiWorkflowTemplate, clientId: String): ComfyUiRuntime =

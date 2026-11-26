@@ -928,3 +928,52 @@ def test_lila_memory_routes_reject_invalid_ids_before_storage_lookup(method, mem
     assert response.status_code == 422
     assert response.json()["detail"] == "Lila memory identifier is invalid"
 
+
+
+
+def test_lila_memory_search_without_query_lists_recent_owner_scoped_memories(tmp_path):
+    database_path = tmp_path / "lila.sqlite3"
+    owner_a = {"Authorization": "Bearer user-a-token"}
+    owner_b = {"Authorization": "Bearer user-b-token"}
+
+    with make_client(
+        lila_store=SqliteLilaStore(database_path, STORE_KEY)
+    ) as client:
+        for memory_id, content in (
+            ("owner-a-one", "Prefers quiet astronomy evenings"),
+            ("owner-a-two", "Enjoys nebula photography"),
+        ):
+            response = client.put(
+                f"/v1/lila/memories/{memory_id}",
+                headers=owner_a,
+                json={"content": content},
+            )
+            assert response.status_code == 200
+
+        other_owner = client.put(
+            "/v1/lila/memories/owner-b-only",
+            headers=owner_b,
+            json={"content": "Keeps a private gardening journal"},
+        )
+        assert other_owner.status_code == 200
+
+        recent_a = client.get(
+            "/v1/lila/memories/search",
+            headers=owner_a,
+            params={"limit": 20},
+        )
+        recent_b = client.get(
+            "/v1/lila/memories/search",
+            headers=owner_b,
+            params={"limit": 20},
+        )
+
+    assert recent_a.status_code == 200
+    assert {item["memory_id"] for item in recent_a.json()["memories"]} == {
+        "owner-a-one",
+        "owner-a-two",
+    }
+    assert recent_b.status_code == 200
+    assert [item["memory_id"] for item in recent_b.json()["memories"]] == [
+        "owner-b-only"
+    ]

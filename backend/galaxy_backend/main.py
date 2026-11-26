@@ -544,19 +544,14 @@ def create_app(
     async def search_lila_memories(
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
-        query: str = Query(min_length=1, max_length=512),
+        query: str = Query(default="", max_length=512),
         limit: int = Query(default=8, ge=1, le=20),
     ):
         reader = await require_lila_memory_component(request, user_id, writer=False)
-        if not query.strip():
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Lila memory search query is invalid",
-            )
         try:
             records = await reader.search_relevant_memories(
                 principal_id=user_id,
-                query=query,
+                query=query.strip(),
                 limit=limit,
             )
             memories = [MemorySnippet.model_validate(record) for record in records]

@@ -179,6 +179,7 @@ fun GalaxyHome() {
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
     var showProviders by remember { mutableStateOf(false) }
+    var showMemory by remember { mutableStateOf(false) }
     var showComfyUiSettings by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
@@ -462,6 +463,11 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showMemory) {
+        LilaMemorySettingsScreen(
+            client = app.lilaMemoryClient,
+            onBack = { showMemory = false }
+        )
     } else if (showProviders) {
         val providerConversationId = conversationOwnerKey?.let { ownerKey ->
             getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
@@ -613,6 +619,7 @@ fun GalaxyHome() {
             onOpenProfile = { showProfile = true },
             onOpenCharacters = { showCharacters = true },
             onOpenProviders = { showProviders = true },
+            onOpenMemory = { showMemory = true },
             onOpenComfyUi = { showComfyUiSettings = true }
         )
     }
@@ -631,6 +638,7 @@ private fun HomeScreen(
     onOpenProfile: () -> Unit,
     onOpenCharacters: () -> Unit,
     onOpenProviders: () -> Unit,
+    onOpenMemory: () -> Unit,
     onOpenComfyUi: () -> Unit
 ) {
     Box(
@@ -740,6 +748,15 @@ private fun HomeScreen(
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Text("ПРОВАЙДЕРЫ И МОДЕЛИ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onOpenMemory,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("ДОЛГОВРЕМЕННАЯ ПАМЯТЬ ЛИЛЫ", fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(10.dp))
             Button(
