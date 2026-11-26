@@ -200,7 +200,7 @@ jobs:
             --connect-timeout 20 --max-time 600 \
             "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/21ef23001f314d0895bd8439b08157c2d4cd9bb7/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" \
             --output "$model_file"
-          printf '%s  %s\\n' \
+          printf '%s  %s\n' \
             "6eb923e7d26e9cea28811e1a8e852009b21242fb157b26149d3b188f3a8c8653" \
             "$model_file" | sha256sum --check -
       - name: Start llama.cpp OpenAI-compatible server
