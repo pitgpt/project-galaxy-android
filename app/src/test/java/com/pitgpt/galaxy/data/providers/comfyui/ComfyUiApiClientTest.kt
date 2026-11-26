@@ -5,7 +5,9 @@ import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.util.ArrayDeque
 import com.pitgpt.galaxy.core.model.ImageGenerationState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -46,6 +48,27 @@ class ComfyUiApiClientTest {
         height = ComfyUiNodeInput("3", "height"),
         seed = ComfyUiNodeInput("4", "seed")
     )
+
+    @Test
+    fun binaryResponseBodyIsClearedWhenCancellationWinsBeforeDelivery() = runBlocking {
+        val body = "private image response".toByteArray()
+        val response = ComfyUiBinaryResponse(200, "image/png", body)
+
+        val failure = runCatching {
+            suspendCancellableCoroutine<ComfyUiBinaryResponse> { continuation ->
+                resumeCancellableWithCleanup(continuation, response) { undelivered ->
+                    undelivered.body.fill(0)
+                }
+                assertTrue(
+                    "Cancellation before dispatch must win over the pending binary result",
+                    continuation.cancel(CancellationException("cancel before delivery"))
+                )
+            }
+        }.exceptionOrNull()
+
+        assertTrue("The suspended caller must observe cancellation", failure is CancellationException)
+        assertTrue("An undelivered binary response must be wiped", body.all { it == 0.toByte() })
+    }
 
     @Test
     fun boundedReadClearsScratchBufferAfterSuccess() {
