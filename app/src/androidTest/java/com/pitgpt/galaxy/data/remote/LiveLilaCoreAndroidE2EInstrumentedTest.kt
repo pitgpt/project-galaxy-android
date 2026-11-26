@@ -42,6 +42,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
         val providerBaseUrl = requiredString(config, "provider_base_url")
         val secondProviderBaseUrl = requiredString(config, "second_provider_base_url")
         val modelId = requiredString(config, "model_id")
+        val llamaCppModelId = requiredString(config, "second_model_id")
         val conversationId = stableLilaConversationId(ownerKey, characterId)
         val storageCharacterId = "owner:$ownerKey:$characterId"
         val tokenProvider = GalaxyAccessTokenProvider { accessToken }
@@ -77,7 +78,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
         }
         val app = InstrumentationRegistry.getInstrumentation()
             .targetContext.applicationContext as GalaxyApplication
-        val openAiProviderId = requiredString(config, "openai_provider_id")
+        val llamaCppProviderId = requiredString(config, "llama_cpp_provider_id")
 
         try {
             val created = catalogStep("create-provider") {
@@ -172,40 +173,40 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertEquals(messageText, localHistory[0].content)
             assertEquals(result.text, localHistory[1].content)
 
-            // Switch to a second, independently running Ollama process through its
-            // OpenAI-compatible /v1 API. The resolver must route to the second host port,
-            // not reuse the first provider's native /api/chat endpoint.
-            val openAiProvider = catalogStep("create-openai-compatible-provider") {
+            // Switch to a real llama.cpp server through its OpenAI-compatible /v1 API.
+            // The resolver must reach llama.cpp on its own port, not reuse Ollama's
+            // native /api/chat transport or the primary provider configuration.
+            val llamaCppProvider = catalogStep("create-llama-cpp-provider") {
                 catalog.createProvider(
-                    providerId = openAiProviderId,
+                    providerId = llamaCppProviderId,
                     providerType = "local",
                     baseUrl = secondProviderBaseUrl,
-                    modelId = modelId,
+                    modelId = llamaCppModelId,
                     apiKey = null,
                     timeoutSeconds = 120.0
                 )
             }
-            assertEquals(openAiProviderId, openAiProvider.providerId)
-            assertEquals("local", openAiProvider.providerType)
-            assertTrue(!openAiProvider.hasApiKey)
+            assertEquals(llamaCppProviderId, llamaCppProvider.providerId)
+            assertEquals("local", llamaCppProvider.providerType)
+            assertTrue(!llamaCppProvider.hasApiKey)
 
-            val openAiProbe = catalogStep("probe-openai-compatible-provider") {
-                catalog.probeProvider(openAiProviderId)
+            val llamaCppProbe = catalogStep("probe-llama-cpp-provider") {
+                catalog.probeProvider(llamaCppProviderId)
             }
-            assertTrue(openAiProbe.connectionReachable)
-            assertEquals(true, openAiProbe.configuredModelAvailable)
-            assertTrue(openAiProbe.modelIds.contains(modelId))
+            assertTrue(llamaCppProbe.connectionReachable)
+            assertEquals(true, llamaCppProbe.configuredModelAvailable)
+            assertTrue(llamaCppProbe.modelIds.contains(llamaCppModelId))
 
             val switchedSelection = catalogStep("switch-conversation-model") {
                 catalog.setConversationModel(
                     conversationId = conversationId,
-                    providerId = openAiProviderId,
-                    modelId = modelId
+                    providerId = llamaCppProviderId,
+                    modelId = llamaCppModelId
                 )
             }
             assertTrue(switchedSelection.selected)
-            assertEquals(openAiProviderId, switchedSelection.providerId)
-            assertEquals(modelId, switchedSelection.modelId)
+            assertEquals(llamaCppProviderId, switchedSelection.providerId)
+            assertEquals(llamaCppModelId, switchedSelection.modelId)
 
             val secondMessage = "Продолжи тот же разговор и кратко подтверди переключение модели."
             val secondIdempotencyKey = UUID.randomUUID().toString()
@@ -226,8 +227,8 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
                 idempotencyKey = secondIdempotencyKey
             )
             assertEquals(conversationId, secondResult.conversationId)
-            assertEquals(openAiProviderId, secondResult.providerId)
-            assertEquals(modelId, secondResult.modelId)
+            assertEquals(llamaCppProviderId, secondResult.providerId)
+            assertEquals(llamaCppModelId, secondResult.modelId)
             assertTrue(secondResult.text.isNotBlank())
 
             val switchedRemoteHistory = turnProvider.loadAllHistory(conversationId)
@@ -239,8 +240,8 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertEquals(modelId, switchedRemoteHistory[1].modelId)
             assertEquals(secondMessage, switchedRemoteHistory[2].content)
             assertEquals(secondResult.text, switchedRemoteHistory[3].content)
-            assertEquals(openAiProviderId, switchedRemoteHistory[3].providerId)
-            assertEquals(modelId, switchedRemoteHistory[3].modelId)
+            assertEquals(llamaCppProviderId, switchedRemoteHistory[3].providerId)
+            assertEquals(llamaCppModelId, switchedRemoteHistory[3].modelId)
 
             app.conversations.commitPendingTurn(
                 pendingMessageId = secondPendingId,
@@ -267,8 +268,8 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
                 catalog.getConversationModel(conversationId)
             }
             assertTrue(restoredSelection.selected)
-            assertEquals(openAiProviderId, restoredSelection.providerId)
-            assertEquals(modelId, restoredSelection.modelId)
+            assertEquals(llamaCppProviderId, restoredSelection.providerId)
+            assertEquals(llamaCppModelId, restoredSelection.modelId)
 
             // Configure an explicit fallback while both independently running
             // providers are enabled and their models have already been discovered.
@@ -277,14 +278,14 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
                     conversationId = conversationId,
                     providerId = providerId,
                     modelId = modelId,
-                    fallbackProviderId = openAiProviderId,
-                    fallbackModelId = modelId
+                    fallbackProviderId = llamaCppProviderId,
+                    fallbackModelId = llamaCppModelId
                 )
             }
             assertTrue(fallbackSelection.selected)
             assertEquals(providerId, fallbackSelection.providerId)
-            assertEquals(openAiProviderId, fallbackSelection.fallbackProviderId)
-            assertEquals(modelId, fallbackSelection.fallbackModelId)
+            assertEquals(llamaCppProviderId, fallbackSelection.fallbackProviderId)
+            assertEquals(llamaCppModelId, fallbackSelection.fallbackModelId)
 
             // Disable only the test-owned primary provider after the selection has
             // been validated. Core must use the explicitly selected fallback and
@@ -322,8 +323,8 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
                 idempotencyKey = fallbackIdempotencyKey
             )
             assertEquals(conversationId, fallbackResult.conversationId)
-            assertEquals(openAiProviderId, fallbackResult.providerId)
-            assertEquals(modelId, fallbackResult.modelId)
+            assertEquals(llamaCppProviderId, fallbackResult.providerId)
+            assertEquals(llamaCppModelId, fallbackResult.modelId)
             assertTrue(fallbackResult.fallbackUsed)
             assertEquals(providerId, fallbackResult.fallbackFromProviderId)
             assertEquals(modelId, fallbackResult.fallbackFromModelId)
@@ -339,8 +340,8 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             val fallbackHistoryAssistant = fallbackRemoteHistory.last()
             assertEquals(fallbackMessage, fallbackRemoteHistory[4].content)
             assertEquals(fallbackResult.text, fallbackHistoryAssistant.content)
-            assertEquals(openAiProviderId, fallbackHistoryAssistant.providerId)
-            assertEquals(modelId, fallbackHistoryAssistant.modelId)
+            assertEquals(llamaCppProviderId, fallbackHistoryAssistant.providerId)
+            assertEquals(llamaCppModelId, fallbackHistoryAssistant.modelId)
             assertTrue(fallbackHistoryAssistant.fallbackUsed)
             assertEquals(providerId, fallbackHistoryAssistant.fallbackFromProviderId)
             assertEquals(modelId, fallbackHistoryAssistant.fallbackFromModelId)
@@ -374,7 +375,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             )
             assertNotNull(noticeText)
             assertTrue(noticeText!!.contains("основной провайдер был недоступен до отправки"))
-            assertTrue(noticeText.contains("$openAiProviderId · $modelId"))
+            assertTrue(noticeText.contains("$llamaCppProviderId · $llamaCppModelId"))
 
             // Exercise the same remote-history merge used when Galaxy reopens a
             // conversation after process restart. The durable Core disclosure must
@@ -417,8 +418,8 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertTrue(restoredFallbackSelection.selected)
             assertEquals(providerId, restoredFallbackSelection.providerId)
             assertEquals(modelId, restoredFallbackSelection.modelId)
-            assertEquals(openAiProviderId, restoredFallbackSelection.fallbackProviderId)
-            assertEquals(modelId, restoredFallbackSelection.fallbackModelId)
+            assertEquals(llamaCppProviderId, restoredFallbackSelection.fallbackProviderId)
+            assertEquals(llamaCppModelId, restoredFallbackSelection.fallbackModelId)
 
             val integrity = app.database.openHelper.writableDatabase
                 .query("PRAGMA integrity_check").use { cursor ->
@@ -430,7 +431,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             // The owner and provider are unique to this CI invocation. Remove only
             // this test's local conversation and provider; the backend DB is ephemeral.
             runCatching { app.conversations.clearForCharacter(storageCharacterId) }
-            runCatching { catalog.deleteProvider(openAiProviderId) }
+            runCatching { catalog.deleteProvider(llamaCppProviderId) }
             runCatching { catalog.deleteProvider(providerId) }
         }
     }
