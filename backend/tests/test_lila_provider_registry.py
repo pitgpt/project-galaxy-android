@@ -17,6 +17,7 @@ from galaxy_backend.lila_core.provider_routing import (
     OwnerScopedModelAdapterResolver,
     SelectedFallbackProviderUnavailable,
 )
+from galaxy_backend.lila_core.provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
 from galaxy_backend.lila_core.sqlite_store import (
     LilaStoreIntegrityError,
     ProviderAlreadyExists,
@@ -246,7 +247,7 @@ class RecordingLimiter:
             raise self.error
 
 
-def make_settings():
+def make_settings(local_ports=DEFAULT_LOCAL_PROVIDER_PORTS):
     return Settings(
         openai_api_key=None,
         auth_jwks_url="https://issuer.example/.well-known/jwks.json",
@@ -256,13 +257,14 @@ def make_settings():
         allowed_voices=frozenset({"alloy"}),
         allowed_character_ids=frozenset({"galaxy.default"}),
         environment="test",
+        lila_local_provider_ports=frozenset(local_ports),
     )
 
 
-def make_client(tmp_path, limiter=None, provider_http_client_factory=None):
+def make_client(tmp_path, limiter=None, provider_http_client_factory=None, settings=None):
     store = SqliteLilaStore(tmp_path / "lila.sqlite3", KEY)
     app = create_app(
-        settings=make_settings(),
+        settings=settings or make_settings(),
         http_client=FakeHttpClient(),
         authenticator=FakeAuthenticator(),
         lila_turn_rate_limiter=limiter or RecordingLimiter(),
@@ -424,6 +426,54 @@ def test_provider_api_rejects_unsafe_endpoint_classes(tmp_path):
     assert local.status_code == 200
     assert local.json()["provider_type"] == "local"
     assert host_gateway.status_code == 200
+
+
+
+
+def test_provider_api_accepts_custom_local_port_only_when_operator_allowlisted(tmp_path):
+    custom_port = 12345
+    payload = create_payload(
+        provider_id="local-custom-port",
+        provider_type="local",
+        base_url=f"http://127.0.0.1:{custom_port}/v1",
+        api_key=None,
+    )
+
+    default_dir = tmp_path / "default"
+    default_dir.mkdir()
+    default_client, _ = make_client(default_dir)
+    with default_client:
+        rejected_by_default = default_client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=payload,
+        )
+
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir()
+    custom_client, _ = make_client(
+        custom_dir,
+        settings=make_settings(local_ports=DEFAULT_LOCAL_PROVIDER_PORTS | {custom_port}),
+    )
+    with custom_client:
+        accepted = custom_client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=payload,
+        )
+        private_network_target = custom_client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json={
+                **payload,
+                "provider_id": "local-private-network",
+                "base_url": f"http://192.168.1.20:{custom_port}/v1",
+            },
+        )
+
+    assert rejected_by_default.status_code == 422
+    assert accepted.status_code == 200
+    assert private_network_target.status_code == 422
 
 
 def test_provider_api_requires_auth_and_obeys_per_user_rate_limit(tmp_path):
@@ -1278,13 +1328,12 @@ def test_invalid_generated_response_marks_outcome_unknown_and_keeps_reservation(
 def test_local_provider_runs_authenticated_api_to_core_history_over_real_pinned_socket(tmp_path):
     """Exercise the complete owner-managed local path over a real TCP socket.
 
-    The test uses only loopback and one of the production allowlisted runtime
-    ports. It does not depend on an installed model runtime or external network.
+    The test uses only loopback and an operator-approved custom runtime port.
+    It does not depend on an installed model runtime or external network.
     """
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    from galaxy_backend.lila_core.provider_egress import create_provider_http_client
     from galaxy_backend.lila_core.provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
 
     class ProviderHandler(BaseHTTPRequestHandler):
@@ -1334,29 +1383,17 @@ def test_local_provider_runs_authenticated_api_to_core_history_over_real_pinned_
                 "choices": [{"message": {"content": content}}],
             })
 
-    server = None
-    for candidate_port in sorted(DEFAULT_LOCAL_PROVIDER_PORTS):
-        try:
-            server = ThreadingHTTPServer(("127.0.0.1", candidate_port), ProviderHandler)
-            break
-        except OSError:
-            continue
-    if server is None:
-        pytest.skip("No production-allowlisted local model port is available")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ProviderHandler)
 
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
 
-    def real_provider_client_factory(provider_type, timeout_seconds):
-        from galaxy_backend.lila_core.provider_egress import create_provider_http_client
-        return create_provider_http_client(provider_type, timeout_seconds)
-
     try:
         client, store = make_client(
             tmp_path,
-            provider_http_client_factory=real_provider_client_factory,
+            settings=make_settings(local_ports=DEFAULT_LOCAL_PROVIDER_PORTS | {port}),
         )
         headers = {
             **auth(),
