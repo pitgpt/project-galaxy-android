@@ -37,6 +37,7 @@ param(
     [ValidateRange(10, 1800)]
     [int]$MaxWaitSeconds = 900,
     [string]$OutputPath,
+    [string]$RequiredWorkflowId,
     [switch]$SelfTest
 )
 
@@ -349,6 +350,18 @@ function Get-Sha256Hex {
     }
 }
 
+function Assert-RequiredWorkflowId {
+    param(
+        [string]$ActualWorkflowId,
+        [string]$RequiredWorkflowId
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($RequiredWorkflowId) -and
+        $ActualWorkflowId -cne $RequiredWorkflowId) {
+        throw 'Configured ComfyUI workflow ID does not match RequiredWorkflowId; no image job was submitted.'
+    }
+}
+
 function Invoke-SelfTest {
     $https = Get-ValidatedBackendUri -Value 'https://example.invalid'
     if ($https.Scheme -ne 'https') { throw 'HTTPS URL validation failed.' }
@@ -359,6 +372,19 @@ function Invoke-SelfTest {
     try { Get-ValidatedBackendUri -Value 'http://example.invalid' | Out-Null }
     catch { $rejected = $true }
     if (-not $rejected) { throw 'Non-loopback HTTP was not rejected.' }
+
+    Assert-RequiredWorkflowId -ActualWorkflowId 'lila.sdxl.v1' -RequiredWorkflowId 'lila.sdxl.v1'
+    Assert-RequiredWorkflowId -ActualWorkflowId 'custom-v1' -RequiredWorkflowId ''
+    $wrongWorkflowRejected = $false
+    try {
+        Assert-RequiredWorkflowId -ActualWorkflowId 'empty-smoke-v1' -RequiredWorkflowId 'lila.sdxl.v1'
+    }
+    catch {
+        $wrongWorkflowRejected = $true
+    }
+    if (-not $wrongWorkflowRejected) {
+        throw 'Required workflow ID guard accepted a different workflow.'
+    }
 
     $png = New-Object byte[] 24
     $signature = [byte[]](137, 80, 78, 71, 13, 10, 26, 10)
@@ -375,6 +401,7 @@ function Invoke-SelfTest {
         [Array]::Clear($png, 0, $png.Length)
     }
 
+    Write-Output 'Required ComfyUI workflow ID guard: PASS'
     Write-Output 'Lila ComfyUI live-E2E script self-test passed.'
 }
 
@@ -409,6 +436,7 @@ try {
     if (-not $provider.configured -or [string]::IsNullOrWhiteSpace([string]$provider.workflow_id)) {
         throw 'ComfyUI is not configured for this authenticated owner. Configure it in Galaxy first.'
     }
+    Assert-RequiredWorkflowId -ActualWorkflowId ([string]$provider.workflow_id) -RequiredWorkflowId $RequiredWorkflowId
 
     $probe = Invoke-CoreJson -Method 'POST' -Path '/v1/lila/image-providers/comfyui/test'
     if (-not $probe.connection_reachable -or $probe.workflow_id -ne $provider.workflow_id) {
