@@ -32,7 +32,14 @@ data class LilaBinaryResponse(val contentType: String, val bytes: ByteArray) {
 }
 data class LilaComfyUiProviderSummary(val configured: Boolean, val workflowId: String?, val hasBearerToken: Boolean,
     val supportsQueuedCancellation: Boolean, val supportsRunningCancellation: Boolean)
-data class LilaComfyUiProviderTestResult(val providerId: String, val connectionReachable: Boolean, val workflowId: String?)
+data class LilaComfyUiProviderTestResult(
+    val providerId: String,
+    val connectionReachable: Boolean,
+    val workflowId: String?,
+    val checkpointDiscoverySupported: Boolean = false,
+    val availableCheckpoints: List<String> = emptyList(),
+    val checkpointListTruncated: Boolean = false
+)
 
 data class LilaComfyUiProviderConfiguration(
     val configured: Boolean,
@@ -196,7 +203,27 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
         val json=api.requestJson("POST","$PROVIDER_PATH/test")
         val providerId=json.optString("provider_id")
         if(providerId!="comfyui") throw GalaxyApiException(null,"Сервис Lila вернул некорректный тип image provider.")
-        return LilaComfyUiProviderTestResult(providerId,json.optBoolean("connection_reachable"),optionalString(json,"workflow_id",96))
+        val rawCheckpoints = json.optJSONArray("available_checkpoints")
+        val checkpoints = mutableListOf<String>()
+        for (index in 0 until minOf(rawCheckpoints?.length() ?: 0, MAX_CHECKPOINTS)) {
+            val name = rawCheckpoints?.optString(index) ?: continue
+            val segments = name.split('/')
+            val safe = name.isNotBlank() &&
+                name.length <= MAX_CHECKPOINT_NAME_LENGTH &&
+                !name.startsWith('/') &&
+                '\\\\' !in name &&
+                name.none { it.code < 32 || it.code == 127 } &&
+                segments.all { it.isNotBlank() && it != "." && it != ".." }
+            if (safe && name !in checkpoints) checkpoints += name
+        }
+        return LilaComfyUiProviderTestResult(
+            providerId,
+            json.optBoolean("connection_reachable"),
+            optionalString(json,"workflow_id",96),
+            json.optBoolean("checkpoint_discovery_supported"),
+            checkpoints,
+            json.optBoolean("checkpoint_list_truncated")
+        )
     }
 
     override suspend fun submit(request:ImageGenerationRequest):String {
@@ -383,6 +410,7 @@ class LilaCoreImageGenerationProvider(private val api: LilaImageApiTransport, pr
     override fun toString()="LilaCoreImageGenerationProvider(provider=comfyui, credentials=<redacted>)"
     private companion object{
         const val PROVIDER_PATH="/v1/lila/image-providers/comfyui";const val IMAGES_PATH="/v1/lila/images";const val PNG="image/png"
+        const val MAX_CHECKPOINTS=256;const val MAX_CHECKPOINT_NAME_LENGTH=512
         const val MAX_JSON_REQUEST_BYTES=5*1024*1024;const val MAX_JSON_RESPONSE_BYTES=5*1024*1024;const val MAX_HISTORY_JOBS=50;const val HISTORY_PAGE_SIZE=50;const val MAX_HISTORY_CURSOR_LENGTH=256
         val STATES=setOf("prepared","submitting","submission_unknown","queued","running","provider_completed","result_pending","completed","failed","cancelled")
     }

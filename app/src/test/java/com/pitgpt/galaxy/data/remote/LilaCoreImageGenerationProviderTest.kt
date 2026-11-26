@@ -42,6 +42,31 @@ class LilaCoreImageGenerationProviderTest {
         assertEquals("/v1/lila/image-providers/comfyui/config", api.calls.single().path)
     }
 
+    @Test fun testProviderParsesSafeCheckpointNamesAndDiscoveryState() = runBlocking {
+        val api = FakeApi().apply {
+            json.add(
+                JSONObject()
+                    .put("provider_id", "comfyui")
+                    .put("connection_reachable", true)
+                    .put("workflow_id", "lila.sdxl.v1")
+                    .put("checkpoint_discovery_supported", true)
+                    .put("available_checkpoints", JSONArray()
+                        .put("sdxl.safetensors")
+                        .put("models/refiner.safetensors")
+                        .put("../outside.safetensors")
+                        .put("bad\\\\path.safetensors"))
+                    .put("checkpoint_list_truncated", true)
+            )
+        }
+
+        val result = LilaCoreImageGenerationProvider(api, FakeStore()).testProvider()
+
+        assertTrue(result.connectionReachable)
+        assertTrue(result.checkpointDiscoverySupported)
+        assertEquals(listOf("sdxl.safetensors", "models/refiner.safetensors"), result.availableCheckpoints)
+        assertTrue(result.checkpointListTruncated)
+        assertEquals("/v1/lila/image-providers/comfyui/test", api.calls.single().path)
+    }
     @Test fun historyIsBoundToTheRequestedConversationAndParsesAssetSize() = runBlocking {
         val job = JSONObject()
             .put("job_id", JOB)

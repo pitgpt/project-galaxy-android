@@ -152,13 +152,30 @@ def request_payload(conversation_id="conversation-a", prompt="A quiet observator
 
 
 def make_handler(mode):
-    state = {"mode": mode, "prompt_id": None, "post_prompt": 0, "post_queue": 0, "requests": []}
+    state = {
+        "mode": mode,
+        "prompt_id": None,
+        "post_prompt": 0,
+        "post_queue": 0,
+        "requests": [],
+        "checkpoint_names": ["sdxl.safetensors", "models/sdxl-refiner.safetensors"],
+        "checkpoint_discovery_status": 200,
+    }
     image = png_bytes()
 
     async def handler(request: httpx.Request):
         state["requests"].append((request.method, request.url.path))
         if request.url.path == "/system_stats":
             return httpx.Response(200, json={"system": {}, "devices": []})
+        if request.url.path == "/object_info/CheckpointLoaderSimple":
+            discovery_status = state["checkpoint_discovery_status"]
+            if discovery_status != 200:
+                return httpx.Response(discovery_status, json={})
+            return httpx.Response(200, json={
+                "CheckpointLoaderSimple": {
+                    "input": {"required": {"ckpt_name": [state["checkpoint_names"], {}]}}
+                }
+            })
         if request.url.path == "/prompt" and request.method == "POST":
             state["post_prompt"] += 1
             body = __import__("json").loads(request.content)
@@ -342,6 +359,11 @@ def test_comfyui_live_adapter_lifecycle_and_encrypted_result(tmp_path):
 
     tested = run(service.test_provider(principal_id="owner"))
     assert tested.connection_reachable is True
+    assert tested.checkpoint_discovery_supported is True
+    assert tested.available_checkpoints == ["sdxl.safetensors", "models/sdxl-refiner.safetensors"]
+    assert tested.checkpoint_list_truncated is False
+    assert "bearer_token" not in tested.model_dump()
+    assert "base_url" not in tested.model_dump()
 
     job = run(service.submit(
         principal_id="owner",
@@ -369,6 +391,47 @@ def test_comfyui_live_adapter_lifecycle_and_encrypted_result(tmp_path):
         run(service.get_job(principal_id="other-owner", job_id=job.job_id))
 
 
+def test_comfyui_checkpoint_discovery_filters_paths_and_caps_results(tmp_path):
+    service, _store, state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    state["checkpoint_names"] = [
+        "sdxl.safetensors",
+        "models/sdxl-refiner.safetensors",
+        "../outside.safetensors",
+        "/outside.safetensors",
+        "models/../outside.safetensors",
+        "bad\\\\path.safetensors",
+        "",
+        "x" * 513,
+        "sdxl.safetensors",
+        *[f"extra-{index}.safetensors" for index in range(300)],
+    ]
+
+    result = run(service.test_provider(principal_id="owner"))
+
+    assert result.connection_reachable is True
+    assert result.checkpoint_discovery_supported is True
+    assert result.available_checkpoints[:2] == [
+        "sdxl.safetensors",
+        "models/sdxl-refiner.safetensors",
+    ]
+    assert len(result.available_checkpoints) == 256
+    assert result.checkpoint_list_truncated is True
+    assert all(".." not in name.split("/") for name in result.available_checkpoints)
+    assert all("\\\\" not in name for name in result.available_checkpoints)
+
+
+def test_comfyui_checkpoint_discovery_is_optional_for_older_runtimes(tmp_path):
+    service, _store, state = make_service(tmp_path, mode="queued")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    state["checkpoint_discovery_status"] = 404
+
+    result = run(service.test_provider(principal_id="owner"))
+
+    assert result.connection_reachable is True
+    assert result.checkpoint_discovery_supported is False
+    assert result.available_checkpoints == []
+    assert result.checkpoint_list_truncated is False
 
 def test_prepared_image_job_is_submitted_after_service_restart(tmp_path):
     service, store, state = make_service(tmp_path, mode="queued")

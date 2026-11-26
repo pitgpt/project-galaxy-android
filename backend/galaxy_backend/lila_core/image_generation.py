@@ -25,6 +25,8 @@ from .image_store import (
 MAX_WORKFLOW_JSON_CHARS = 2 * 1024 * 1024
 MAX_COMFYUI_JSON_BYTES = 1024 * 1024
 MAX_COMFYUI_IMAGE_BYTES = 25 * 1024 * 1024
+MAX_COMFYUI_CHECKPOINTS = 256
+MAX_COMFYUI_CHECKPOINT_NAME_CHARS = 512
 COMFYUI_LOCAL_PORTS = frozenset({8188})
 
 
@@ -160,6 +162,9 @@ class ImageProviderConnectionTestResponse(BaseModel):
     provider_id: Literal["comfyui"] = "comfyui"
     connection_reachable: bool
     workflow_id: str
+    checkpoint_discovery_supported: bool = False
+    available_checkpoints: list[str] = Field(default_factory=list, max_length=MAX_COMFYUI_CHECKPOINTS)
+    checkpoint_list_truncated: bool = False
 
 
 class ImageGenerationRequest(BaseModel):
@@ -340,6 +345,44 @@ class ComfyUiImageAdapter:
         result = await self._json("GET", "/system_stats")
         if not isinstance(result.get("system"), dict) or not isinstance(result.get("devices"), list):
             raise ComfyUiFailure("provider_invalid_response")
+
+    async def discover_checkpoints(self) -> tuple[bool, list[str], bool]:
+        try:
+            info = await self._json("GET", "/object_info/CheckpointLoaderSimple")
+        except ComfyUiFailure as failure:
+            if failure.status_code in {404, 405}:
+                return False, [], False
+            raise
+        node = info.get("CheckpointLoaderSimple")
+        node_inputs = node.get("input") if isinstance(node, dict) else None
+        required = node_inputs.get("required") if isinstance(node_inputs, dict) else None
+        checkpoint_spec = required.get("ckpt_name") if isinstance(required, dict) else None
+        if not isinstance(checkpoint_spec, list) or not checkpoint_spec:
+            return False, [], False
+        choices = checkpoint_spec[0]
+        if not isinstance(choices, list):
+            return False, [], False
+        names: list[str] = []
+        seen: set[str] = set()
+        for raw_name in choices:
+            if not isinstance(raw_name, str):
+                continue
+            name = raw_name.strip()
+            if (
+                not name
+                or len(name) > MAX_COMFYUI_CHECKPOINT_NAME_CHARS
+                or name.startswith("/")
+                or "\\\\" in name
+                or any(ord(character) < 32 or ord(character) == 127 for character in name)
+            ):
+                continue
+            segments = name.split("/")
+            if any(segment in {"", ".", ".."} for segment in segments):
+                continue
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+        return True, names[:MAX_COMFYUI_CHECKPOINTS], len(names) > MAX_COMFYUI_CHECKPOINTS
 
     async def submit(self, request: ImageGenerationRequest, prompt_id: str) -> None:
         body = {
@@ -543,10 +586,14 @@ class LilaImageGenerationService:
             raise ImageProviderNotConfigured
         async with self._adapter(config) as adapter:
             await adapter.test_connection()
+            discovery_supported, checkpoints, truncated = await adapter.discover_checkpoints()
         workflow = config.get("workflow", {})
         return ImageProviderConnectionTestResponse(
             connection_reachable=True,
             workflow_id=str(workflow.get("workflow_id", "")),
+            checkpoint_discovery_supported=discovery_supported,
+            available_checkpoints=checkpoints,
+            checkpoint_list_truncated=truncated,
         )
 
     async def submit(

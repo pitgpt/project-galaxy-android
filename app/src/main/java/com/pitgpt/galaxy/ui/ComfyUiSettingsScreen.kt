@@ -59,6 +59,9 @@ fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
     var workflowId by remember { mutableStateOf("") }
     var workflowJson by remember { mutableStateOf("") }
     var checkpointName by remember { mutableStateOf("") }
+    var checkpointDiscoverySupported by remember { mutableStateOf(false) }
+    var availableCheckpoints by remember { mutableStateOf<List<String>>(emptyList()) }
+    var checkpointListTruncated by remember { mutableStateOf(false) }
     var positiveNodeId by remember { mutableStateOf("") }
     var positiveInputName by remember { mutableStateOf("text") }
     var negativeNodeId by remember { mutableStateOf("") }
@@ -81,6 +84,9 @@ fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
         persistedBaseUrl = configuration.baseUrl
         baseUrl = configuration.baseUrl.orEmpty()
         hasBearerToken = configuration.hasBearerToken
+        checkpointDiscoverySupported = false
+        availableCheckpoints = emptyList()
+        checkpointListTruncated = false
         bearerToken = ""
         clearBearerToken = false
         val workflow = configuration.workflow
@@ -201,7 +207,14 @@ fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
                 Text("ENDPOINT COMFYUI", color = ComfyAccent, fontSize = 13.sp)
                 OutlinedTextField(
                     value = baseUrl,
-                    onValueChange = { baseUrl = it; configured = false; status = null },
+                    onValueChange = {
+                        baseUrl = it
+                        configured = false
+                        availableCheckpoints = emptyList()
+                        checkpointDiscoverySupported = false
+                        checkpointListTruncated = false
+                        status = null
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Backend URL, например http://host.docker.internal:8188") }
@@ -362,8 +375,18 @@ fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
                         scope.launch {
                             try {
                                 val result = provider.testProvider()
+                                checkpointDiscoverySupported = result.checkpointDiscoverySupported
+                                availableCheckpoints = result.availableCheckpoints
+                                checkpointListTruncated = result.checkpointListTruncated
                                 status = if (result.connectionReachable) {
-                                    "ComfyUI доступен через Core; workflow: " + (result.workflowId ?: "неизвестен") + "."
+                                    val discovery = when {
+                                        !result.checkpointDiscoverySupported -> "список checkpoint не поддерживается этим ComfyUI"
+                                        result.availableCheckpoints.isEmpty() -> "checkpoint не найдены; добавь модель в ComfyUI/models/checkpoints"
+                                        else -> "найдено checkpoint: ${result.availableCheckpoints.size}" +
+                                            if (result.checkpointListTruncated) " (первые 256)" else ""
+                                    }
+                                    "ComfyUI доступен через Core; workflow: " +
+                                        (result.workflowId ?: "неизвестен") + "; " + discovery + "."
                                 } else {
                                     "Core не подтвердил соединение с ComfyUI."
                                 }
@@ -379,6 +402,34 @@ fun ComfyUiSettingsScreen(app: GalaxyApplication, onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (checking) "ПРОВЕРКА…" else "ПРОВЕРИТЬ СОХРАНЁННУЮ КОНФИГУРАЦИЮ") }
 
+                if (checkpointDiscoverySupported) {
+                    Text("ДОСТУПНЫЕ CHECKPOINTS", color = ComfyAccent, fontSize = 13.sp)
+                    if (availableCheckpoints.isEmpty()) {
+                        Text(
+                            "ComfyUI не обнаружил checkpoint. Добавь модель в models/checkpoints и проверь соединение повторно.",
+                            color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
+                        )
+                    } else {
+                        availableCheckpoints.take(20).forEach { name ->
+                            TextButton(
+                                onClick = {
+                                    checkpointName = name
+                                    configured = false
+                                    status = "Checkpoint выбран. Нажми СОЗДАТЬ SDXL WORKFLOW, затем сохрани конфигурацию."
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(name, fontSize = 11.sp)
+                            }
+                        }
+                        if (availableCheckpoints.size > 20 || checkpointListTruncated) {
+                            Text(
+                                "Показаны первые 20 из ${availableCheckpoints.size}. Для остальных можно ввести имя вручную.",
+                                color = ComfyMuted, fontSize = 11.sp, lineHeight = 16.sp
+                            )
+                        }
+                    }
+                }
                 status?.let { Text(it, color = ComfyAccent, fontSize = 12.sp, lineHeight = 18.sp) }
             }
         }
