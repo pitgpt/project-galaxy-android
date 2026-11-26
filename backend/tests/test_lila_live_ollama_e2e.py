@@ -114,6 +114,7 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
 
     captured_chat_requests: list[dict[str, object]] = []
     captured_provider_routes: list[dict[str, object]] = []
+    captured_provider_responses: list[dict[str, object]] = []
 
     def recording_provider_http_client_factory(provider_type, timeout_seconds):
         client = create_provider_http_client(provider_type, timeout_seconds)
@@ -131,7 +132,20 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
             if request.url.path == "/api/chat":
                 captured_chat_requests.append(json.loads(request.content))
 
+        async def capture_provider_response(response):
+            # Status-only metadata distinguishes a rejected response from a
+            # request that timed out after being sent; never capture its body.
+            captured_provider_responses.append(
+                {
+                    "method": response.request.method,
+                    "port": response.request.url.port,
+                    "path": response.request.url.path,
+                    "status_code": response.status_code,
+                }
+            )
+
         client.event_hooks["request"].append(capture_provider_request)
+        client.event_hooks["response"].append(capture_provider_response)
         return client
 
     def new_app():
@@ -495,14 +509,23 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
                 primary_probe_server.server_close()
                 primary_probe_thread.join(timeout=2)
 
+            # Exercise the same production adapter against the now-closed
+            # primary endpoint without a fallback. A TCP refusal must be
+            # classified as pre-send and explicitly retry-safe.
+            primary_failure_probe = client.post(
+                "/v1/lila/providers/" + primary_probe_provider_id + "/test-chat",
+                headers=auth_headers,
+            )
+            assert primary_failure_probe.status_code == 503, primary_failure_probe.text
+            assert primary_failure_probe.headers.get("X-Lila-Retry-Safe") == "true"
+            assert primary_failure_probe.headers.get("X-Lila-Outcome-Unknown") is None
+
             assert ("GET", 8080, "/v1/models") in [
                 (item["method"], item["port"], item["path"])
                 for item in captured_provider_routes
             ]
 
-            tcp_fallback_message = (
-                "Проверь резервирование после отказа TCP-соединения основной модели."
-            )
+            tcp_fallback_message = "Ответь одним словом: готово."
             tcp_fallback = client.post(
                 "/v1/lila/turns",
                 headers={
@@ -514,7 +537,26 @@ def test_live_ollama_memory_tenant_isolation_and_history_survive_production_rest
                     "message": tcp_fallback_message,
                 },
             )
-            assert tcp_fallback.status_code == 200, tcp_fallback.text
+            provider_diagnostics = {
+                "routes": [
+                    (item["method"], item["port"], item["path"])
+                    for item in captured_provider_routes
+                ],
+                "responses": [
+                    (
+                        item["method"],
+                        item["port"],
+                        item["path"],
+                        item["status_code"],
+                    )
+                    for item in captured_provider_responses
+                ],
+            }
+            assert tcp_fallback.status_code == 200, (
+                tcp_fallback.text
+                + "; redacted provider routing diagnostics="
+                + repr(provider_diagnostics)
+            )
             tcp_fallback_result = tcp_fallback.json()
             assert tcp_fallback_result["text"].strip()
             assert tcp_fallback_result["provider_id"] == provider_id
