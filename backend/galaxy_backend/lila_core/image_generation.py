@@ -88,7 +88,124 @@ class ComfyUiWorkflowConfig(BaseModel):
             inputs = node.get("inputs") if isinstance(node, dict) else None
             if not isinstance(inputs, dict) or mapping.input_name not in inputs:
                 raise ValueError("workflow_json is missing a mapped node input")
+        if self.workflow_id == "lila.sdxl.v1":
+            self._validate_builtin_sdxl_graph(graph)
         return self
+
+    def _validate_builtin_sdxl_graph(self, graph: dict[str, Any]) -> None:
+        """Fail closed when a caller labels a custom graph as the built-in SDXL preset."""
+        expected_nodes = {"3", "4", "5", "6", "7", "8", "9"}
+        if set(graph) != expected_nodes:
+            raise ValueError("built-in SDXL workflow has an unexpected node set")
+
+        def inputs(node_id: str, class_type: str, expected_inputs: set[str]) -> dict[str, Any]:
+            node = graph.get(node_id)
+            if (
+                not isinstance(node, dict)
+                or set(node) != {"class_type", "inputs"}
+                or node.get("class_type") != class_type
+                or not isinstance(node.get("inputs"), dict)
+                or set(node["inputs"]) != expected_inputs
+            ):
+                raise ValueError("built-in SDXL workflow contains an invalid node")
+            return node["inputs"]
+
+        def link(values: dict[str, Any], name: str, source: str, output: int) -> None:
+            value = values.get(name)
+            if (
+                not isinstance(value, list)
+                or len(value) != 2
+                or value[0] != source
+                or type(value[1]) is not int
+                or value[1] != output
+            ):
+                raise ValueError("built-in SDXL workflow contains an invalid connection")
+
+        checkpoint = inputs("4", "CheckpointLoaderSimple", {"ckpt_name"})
+        checkpoint_name = checkpoint["ckpt_name"]
+        if (
+            not isinstance(checkpoint_name, str)
+            or not checkpoint_name
+            or checkpoint_name != checkpoint_name.strip()
+            or len(checkpoint_name) > MAX_COMFYUI_CHECKPOINT_NAME_CHARS
+            or checkpoint_name.startswith("/")
+            or "\\" in checkpoint_name
+            or ":" in checkpoint_name
+            or any(ord(character) < 32 or ord(character) == 127 for character in checkpoint_name)
+            or any(part in {"", ".", ".."} for part in checkpoint_name.split("/"))
+        ):
+            raise ValueError("built-in SDXL workflow has an unsafe checkpoint name")
+
+        positive = inputs("5", "CLIPTextEncode", {"text", "clip"})
+        negative = inputs("6", "CLIPTextEncode", {"text", "clip"})
+        if (
+            not isinstance(positive["text"], str)
+            or len(positive["text"]) > 12_000
+            or not isinstance(negative["text"], str)
+            or len(negative["text"]) > 4_000
+        ):
+            raise ValueError("built-in SDXL workflow prompt inputs are invalid")
+        link(positive, "clip", "4", 1)
+        link(negative, "clip", "4", 1)
+
+        latent = inputs("7", "EmptyLatentImage", {"width", "height", "batch_size"})
+        if (
+            type(latent["width"]) is not int
+            or latent["width"] != 1024
+            or type(latent["height"]) is not int
+            or latent["height"] != 1024
+            or type(latent["batch_size"]) is not int
+            or latent["batch_size"] != 1
+        ):
+            raise ValueError("built-in SDXL workflow dimensions are invalid")
+
+        sampler = inputs(
+            "3",
+            "KSampler",
+            {
+                "seed", "steps", "cfg", "sampler_name", "scheduler", "denoise",
+                "model", "positive", "negative", "latent_image",
+            },
+        )
+        if (
+            type(sampler["seed"]) is not int
+            or sampler["seed"] != 0
+            or type(sampler["steps"]) is not int
+            or sampler["steps"] != 30
+            or type(sampler["cfg"]) not in {int, float}
+            or sampler["cfg"] != 5.5
+            or sampler["sampler_name"] != "dpmpp_2m"
+            or sampler["scheduler"] != "karras"
+            or type(sampler["denoise"]) not in {int, float}
+            or sampler["denoise"] != 1.0
+        ):
+            raise ValueError("built-in SDXL workflow sampler settings are invalid")
+        link(sampler, "model", "4", 0)
+        link(sampler, "positive", "5", 0)
+        link(sampler, "negative", "6", 0)
+        link(sampler, "latent_image", "7", 0)
+
+        decoded = inputs("8", "VAEDecode", {"samples", "vae"})
+        link(decoded, "samples", "3", 0)
+        link(decoded, "vae", "4", 2)
+
+        saved = inputs("9", "SaveImage", {"images", "filename_prefix"})
+        link(saved, "images", "8", 0)
+        if saved["filename_prefix"] != "lila":
+            raise ValueError("built-in SDXL workflow output prefix is invalid")
+
+        expected_mappings = (
+            (self.positive_prompt, "5", "text"),
+            (self.negative_prompt, "6", "text"),
+            (self.width, "7", "width"),
+            (self.height, "7", "height"),
+            (self.seed, "3", "seed"),
+        )
+        if any(
+            mapping is None or (mapping.node_id, mapping.input_name) != (node_id, input_name)
+            for mapping, node_id, input_name in expected_mappings
+        ):
+            raise ValueError("built-in SDXL workflow mappings are invalid")
 
     def build_prompt(self, request: "ImageGenerationRequest") -> dict[str, Any]:
         graph = json.loads(self.workflow_json)
