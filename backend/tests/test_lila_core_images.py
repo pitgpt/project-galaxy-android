@@ -132,6 +132,34 @@ def workflow_config():
     )
 
 
+def sdxl_workflow_config(checkpoint="models/sdxl.safetensors"):
+    graph = {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": checkpoint}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["4", 1]}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["4", 1]}},
+        "7": {"class_type": "EmptyLatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": 0, "steps": 30, "cfg": 5.5, "sampler_name": "dpmpp_2m",
+                "scheduler": "karras", "denoise": 1.0, "model": ["4", 0],
+                "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["7", 0],
+            },
+        },
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "lila"}},
+    }
+    return ComfyUiWorkflowConfig(
+        workflow_id="lila.sdxl.v1",
+        workflow_json=json.dumps(graph, separators=(",", ":")),
+        positive_prompt={"node_id": "5", "input_name": "text"},
+        negative_prompt={"node_id": "6", "input_name": "text"},
+        width={"node_id": "7", "input_name": "width"},
+        height={"node_id": "7", "input_name": "height"},
+        seed={"node_id": "3", "input_name": "seed"},
+    )
+
+
 def provider_payload(token="comfy-secret"):
     return ComfyUiProviderConfigRequest(
         base_url="http://127.0.0.1:8188",
@@ -249,6 +277,69 @@ def test_workflow_mapping_validation_and_prompt_building():
             workflow_id="bad",
             workflow_json='{"3":{"inputs":{"text":""}}}',
             positive_prompt={"node_id": "3", "input_name": "missing"},
+        )
+
+
+def test_builtin_sdxl_workflow_validates_graph_and_builds_prompt():
+    workflow = sdxl_workflow_config()
+    request = ImageGenerationRequest(
+        conversation_id="sdxl-conversation",
+        prompt="A moonlit observatory",
+        negative_prompt="blurry",
+        width=1024,
+        height=1024,
+        seed=42,
+    )
+    graph = workflow.build_prompt(request)
+    assert graph["4"]["inputs"]["ckpt_name"] == "models/sdxl.safetensors"
+    assert graph["5"]["inputs"]["text"] == "A moonlit observatory"
+    assert graph["6"]["inputs"]["text"] == "blurry"
+    assert graph["3"]["inputs"]["seed"] == 42
+    assert graph["7"]["inputs"]["width"] == 1024
+    assert graph["7"]["inputs"]["height"] == 1024
+
+
+def test_builtin_sdxl_workflow_rejects_disconnected_or_non_sdxl_graph():
+    graph = json.loads(sdxl_workflow_config().workflow_json)
+    graph["9"]["inputs"]["images"] = ["3", 0]
+    with pytest.raises(ValueError, match="built-in SDXL workflow"):
+        ComfyUiWorkflowConfig(
+            workflow_id="lila.sdxl.v1",
+            workflow_json=json.dumps(graph),
+            positive_prompt={"node_id": "5", "input_name": "text"},
+            negative_prompt={"node_id": "6", "input_name": "text"},
+            width={"node_id": "7", "input_name": "width"},
+            height={"node_id": "7", "input_name": "height"},
+            seed={"node_id": "3", "input_name": "seed"},
+        )
+
+    graph = json.loads(sdxl_workflow_config().workflow_json)
+    graph["3"]["inputs"]["sampler_name"] = "euler"
+    with pytest.raises(ValueError, match="built-in SDXL workflow"):
+        ComfyUiWorkflowConfig(
+            workflow_id="lila.sdxl.v1",
+            workflow_json=json.dumps(graph),
+            positive_prompt={"node_id": "5", "input_name": "text"},
+            negative_prompt={"node_id": "6", "input_name": "text"},
+            width={"node_id": "7", "input_name": "width"},
+            height={"node_id": "7", "input_name": "height"},
+            seed={"node_id": "3", "input_name": "seed"},
+        )
+
+
+def test_builtin_sdxl_workflow_rejects_unsafe_checkpoint_and_wrong_mappings():
+    with pytest.raises(ValueError, match="unsafe checkpoint"):
+        sdxl_workflow_config("../outside.safetensors")
+
+    with pytest.raises(ValueError, match="built-in SDXL workflow mappings"):
+        ComfyUiWorkflowConfig(
+            workflow_id="lila.sdxl.v1",
+            workflow_json=sdxl_workflow_config().workflow_json,
+            positive_prompt={"node_id": "6", "input_name": "text"},
+            negative_prompt={"node_id": "6", "input_name": "text"},
+            width={"node_id": "7", "input_name": "width"},
+            height={"node_id": "7", "input_name": "height"},
+            seed={"node_id": "3", "input_name": "seed"},
         )
 
 
