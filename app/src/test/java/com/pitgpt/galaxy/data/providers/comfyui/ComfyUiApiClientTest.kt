@@ -6,6 +6,7 @@ import java.io.IOException
 import java.util.ArrayDeque
 import com.pitgpt.galaxy.core.model.ImageGenerationState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -61,22 +62,25 @@ class ComfyUiApiClientTest {
         val scope = CoroutineScope(parentJob + dispatcher)
         val body = "private image response".toByteArray()
         val response = ComfyUiBinaryResponse(200, "image/png", body)
+        lateinit var responseContinuation: CancellableContinuation<ComfyUiBinaryResponse>
 
         val job = scope.launch {
             suspendCancellableCoroutine<ComfyUiBinaryResponse> { continuation ->
-                resumeCancellableWithCleanup(continuation, response) { undelivered ->
-                    undelivered.body.fill(0)
-                }
+                responseContinuation = continuation
             }
         }
 
-        // Run the coroutine until the continuation has resumed and queued its
-        // dispatcher delivery, but deliberately do not execute that delivery yet.
+        // Start the coroutine and let it suspend before a response is supplied.
         dispatcher.runNext()
-        assertEquals("The resumed value must still be queued for dispatch", 1, dispatcher.pendingTasks)
+        assertEquals("The request coroutine must be suspended with no pending delivery", 0, dispatcher.pendingTasks)
 
-        // Cancellation of the owning Job now wins the prompt-cancellation check
-        // performed by the dispatcher when it attempts to deliver the value.
+        // Resume only after suspension has completed, so delivery is genuinely queued.
+        resumeCancellableWithCleanup(responseContinuation, response) { undelivered ->
+            undelivered.body.fill(0)
+        }
+        assertEquals("The resumed value must be queued for dispatch", 1, dispatcher.pendingTasks)
+
+        // Cancel the owning Job while the response delivery is still queued.
         job.cancel(CancellationException("cancel before dispatch"))
         dispatcher.runUntilIdle()
 
