@@ -101,4 +101,15 @@ class HttpLilaMemoryClientTest {
         assertTrue(rejected)
         assertFalse(called)
     }
+
+    @Test
+    fun deletePreservesFalseWhenMemoryIsAlreadyAbsentOrNotOwned() = runBlocking {
+        val client = HttpLilaMemoryClient { method, _, _ ->
+            assertEquals("DELETE", method)
+            JSONObject().put("memory_id", "memory-one").put("deleted", false)
+        }
+
+        assertFalse(client.delete("memory-one"))
+    }
+
 }
