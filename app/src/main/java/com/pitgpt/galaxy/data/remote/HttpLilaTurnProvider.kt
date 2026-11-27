@@ -17,7 +17,11 @@ data class LilaTurnResult(
     val conversationId: String,
     val text: String,
     val providerId: String?,
-    val modelId: String?
+    val modelId: String?,
+    val fallbackUsed: Boolean = false,
+    val fallbackFromProviderId: String? = null,
+    val fallbackFromModelId: String? = null,
+    val fallbackReason: String? = null
 ) {
     val displayModel: String
         get() = listOfNotNull(providerId, modelId)
@@ -32,7 +36,11 @@ data class LilaHistoryMessage(
     val content: String,
     val createdAtEpochMillis: Long,
     val providerId: String? = null,
-    val modelId: String? = null
+    val modelId: String? = null,
+    val fallbackUsed: Boolean = false,
+    val fallbackFromProviderId: String? = null,
+    val fallbackFromModelId: String? = null,
+    val fallbackReason: String? = null
 ) {
     val displayModelLabel: String?
         get() = listOfNotNull(providerId, modelId)
@@ -43,6 +51,7 @@ data class LilaHistoryMessage(
 
 enum class LilaTurnStatus {
     PENDING,
+    OUTCOME_UNKNOWN,
     COMPLETED,
     NOT_FOUND
 }
@@ -51,6 +60,10 @@ data class LilaTurnReconciliation(
     val status: LilaTurnStatus,
     val result: LilaTurnResult? = null
 )
+
+private fun LilaTurnReconciliation?.hasUnresolvedOutcome(): Boolean =
+    this?.status == LilaTurnStatus.PENDING ||
+        this?.status == LilaTurnStatus.OUTCOME_UNKNOWN
 
 /**
  * Stable across Galaxy and Desktop for the same authenticated owner partition
@@ -191,7 +204,7 @@ class HttpLilaTurnProvider(
                         if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                             return@withContext reconciliation.result!!
                         }
-                        if (reconciliation?.status == LilaTurnStatus.PENDING) {
+                        if (reconciliation.hasUnresolvedOutcome()) {
                             throw GalaxyApiException(status, OUTCOME_UNKNOWN_MESSAGE)
                         }
                     }
@@ -214,11 +227,18 @@ class HttpLilaTurnProvider(
                     throw GalaxyApiException(null, "Сервис Lila вернул пустой или слишком длинный ответ.")
                 }
 
+                val providerId = optionalString(payload, "provider_id", 64)
+                val modelId = optionalString(payload, "model_id", 256)
+                val fallback = parseFallbackDisclosure(payload, "assistant", providerId, modelId)
                 LilaTurnResult(
                     conversationId = responseConversationId,
                     text = assistantText,
-                    providerId = optionalString(payload, "provider_id", 64),
-                    modelId = optionalString(payload, "model_id", 256)
+                    providerId = providerId,
+                    modelId = modelId,
+                    fallbackUsed = fallback.used,
+                    fallbackFromProviderId = fallback.fromProviderId,
+                    fallbackFromModelId = fallback.fromModelId,
+                    fallbackReason = fallback.reason
                 )
             } catch (exception: GalaxyApiException) {
                 if (requestMayHaveReachedCore && exception.httpStatus == null) {
@@ -228,7 +248,7 @@ class HttpLilaTurnProvider(
                     if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                         return@withContext reconciliation.result!!
                     }
-                    if (reconciliation?.status == LilaTurnStatus.PENDING) {
+                    if (reconciliation.hasUnresolvedOutcome()) {
                         throw GalaxyApiException(null, OUTCOME_UNKNOWN_MESSAGE)
                     }
                 }
@@ -243,7 +263,7 @@ class HttpLilaTurnProvider(
                     if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                         return@withContext reconciliation.result!!
                     }
-                    if (reconciliation?.status == LilaTurnStatus.PENDING) {
+                    if (reconciliation.hasUnresolvedOutcome()) {
                         throw GalaxyApiException(null, OUTCOME_UNKNOWN_MESSAGE)
                     }
                 }
@@ -322,6 +342,7 @@ class HttpLilaTurnProvider(
             if (payload.optString("conversation_id", "") != conversationId) return null
             return when (payload.optString("status", "")) {
                 "pending" -> LilaTurnReconciliation(LilaTurnStatus.PENDING)
+                "outcome_unknown" -> LilaTurnReconciliation(LilaTurnStatus.OUTCOME_UNKNOWN)
                 "completed" -> {
                     val response = payload.optJSONObject("response") ?: return null
                     val responseConversationId = response.optString("conversation_id", "")
@@ -332,13 +353,20 @@ class HttpLilaTurnProvider(
                     ) {
                         return null
                     }
+                    val providerId = optionalString(response, "provider_id", 64)
+                    val modelId = optionalString(response, "model_id", 256)
+                    val fallback = parseFallbackDisclosure(response, "assistant", providerId, modelId)
                     LilaTurnReconciliation(
-                        LilaTurnStatus.COMPLETED,
-                        LilaTurnResult(
+                        status = LilaTurnStatus.COMPLETED,
+                        result = LilaTurnResult(
                             conversationId = responseConversationId,
                             text = assistantText,
-                            providerId = optionalString(response, "provider_id", 64),
-                            modelId = optionalString(response, "model_id", 256)
+                            providerId = providerId,
+                            modelId = modelId,
+                            fallbackUsed = fallback.used,
+                            fallbackFromProviderId = fallback.fromProviderId,
+                            fallbackFromModelId = fallback.fromModelId,
+                            fallbackReason = fallback.reason
                         )
                     )
                 }
@@ -500,16 +528,26 @@ class HttpLilaTurnProvider(
                 val createdAt = item.optLong("created_at_epoch_millis", -1L)
                 val providerId = optionalString(item, "provider_id", 64)
                 val modelId = optionalString(item, "model_id", 256)
+                val fallback = parseFallbackDisclosure(item, role, providerId, modelId)
                 if (sequence <= previousSequence ||
                     role !in setOf("user", "assistant") ||
                     content.isBlank() || content.length > MAX_ASSISTANT_TEXT_CHARS ||
                     createdAt < 0 ||
-                    (role == "user" && (providerId != null || modelId != null))
+                    (role == "user" && (providerId != null || modelId != null || fallback.used))
                 ) {
                     throw GalaxyApiException(null, "Сервис Lila вернул некорректную историю.")
                 }
                 pageMessages += LilaHistoryMessage(
-                    sequence, role, content, createdAt, providerId, modelId
+                    sequence = sequence,
+                    role = role,
+                    content = content,
+                    createdAtEpochMillis = createdAt,
+                    providerId = providerId,
+                    modelId = modelId,
+                    fallbackUsed = fallback.used,
+                    fallbackFromProviderId = fallback.fromProviderId,
+                    fallbackFromModelId = fallback.fromModelId,
+                    fallbackReason = fallback.reason
                 )
                 previousSequence = sequence
             }
@@ -541,6 +579,43 @@ class HttpLilaTurnProvider(
         val messages: List<LilaHistoryMessage>,
         val nextBeforeSequence: Long?
     )
+
+    private data class FallbackDisclosure(
+        val used: Boolean,
+        val fromProviderId: String?,
+        val fromModelId: String?,
+        val reason: String?
+    )
+
+    private fun parseFallbackDisclosure(
+        payload: JSONObject,
+        role: String,
+        providerId: String?,
+        modelId: String?
+    ): FallbackDisclosure {
+        val used = payload.optBoolean("fallback_used", false)
+        val fromProviderId = optionalString(payload, "fallback_from_provider_id", 64)
+        val fromModelId = optionalString(payload, "fallback_from_model_id", 256)
+        val reason = optionalString(payload, "fallback_reason", 64)
+        val hasMetadata = fromProviderId != null || fromModelId != null || reason != null
+        if (used) {
+            if (
+                role != "assistant" ||
+                providerId == null ||
+                modelId == null ||
+                fromProviderId == null ||
+                fromModelId == null ||
+                reason == null ||
+                reason !in setOf("primary_connection_unavailable", "primary_provider_unavailable") ||
+                providerId == fromProviderId
+            ) {
+                throw GalaxyApiException(null, "Сервис Lila вернул некорректные данные резервной модели.")
+            }
+        } else if (hasMetadata) {
+            throw GalaxyApiException(null, "Сервис Lila вернул несогласованные данные резервной модели.")
+        }
+        return FallbackDisclosure(used, fromProviderId, fromModelId, reason)
+    }
 
     private fun optionalString(payload: JSONObject, key: String, maxLength: Int): String? {
         if (payload.isNull(key)) return null

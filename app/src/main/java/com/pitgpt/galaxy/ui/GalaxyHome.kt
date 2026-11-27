@@ -3,6 +3,7 @@ package com.pitgpt.galaxy.ui
 import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -41,6 +43,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -52,12 +56,17 @@ import com.pitgpt.galaxy.GalaxyApplication
 import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.MessageRole
 import com.pitgpt.galaxy.core.model.CharacterProfile
+import com.pitgpt.galaxy.core.model.StoredGeneratedImage
 import com.pitgpt.galaxy.core.usecase.SendMessage
 import com.pitgpt.galaxy.data.remote.GalaxyApiException
 import com.pitgpt.galaxy.data.remote.LilaHistoryMessage
+import com.pitgpt.galaxy.data.remote.LilaImageHistoryJob
 import com.pitgpt.galaxy.data.remote.LilaTurnStatus
 import com.pitgpt.galaxy.data.remote.stableLilaConversationId
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import java.security.MessageDigest
 import java.util.UUID
@@ -67,6 +76,94 @@ private val Muted = Color(0xFF9AA8C5)
 private val Ice = Color(0xFFB8D9FF)
 private const val CHARACTER_ID = "galaxy.default"
 internal const val PENDING_LILA_MESSAGE_PREFIX = "lila-pending-"
+
+internal data class ConversationTimelineEntry(
+    val key: String,
+    val createdAtEpochMillis: Long,
+    val message: ConversationMessage? = null,
+    val image: StoredGeneratedImage? = null,
+    val imageJob: LilaImageHistoryJob? = null
+)
+
+internal fun buildConversationTimeline(
+    messages: List<ConversationMessage>,
+    images: List<StoredGeneratedImage>,
+    imageJobs: List<LilaImageHistoryJob>,
+    requestIdsByJobId: Map<String, String>
+): List<ConversationTimelineEntry> {
+    val storedRequestIds = images.mapTo(mutableSetOf<String>()) { it.requestId }
+    return buildList {
+        messages.forEach { message ->
+            add(
+                ConversationTimelineEntry(
+                    key = "message:" + message.id,
+                    createdAtEpochMillis = message.createdAtEpochMillis,
+                    message = message
+                )
+            )
+        }
+        images.forEach { image ->
+            add(
+                ConversationTimelineEntry(
+                    key = "image:" + image.assetId,
+                    createdAtEpochMillis = image.createdAtEpochMillis,
+                    image = image
+                )
+            )
+        }
+        imageJobs.forEach { job ->
+            val requestId = requestIdsByJobId[job.jobId] ?: job.jobId
+            if (job.state != "completed" || requestId !in storedRequestIds) {
+                add(
+                    ConversationTimelineEntry(
+                        key = "image-job:" + job.jobId,
+                        createdAtEpochMillis = job.createdAtEpochMillis,
+                        imageJob = job
+                    )
+                )
+            }
+        }
+    }.sortedWith(compareBy<ConversationTimelineEntry> { it.createdAtEpochMillis }.thenBy { it.key })
+}
+
+internal fun mergeLilaImageHistoryJobs(
+    existing: List<LilaImageHistoryJob>,
+    incoming: List<LilaImageHistoryJob>
+): List<LilaImageHistoryJob> =
+    (existing + incoming)
+        .associateBy { it.jobId }
+        .values
+        .sortedByDescending { it.createdAtEpochMillis }
+
+internal fun shouldPollCoreImageJobState(state: String): Boolean =
+    state in setOf(
+        "submitting",
+        "queued",
+        "running",
+        "provider_completed",
+        "result_pending"
+    )
+
+internal fun coreImageJobStatusLabel(state: String): String = when (state) {
+    "prepared" -> "ПОДГОТОВКА"
+    "submitting" -> "ОТПРАВКА В COMFYUI"
+    "submission_unknown" -> "ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ"
+    "queued" -> "В ОЧЕРЕДИ"
+    "running" -> "ВЫПОЛНЯЕТСЯ"
+    "provider_completed", "result_pending" -> "СОХРАНЕНИЕ РЕЗУЛЬТАТА"
+    "completed" -> "ГОТОВО · РЕЗУЛЬТАТ В CORE"
+    "failed" -> "ОШИБКА ГЕНЕРАЦИИ"
+    "cancelled" -> "ОТМЕНЕНО"
+    else -> "СТАТУС НЕИЗВЕСТЕН"
+}
+
+internal fun lilaTurnReconciliationWarning(status: LilaTurnStatus?): String? = when (status) {
+    LilaTurnStatus.PENDING ->
+        "Запрос Лилы ещё обрабатывается. Не отправляй это сообщение повторно: Core сохраняет защиту от повторной генерации."
+    LilaTurnStatus.OUTCOME_UNKNOWN ->
+        "Результат запроса Лилы не подтверждён. Автоматический повтор отключён, чтобы избежать второй генерации. Нажми «Обновить» позже, чтобы проверить сохранённый результат."
+    else -> null
+}
 
 @Composable
 fun GalaxyHome() {
@@ -82,6 +179,8 @@ fun GalaxyHome() {
     var showChat by remember { mutableStateOf(false) }
     var showProfile by remember { mutableStateOf(false) }
     var showProviders by remember { mutableStateOf(false) }
+    var showMemory by remember { mutableStateOf(false) }
+    var showComfyUiSettings by remember { mutableStateOf(false) }
     var showCharacters by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
     var showEditCharacter by remember { mutableStateOf(false) }
@@ -157,6 +256,9 @@ fun GalaxyHome() {
                     throw error
                 } catch (_: Exception) {
                     null
+                }
+                lilaTurnReconciliationWarning(reconciliation?.status)?.let {
+                    historySyncWarning = it
                 }
                 if (reconciliation?.status == LilaTurnStatus.COMPLETED) {
                     val recovered = reconciliation.result ?: return@forEach
@@ -361,6 +463,11 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showMemory) {
+        LilaMemorySettingsScreen(
+            client = app.lilaMemoryClient,
+            onBack = { showMemory = false }
+        )
     } else if (showProviders) {
         val providerConversationId = conversationOwnerKey?.let { ownerKey ->
             getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
@@ -378,12 +485,21 @@ fun GalaxyHome() {
                 }
             }
         )
+    } else if (showComfyUiSettings) {
+        ComfyUiSettingsScreen(app = app, onBack = { showComfyUiSettings = false })
     } else if (showChat) {
+        val conversationId = conversationOwnerKey?.let { ownerKey ->
+            getOrCreateLilaConversationId(context, ownerKey, activeCharacterId)
+        } ?: conversationStorageKey(conversationOwnerKey, activeCharacterId)
         ConversationScreen(
+            app = app,
+            conversationId = conversationId,
+            characterId = activeCharacterId,
             characterName = characterName,
             messages = messages,
             activeModelLabel = activeModelLabel,
             aiConfigured = app.lilaTurnProvider.isConfigured,
+            remoteImageHistoryEnabled = conversationOwnerKey != null && app.lilaTurnProvider.isConfigured,
             isLoading = isLoading,
             loadError = loadError,
             historySyncWarning = historySyncWarning,
@@ -449,6 +565,32 @@ fun GalaxyHome() {
                     messages.removeAll { it.id == pendingMessageId }
                     messages.add(userMessage)
                     messages.add(assistantMessage)
+                    val fallbackNotice = lilaFallbackNoticeText(
+                        fallbackUsed = response.fallbackUsed,
+                        providerId = response.providerId,
+                        modelId = response.modelId,
+                        fallbackFromProviderId = response.fallbackFromProviderId,
+                        fallbackFromModelId = response.fallbackFromModelId,
+                        fallbackReason = response.fallbackReason
+                    )
+                    if (fallbackNotice != null) {
+                        val noticeMessage = ConversationMessage(
+                            id = UUID.randomUUID().toString(),
+                            characterId = storageCharacterId,
+                            role = MessageRole.SYSTEM,
+                            content = fallbackNotice,
+                            createdAtEpochMillis = createdAt + 2
+                        )
+                        messages.add(noticeMessage)
+                        try {
+                            app.conversations.append(noticeMessage)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            historySyncWarning =
+                                "Ответ Лилы сохранён, но уведомление о резервной модели будет восстановлено при синхронизации."
+                        }
+                    }
                     activeModelLabel = response.displayModel.takeIf {
                         response.providerId != null || response.modelId != null
                     }
@@ -476,7 +618,9 @@ fun GalaxyHome() {
             onOpenChat = { showChat = true },
             onOpenProfile = { showProfile = true },
             onOpenCharacters = { showCharacters = true },
-            onOpenProviders = { showProviders = true }
+            onOpenProviders = { showProviders = true },
+            onOpenMemory = { showMemory = true },
+            onOpenComfyUi = { showComfyUiSettings = true }
         )
     }
 }
@@ -493,7 +637,9 @@ private fun HomeScreen(
     onOpenChat: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenCharacters: () -> Unit,
-    onOpenProviders: () -> Unit
+    onOpenProviders: () -> Unit,
+    onOpenMemory: () -> Unit,
+    onOpenComfyUi: () -> Unit
 ) {
     Box(
         modifier = Modifier.fillMaxSize().background(
@@ -605,6 +751,24 @@ private fun HomeScreen(
             }
             Spacer(Modifier.height(10.dp))
             Button(
+                onClick = onOpenMemory,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("ДОЛГОВРЕМЕННАЯ ПАМЯТЬ ЛИЛЫ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onOpenComfyUi,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF28375D)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text("COMFYUI · ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
                 onClick = onOpenChat,
                 modifier = Modifier.fillMaxWidth().height(54.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6578D8)),
@@ -621,10 +785,14 @@ private fun HomeScreen(
 
 @Composable
 private fun ConversationScreen(
+    app: GalaxyApplication,
+    conversationId: String,
+    characterId: String,
     characterName: String,
     messages: List<ConversationMessage>,
     activeModelLabel: String?,
     aiConfigured: Boolean,
+    remoteImageHistoryEnabled: Boolean,
     isLoading: Boolean,
     loadError: String?,
     historySyncWarning: String?,
@@ -635,8 +803,118 @@ private fun ConversationScreen(
     var draft by remember { mutableStateOf("") }
     var isSending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
+    var showImageGeneration by remember { mutableStateOf(false) }
+    var imageGenerationSubmitting by remember { mutableStateOf(false) }
+    var generatedImages by remember(conversationId) {
+        mutableStateOf<List<StoredGeneratedImage>>(emptyList())
+    }
+    var imageHistoryRefreshKey by remember(conversationId) { mutableStateOf(0) }
+    var imageHistoryLoadError by remember(conversationId) { mutableStateOf(false) }
+    var imageHistorySyncWarning by remember(conversationId) { mutableStateOf<String?>(null) }
+    var imageHistoryReady by remember(conversationId) { mutableStateOf(false) }
+    var imageJobs by remember(conversationId) { mutableStateOf<List<LilaImageHistoryJob>>(emptyList()) }
+    var imageJobRequestIds by remember(conversationId) { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var imageHistoryCursor by remember(conversationId) { mutableStateOf<String?>(null) }
+    var imageHistoryFullyLoaded by remember(conversationId) { mutableStateOf(false) }
+    var isLoadingOlderImageJobs by remember(conversationId) { mutableStateOf(false) }
+    var imageHistoryOlderLoadError by remember(conversationId) { mutableStateOf<String?>(null) }
+    var suppressNextTimelineAutoScroll by remember(conversationId) { mutableStateOf(false) }
+    var lastImageHistorySyncKey by remember(conversationId) { mutableStateOf(-1) }
     val sendScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val imageHistorySyncMutex = remember(conversationId) { Mutex() }
+
+    LaunchedEffect(app, conversationId, imageHistoryRefreshKey, remoteImageHistoryEnabled, characterId) {
+        var shouldPoll = true
+        while (shouldPoll) {
+            try {
+                if (remoteImageHistoryEnabled) {
+                    imageHistorySyncMutex.withLock {
+                        val page = app.lilaCoreImageGenerationProvider.historyPage(conversationId)
+                        val pageJobIds = page.jobs.mapTo(mutableSetOf()) { it.jobId }
+                        val refreshedOlderJobs = imageJobs
+                            .filter { it.jobId !in pageJobIds && shouldPollCoreImageJobState(it.state) }
+                            .mapNotNull { job ->
+                                try {
+                                    job.copy(
+                                        state = app.lilaCoreImageGenerationProvider
+                                            .status(job.jobId).state.name.lowercase()
+                                    )
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            }
+                        val mergedHistory = mergeLilaImageHistoryJobs(
+                            imageJobs,
+                            page.jobs + refreshedOlderJobs
+                        )
+                        val syncAllLoaded = !imageHistoryReady ||
+                            lastImageHistorySyncKey != imageHistoryRefreshKey
+                        val historyToSync = if (syncAllLoaded) mergedHistory else page.jobs + refreshedOlderJobs
+                        val sync = syncCoreImageHistory(
+                            provider = app.lilaCoreImageGenerationProvider,
+                            conversationId = conversationId,
+                            characterId = characterId,
+                            requestStore = app.imageGenerationRequests,
+                            jobStore = app.comfyUiJobStore,
+                            images = app.generatedImages,
+                            history = historyToSync
+                        )
+                        if (syncAllLoaded) lastImageHistorySyncKey = imageHistoryRefreshKey
+                        imageJobs = mergedHistory
+                        if (!imageHistoryReady) {
+                            imageHistoryCursor = page.nextCursor
+                            imageHistoryFullyLoaded = page.nextCursor == null
+                        } else if (!imageHistoryFullyLoaded && imageHistoryCursor == null) {
+                            imageHistoryCursor = page.nextCursor
+                            imageHistoryFullyLoaded = page.nextCursor == null
+                        }
+                        imageJobRequestIds = try {
+                            app.comfyUiJobStore.all().associate { it.promptId to it.requestId }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            emptyMap()
+                        }
+                        generatedImages = app.generatedImages.listForConversation(conversationId)
+                        imageHistoryReady = true
+                        if (syncAllLoaded || imageHistorySyncWarning == null) {
+                            imageHistorySyncWarning = coreImageHistorySyncWarning(sync)
+                        }
+                        imageHistoryLoadError = false
+                        shouldPoll = mergedHistory.any { shouldPollCoreImageJobState(it.state) }
+                    }
+                } else {
+                    generatedImages = app.generatedImages.listForConversation(conversationId)
+                    imageJobs = emptyList()
+                    imageJobRequestIds = emptyMap()
+                    imageHistoryCursor = null
+                    imageHistoryFullyLoaded = true
+                    imageHistorySyncWarning = null
+                    imageHistoryOlderLoadError = null
+                    imageHistoryLoadError = false
+                    imageHistoryReady = true
+                    shouldPoll = false
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                imageHistoryLoadError = true
+                imageHistoryReady = true
+                shouldPoll = false
+            }
+            if (shouldPoll) delay(4_000)
+        }
+    }
+
+    val timeline = buildConversationTimeline(
+        messages = messages,
+        images = generatedImages,
+        imageJobs = imageJobs,
+        requestIdsByJobId = imageJobRequestIds
+    )
 
     fun submitDraft() {
         val value = draft.trim()
@@ -655,8 +933,13 @@ private fun ConversationScreen(
             }
         }
     }
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(timeline.size, imageHistoryCursor != null) {
+        if (suppressNextTimelineAutoScroll) {
+            suppressNextTimelineAutoScroll = false
+        } else if (timeline.isNotEmpty()) {
+            val headerOffset = if (imageHistoryCursor != null) 1 else 0
+            listState.animateScrollToItem(timeline.lastIndex + headerOffset)
+        }
     }
     Box(
         Modifier.fillMaxSize().background(
@@ -665,7 +948,11 @@ private fun ConversationScreen(
     ) {
         Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("‹  НАЗАД", color = Ice) }
+                TextButton(onClick = onBack, enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting)) { Text("‹  НАЗАД", color = Ice) }
+                TextButton(
+                    onClick = { showImageGeneration = !showImageGeneration },
+                    enabled = !imageGenerationNavigationLocked(imageGenerationSubmitting)
+                ) { Text(if (showImageGeneration) "СКРЫТЬ ОБРАЗ" else "ОБРАЗ", color = Ice, fontSize = 9.sp) }
                 Spacer(Modifier.weight(1f))
                 Column(horizontalAlignment = Alignment.End) {
                     Text(characterName, color = Color.White, fontSize = 18.sp,
@@ -685,9 +972,41 @@ private fun ConversationScreen(
                 Text(it, color = Color(0xFFE9BD70), fontSize = 11.sp, lineHeight = 16.sp)
                 Spacer(Modifier.height(8.dp))
             }
+            if (showImageGeneration) {
+                CharacterScopedGenerationPanel(conversationId) {
+                    ImageGenerationPanel(
+                        app = app,
+                        characterId = characterId,
+                        conversationId = conversationId,
+                        modifier = Modifier.weight(0.42f),
+                        imageHistoryReady = imageHistoryReady,
+                        onSubmittingChanged = { imageGenerationSubmitting = it },
+                        onImagePersisted = { imageHistoryRefreshKey++ },
+                        onJobStateChanged = { imageHistoryRefreshKey++ }
+                    )
+                }
+            }
+            if (imageHistoryLoadError || imageHistorySyncWarning != null) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        if (imageHistoryLoadError) {
+                            "Не удалось синхронизировать историю генерации с Lila Core. Локальные изображения сохранены."
+                        } else {
+                            imageHistorySyncWarning.orEmpty()
+                        },
+                        color = Color(0xFFE9BD70),
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp
+                    )
+                    TextButton(onClick = { imageHistoryRefreshKey++ }) {
+                        Text("ПОВТОРИТЬ СИНХРОНИЗАЦИЮ", color = Color(0xFFE9BD70), fontSize = 9.sp)
+                    }
+                }
+            }
+            val chatWeight = if (showImageGeneration) 0.58f else 1f
             if (loadError != null) {
                 Column(
-                    Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
+                    Modifier.fillMaxWidth().weight(chatWeight).padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -698,13 +1017,13 @@ private fun ConversationScreen(
                         textAlign = TextAlign.Center)
                     TextButton(onClick = onRetryLoad) { Text("ПОВТОРИТЬ ЗАГРУЗКУ", color = Ice) }
                 }
-            } else if (isLoading && messages.isEmpty()) {
-                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            } else if (isLoading && timeline.isEmpty()) {
+                Box(Modifier.fillMaxWidth().weight(chatWeight), contentAlignment = Alignment.Center) {
                     Text("Загружаю историю…", color = Muted, fontSize = 14.sp)
                 }
-            } else if (messages.isEmpty()) {
+            } else if (timeline.isEmpty()) {
                 Column(
-                    Modifier.fillMaxWidth().weight(1f).padding(horizontal = 18.dp),
+                    Modifier.fillMaxWidth().weight(chatWeight).padding(horizontal = 18.dp),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -724,60 +1043,207 @@ private fun ConversationScreen(
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    modifier = Modifier.weight(chatWeight).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     reverseLayout = false
                 ) {
-                    items(messages, key = { it.id }) { message ->
-                        val isUser = message.role == MessageRole.USER
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-                        ) {
+                    if (imageHistoryCursor != null) {
+                        item(key = "older-image-history") {
                             Column(
-                                Modifier.fillMaxWidth(0.86f)
-                                    .clip(RoundedCornerShape(18.dp))
-                                    .background(if (isUser) Color(0xFF354779) else Color(0xFF202A46))
-                                    .padding(horizontal = 14.dp, vertical = 11.dp)
+                                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                val pendingDelivery = isUser &&
-                                    message.id.startsWith(PENDING_LILA_MESSAGE_PREFIX)
-                                Text(
-                                    when {
-                                        pendingDelivery -> "ТЫ · ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ"
-                                        isUser -> "ТЫ"
-                                        else -> characterName.uppercase()
-                                    },
-                                    color = if (pendingDelivery) Color(0xFFE9BD70) else Ice,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp
-                                )
-                                if (pendingDelivery) {
-                                    Spacer(Modifier.height(3.dp))
-                                    Text(
-                                        "Сообщение сохранено на устройстве. Результат отправки ещё не подтверждён.",
-                                        color = Color(0xFFE9BD70),
-                                        fontSize = 10.sp,
-                                        lineHeight = 14.sp
-                                    )
-                                    TextButton(
-                                        onClick = {
-                                            draft = message.content
-                                            sendError = null
+                                TextButton(
+                                    enabled = !isLoadingOlderImageJobs,
+                                    onClick = {
+                                        val cursor = imageHistoryCursor
+                                        if (cursor != null) {
+                                            sendScope.launch {
+                                                isLoadingOlderImageJobs = true
+                                                imageHistoryOlderLoadError = null
+                                                try {
+                                                    imageHistorySyncMutex.withLock {
+                                                        val page = app.lilaCoreImageGenerationProvider
+                                                            .historyPage(conversationId, cursor)
+                                                        if (page.nextCursor == cursor) {
+                                                            throw GalaxyApiException(
+                                                                null,
+                                                                "Lila Core не продвинул курсор истории изображений."
+                                                            )
+                                                        }
+                                                        val pageJobIds = page.jobs.mapTo(mutableSetOf()) { it.jobId }
+                                                        val refreshedOlderJobs = imageJobs
+                                                            .filter {
+                                                                it.jobId !in pageJobIds &&
+                                                                    shouldPollCoreImageJobState(it.state)
+                                                            }
+                                                            .mapNotNull { job ->
+                                                                try {
+                                                                    job.copy(
+                                                                        state = app.lilaCoreImageGenerationProvider
+                                                                            .status(job.jobId).state.name.lowercase()
+                                                                    )
+                                                                } catch (cancelled: CancellationException) {
+                                                                    throw cancelled
+                                                                } catch (_: Exception) {
+                                                                    null
+                                                                }
+                                                            }
+                                                        val mergedHistory = mergeLilaImageHistoryJobs(
+                                                            imageJobs,
+                                                            page.jobs + refreshedOlderJobs
+                                                        )
+                                                        val sync = syncCoreImageHistory(
+                                                            provider = app.lilaCoreImageGenerationProvider,
+                                                            conversationId = conversationId,
+                                                            characterId = characterId,
+                                                            requestStore = app.imageGenerationRequests,
+                                                            jobStore = app.comfyUiJobStore,
+                                                            images = app.generatedImages,
+                                                            history = mergedHistory
+                                                        )
+                                                        lastImageHistorySyncKey = imageHistoryRefreshKey
+                                                        suppressNextTimelineAutoScroll = true
+                                                        imageJobs = mergedHistory
+                                                        imageHistoryCursor = page.nextCursor
+                                                        imageHistoryFullyLoaded = page.nextCursor == null
+                                                        imageJobRequestIds = try {
+                                                            app.comfyUiJobStore.all()
+                                                                .associate { it.promptId to it.requestId }
+                                                        } catch (cancelled: CancellationException) {
+                                                            throw cancelled
+                                                        } catch (_: Exception) {
+                                                            emptyMap()
+                                                        }
+                                                        generatedImages =
+                                                            app.generatedImages.listForConversation(conversationId)
+                                                        imageHistorySyncWarning = coreImageHistorySyncWarning(sync)
+                                                        imageHistoryOlderLoadError = null
+                                                        if (mergedHistory.any {
+                                                                shouldPollCoreImageJobState(it.state)
+                                                            }) {
+                                                            imageHistoryRefreshKey++
+                                                        }
+                                                    }
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (error: Exception) {
+                                                    imageHistoryOlderLoadError =
+                                                        (error as? GalaxyApiException)?.message
+                                                            ?: "Не удалось загрузить более ранние задания."
+                                                } finally {
+                                                    isLoadingOlderImageJobs = false
+                                                }
+                                            }
                                         }
+                                    }
+                                ) {
+                                    Text(
+                                        if (isLoadingOlderImageJobs) {
+                                            "ЗАГРУЖАЮ БОЛЕЕ РАННИЕ ЗАДАНИЯ…"
+                                        } else {
+                                            "ЗАГРУЗИТЬ БОЛЕЕ РАННИЕ ЗАДАНИЯ"
+                                        },
+                                        color = Ice,
+                                        fontSize = 9.sp
+                                    )
+                                }
+                                imageHistoryOlderLoadError?.let {
+                                    Text(
+                                        it,
+                                        color = Color(0xFFFF9B9B),
+                                        fontSize = 10.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    items(timeline, key = { it.key }) { entry ->
+                        when {
+                            entry.message != null -> {
+                                val message = entry.message
+                                val isUser = message.role == MessageRole.USER
+                                val isSystem = message.role == MessageRole.SYSTEM
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                                ) {
+                                    Column(
+                                        Modifier.fillMaxWidth(0.86f)
+                                            .clip(RoundedCornerShape(18.dp))
+                                            .background(
+                                                when {
+                                                    isUser -> Color(0xFF354779)
+                                                    isSystem -> Color(0xFF3A3426)
+                                                    else -> Color(0xFF202A46)
+                                                }
+                                            )
+                                            .padding(horizontal = 14.dp, vertical = 11.dp)
                                     ) {
+                                        val pendingDelivery = isUser &&
+                                            message.id.startsWith(PENDING_LILA_MESSAGE_PREFIX)
                                         Text(
-                                            "ПОВТОРИТЬ ЭТО СООБЩЕНИЕ",
-                                            color = Color(0xFFE9BD70),
-                                            fontSize = 9.sp
+                                            when {
+                                                pendingDelivery -> "ТЫ · ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ"
+                                                isUser -> "ТЫ"
+                                                isSystem -> "МАРШРУТИЗАЦИЯ МОДЕЛИ"
+                                                else -> characterName.uppercase()
+                                            },
+                                            color = when {
+                                                pendingDelivery || isSystem -> Color(0xFFE9BD70)
+                                                else -> Ice
+                                            },
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            letterSpacing = 1.sp
                                         )
+                                        if (pendingDelivery) {
+                                            Spacer(Modifier.height(3.dp))
+                                            Text(
+                                                "Сообщение сохранено на устройстве. Результат отправки ещё не подтверждён.",
+                                                color = Color(0xFFE9BD70),
+                                                fontSize = 10.sp,
+                                                lineHeight = 14.sp
+                                            )
+                                            TextButton(
+                                                onClick = {
+                                                    draft = message.content
+                                                    sendError = null
+                                                }
+                                            ) {
+                                                Text(
+                                                    "ПОВТОРИТЬ ЭТО СООБЩЕНИЕ",
+                                                    color = Color(0xFFE9BD70),
+                                                    fontSize = 9.sp
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.height(5.dp))
+                                        Text(
+                                            message.content,
+                                            color = if (isSystem) Color(0xFFFFD98A) else Color.White,
+                                            fontSize = if (isSystem) 11.sp else 15.sp,
+                                            lineHeight = if (isSystem) 16.sp else 21.sp
+                                        )
+                                        if (remoteImageHistoryEnabled && !pendingDelivery && !isSystem) {
+                                            Spacer(Modifier.height(2.dp))
+                                            ConversationMessageMemoryAction(
+                                                client = app.lilaMemoryClient,
+                                                conversationId = conversationId,
+                                                message = message,
+                                                characterName = characterName
+                                            )
+                                        }
                                     }
                                 }
-                                Spacer(Modifier.height(5.dp))
-                                Text(message.content, color = Color.White, fontSize = 15.sp,
-                                    lineHeight = 21.sp)
                             }
+                            entry.image != null -> GeneratedImageTimelineBubble(
+                                app = app,
+                                image = entry.image,
+                                characterName = characterName
+                            )
+                            entry.imageJob != null -> ImageJobTimelineBubble(job = entry.imageJob)
                         }
                     }
                 }
@@ -823,6 +1289,127 @@ private fun ConversationScreen(
                 Text(error, color = Color(0xFFFF9B9B), fontSize = 11.sp,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp))
             }
+        }
+    }
+}
+
+@Composable
+private fun ImageJobTimelineBubble(job: LilaImageHistoryJob) {
+    val statusColor = when (job.state) {
+        "completed" -> Color(0xFF75E2BD)
+        "failed" -> Color(0xFFFF9B9B)
+        "cancelled" -> Muted
+        "running", "provider_completed", "result_pending" -> Ice
+        else -> Color(0xFFE9BD70)
+    }
+    val detail = when (job.state) {
+        "submission_unknown" ->
+            "Core не подтвердил приём задания. Повторная отправка заблокирована, чтобы не создать дубликат."
+        "completed" ->
+            "Результат сохранён в Lila Core и ожидает импорта в зашифрованное хранилище Galaxy."
+        "failed" ->
+            "Lila Core сохранил ошибку задания. Проверь workflow ComfyUI перед новой генерацией."
+        "cancelled" ->
+            "Задание отменено до начала выполнения."
+        else -> null
+    }
+
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(
+            Modifier.fillMaxWidth(0.86f)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF202A46))
+                .padding(horizontal = 14.dp, vertical = 11.dp)
+        ) {
+            Text(
+                "LILA · ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ",
+                color = Ice,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(Modifier.height(5.dp))
+            Text(
+                coreImageJobStatusLabel(job.state),
+                color = statusColor,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(5.dp))
+            Text(job.prompt, color = Color.White, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 4)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "${job.width} × ${job.height}" + (job.seed?.let { " · seed $it" } ?: ""),
+                color = Muted,
+                fontSize = 9.sp
+            )
+            detail?.let {
+                Spacer(Modifier.height(5.dp))
+                Text(it, color = statusColor, fontSize = 10.sp, lineHeight = 14.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GeneratedImageTimelineBubble(
+    app: GalaxyApplication,
+    image: StoredGeneratedImage,
+    characterName: String
+) {
+    var bitmap by remember(image.assetId) { mutableStateOf<ImageBitmap?>(null) }
+    var isLoading by remember(image.assetId) { mutableStateOf(true) }
+    var isUnavailable by remember(image.assetId) { mutableStateOf(false) }
+
+    LaunchedEffect(app, image.assetId) {
+        try {
+            val plaintext = app.generatedImages.read(image.assetId)
+            bitmap = decodeGeneratedImageAndClearBytes(plaintext)
+            isUnavailable = bitmap == null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            isUnavailable = true
+        } finally {
+            isLoading = false
+        }
+    }
+
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+        Column(
+            Modifier.fillMaxWidth(0.86f)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF202A46))
+                .padding(horizontal = 14.dp, vertical = 11.dp)
+        ) {
+            Text(
+                "${characterName.uppercase()} · ИЗОБРАЖЕНИЕ",
+                color = Ice,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+            Spacer(Modifier.height(7.dp))
+            when {
+                bitmap != null -> Image(
+                    bitmap = requireNotNull(bitmap),
+                    contentDescription = "Сгенерированное изображение",
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                    contentScale = ContentScale.Fit
+                )
+                isLoading -> Text("Загружаю сохранённое изображение…", color = Muted, fontSize = 12.sp)
+                isUnavailable -> Text(
+                    "Метаданные изображения сохранены, но файл сейчас недоступен.",
+                    color = Color(0xFFE9BD70),
+                    fontSize = 11.sp
+                )
+            }
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "${image.width} × ${image.height} · ${image.mimeType}",
+                color = Muted,
+                fontSize = 9.sp
+            )
         }
     }
 }
@@ -1279,6 +1866,27 @@ private fun StatusLine(title: String, detail: String, dot: Color) {
 }
 
 
+internal fun lilaFallbackNoticeText(
+    fallbackUsed: Boolean,
+    providerId: String?,
+    modelId: String?,
+    fallbackFromProviderId: String?,
+    fallbackFromModelId: String?,
+    fallbackReason: String?
+): String? {
+    if (!fallbackUsed) return null
+    val actualProvider = providerId ?: return null
+    val actualModel = modelId ?: return null
+    val primaryProvider = fallbackFromProviderId ?: return null
+    val primaryModel = fallbackFromModelId ?: return null
+    val reason = when (fallbackReason) {
+        "primary_connection_unavailable" -> "основной провайдер не принял соединение до отправки"
+        "primary_provider_unavailable" -> "основной провайдер был недоступен до отправки"
+        else -> return null
+    }
+    return "Резервная модель использована. Основная: $primaryProvider · $primaryModel — $reason. Ответ: $actualProvider · $actualModel."
+}
+
 internal fun mergeRemoteHistory(
     characterId: String,
     conversationId: String,
@@ -1286,7 +1894,8 @@ internal fun mergeRemoteHistory(
     remote: List<LilaHistoryMessage>
 ): List<ConversationMessage> {
     val unmatchedLocal = local.toMutableList()
-    val remoteMessages = remote.map { entry ->
+    val remoteMessages = mutableListOf<ConversationMessage>()
+    remote.forEach { entry ->
         val role = when (entry.role) {
             "user" -> MessageRole.USER
             "assistant" -> MessageRole.CHARACTER
@@ -1297,7 +1906,7 @@ internal fun mergeRemoteHistory(
                 it.role == role && it.content == entry.content
         }
         val previous = if (matchIndex >= 0) unmatchedLocal.removeAt(matchIndex) else null
-        ConversationMessage(
+        remoteMessages += ConversationMessage(
             id = previous?.id
                 ?.takeUnless { it.startsWith(PENDING_LILA_MESSAGE_PREFIX) }
                 ?: "lila-$conversationId-${entry.sequence.toString().padStart(20, '0')}",
@@ -1306,6 +1915,29 @@ internal fun mergeRemoteHistory(
             content = entry.content,
             createdAtEpochMillis = previous?.createdAtEpochMillis ?: entry.createdAtEpochMillis
         )
+
+        val noticeText = lilaFallbackNoticeText(
+            fallbackUsed = entry.fallbackUsed,
+            providerId = entry.providerId,
+            modelId = entry.modelId,
+            fallbackFromProviderId = entry.fallbackFromProviderId,
+            fallbackFromModelId = entry.fallbackFromModelId,
+            fallbackReason = entry.fallbackReason
+        )
+        if (noticeText != null) {
+            val noticeIndex = unmatchedLocal.indexOfFirst {
+                it.role == MessageRole.SYSTEM && it.content == noticeText
+            }
+            val previousNotice = if (noticeIndex >= 0) unmatchedLocal.removeAt(noticeIndex) else null
+            remoteMessages += ConversationMessage(
+                id = previousNotice?.id
+                    ?: "lila-$conversationId-fallback-${entry.sequence.toString().padStart(20, '0')}",
+                characterId = characterId,
+                role = MessageRole.SYSTEM,
+                content = noticeText,
+                createdAtEpochMillis = previousNotice?.createdAtEpochMillis ?: entry.createdAtEpochMillis
+            )
+        }
     }
     return (remoteMessages + unmatchedLocal)
         .sortedBy { it.createdAtEpochMillis }

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from .lila_core.openai_compatible import DEFAULT_LILA_SYSTEM_PROMPT
+from .lila_core.provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
 
 
 def _read_secret_setting(name: str, *, max_bytes: int) -> tuple[str | None, bool]:
@@ -32,6 +33,28 @@ def _read_secret_setting(name: str, *, max_bytes: int) -> tuple[str | None, bool
     return value or None, True
 
 
+def _parse_local_provider_ports(value: str) -> frozenset[int]:
+    """Parse the operator-only local model port allowlist."""
+    if not isinstance(value, str) or len(value) > 256:
+        raise ValueError("Local provider port allowlist is invalid")
+    items = value.split(",")
+    if not 1 <= len(items) <= 32:
+        raise ValueError("Local provider port allowlist is invalid")
+
+    ports = []
+    for item in items:
+        token = item.strip()
+        if not token or not token.isascii() or not token.isdecimal():
+            raise ValueError("Local provider port allowlist is invalid")
+        port = int(token)
+        if not 1024 <= port <= 65535:
+            raise ValueError("Local provider port allowlist is invalid")
+        ports.append(port)
+    if len(set(ports)) != len(ports):
+        raise ValueError("Local provider port allowlist is invalid")
+    return frozenset(ports)
+
+
 @dataclass(frozen=True)
 class Settings:
     # Realtime/voice credentials are optional so a local-only Lila deployment
@@ -53,11 +76,15 @@ class Settings:
     redis_url: str | None = field(default=None, repr=False)
     lila_turns_per_minute: int = 20
     lila_turns_per_day: int = 500
+    lila_image_reads_per_minute: int = 120
+    lila_image_reads_per_day: int = 2000
     lila_provider_id: str = "default"
     lila_provider_base_url: str | None = None
     lila_provider_model_id: str | None = None
     lila_provider_api_key: str | None = field(default=None, repr=False)
     lila_provider_timeout_seconds: float = 30.0
+    # Operator-controlled ports for loopback/host.docker.internal model runtimes.
+    lila_local_provider_ports: frozenset[int] = DEFAULT_LOCAL_PROVIDER_PORTS
     lila_database_path: str | None = None
     lila_storage_encryption_key: bytes | None = field(default=None, repr=False)
     lila_system_prompt: str = DEFAULT_LILA_SYSTEM_PROMPT
@@ -125,6 +152,13 @@ class Settings:
         if not 1 <= lila_turns_per_day <= 100000:
             raise RuntimeError("LILA_TURNS_PER_DAY must be between 1 and 100000")
 
+        lila_image_reads_per_minute = int(os.getenv("LILA_IMAGE_READS_PER_MINUTE", "120"))
+        if not 30 <= lila_image_reads_per_minute <= 2000:
+            raise RuntimeError("LILA_IMAGE_READS_PER_MINUTE must be between 30 and 2000")
+        lila_image_reads_per_day = int(os.getenv("LILA_IMAGE_READS_PER_DAY", "2000"))
+        if not 1 <= lila_image_reads_per_day <= 100000:
+            raise RuntimeError("LILA_IMAGE_READS_PER_DAY must be between 1 and 100000")
+
         max_active = int(os.getenv("REALTIME_MAX_ACTIVE_SESSIONS", "2"))
         if max_active < 1:
             raise RuntimeError("REALTIME_MAX_ACTIVE_SESSIONS must be at least 1")
@@ -144,6 +178,10 @@ class Settings:
         lila_provider_model_id = os.getenv("LILA_MODEL_ID") or None
         lila_provider_api_key, _ = _read_secret_setting(
             "LILA_PROVIDER_API_KEY", max_bytes=4096
+        )
+        openai_api_key, _ = _read_secret_setting("OPENAI_API_KEY", max_bytes=4096)
+        safety_identifier_hmac_key, _ = _read_secret_setting(
+            "SAFETY_IDENTIFIER_HMAC_KEY", max_bytes=4096
         )
         lila_database_path = os.getenv("LILA_DATABASE_PATH") or None
         storage_key_text, storage_key_file_requested = _read_secret_setting(
@@ -170,6 +208,19 @@ class Settings:
             raise RuntimeError("LILA_PROVIDER_TIMEOUT_SECONDS must be a number") from None
         if not 1 <= lila_provider_timeout_seconds <= 120:
             raise RuntimeError("LILA_PROVIDER_TIMEOUT_SECONDS must be between 1 and 120")
+
+        local_provider_ports_text = os.getenv("LILA_LOCAL_PROVIDER_PORTS")
+        if local_provider_ports_text is None:
+            lila_local_provider_ports = DEFAULT_LOCAL_PROVIDER_PORTS
+        else:
+            try:
+                lila_local_provider_ports = _parse_local_provider_ports(
+                    local_provider_ports_text
+                )
+            except ValueError:
+                raise RuntimeError(
+                    "LILA_LOCAL_PROVIDER_PORTS must contain 1 to 32 unique decimal ports between 1024 and 65535"
+                ) from None
 
         lila_provider_id = os.getenv("LILA_PROVIDER_ID", "default").strip()
         lila_system_prompt = os.getenv("LILA_SYSTEM_PROMPT", DEFAULT_LILA_SYSTEM_PROMPT)
@@ -226,11 +277,11 @@ class Settings:
             raise RuntimeError("GALAXY_ALLOWED_CHARACTER_IDS must contain at least one character")
 
         return cls(
-            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
+            openai_api_key=openai_api_key,
             auth_jwks_url=os.environ["AUTH_JWKS_URL"],
             auth_issuer=os.environ["AUTH_ISSUER"],
             auth_audience=os.environ["AUTH_AUDIENCE"],
-            safety_identifier_hmac_key=os.getenv("SAFETY_IDENTIFIER_HMAC_KEY") or None,
+            safety_identifier_hmac_key=safety_identifier_hmac_key,
             allowed_voices=voices,
             allowed_character_ids=characters,
             realtime_model=os.getenv("REALTIME_MODEL", "gpt-realtime"),
@@ -243,11 +294,14 @@ class Settings:
             redis_url=redis_url,
             lila_turns_per_minute=lila_turns_per_minute,
             lila_turns_per_day=lila_turns_per_day,
+            lila_image_reads_per_minute=lila_image_reads_per_minute,
+            lila_image_reads_per_day=lila_image_reads_per_day,
             lila_provider_id=lila_provider_id,
             lila_provider_base_url=lila_provider_base_url,
             lila_provider_model_id=lila_provider_model_id,
             lila_provider_api_key=lila_provider_api_key,
             lila_provider_timeout_seconds=lila_provider_timeout_seconds,
+            lila_local_provider_ports=lila_local_provider_ports,
             lila_database_path=lila_database_path,
             lila_storage_encryption_key=lila_storage_encryption_key,
             lila_system_prompt=lila_system_prompt,

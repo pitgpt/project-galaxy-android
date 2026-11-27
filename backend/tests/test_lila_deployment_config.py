@@ -12,13 +12,27 @@ LILA_DATA_PATH = "/var/lib/galaxy/lila"
 LILA_DATABASE_PATH = f"{LILA_DATA_PATH}/lila.sqlite3"
 
 
-def _resolved_compose_config():
+def _resolved_compose_config(
+    *compose_files: str,
+    env_overrides: dict[str, str] | None = None,
+):
     if shutil.which("docker") is None:
         pytest.skip("Docker Compose is unavailable in this environment")
 
+    selected_files = compose_files or ("docker-compose.yml",)
+    command = ["docker", "compose"]
+    for compose_file in selected_files:
+        command.extend(["-f", compose_file])
+    command.extend(["config", "--format", "json"])
+
+    environment = os.environ.copy()
+    if env_overrides:
+        environment.update(env_overrides)
+
     result = subprocess.run(
-        ["docker", "compose", "config", "--format", "json"],
+        command,
         cwd=BACKEND_ROOT,
+        env=environment,
         capture_output=True,
         text=True,
         timeout=60,
@@ -67,10 +81,53 @@ def test_compose_mounts_storage_and_provider_secrets_without_container_environme
     assert mounted == {"lila_storage_encryption_key"}
     assert set(config["secrets"]) == {"lila_storage_encryption_key"}
     assert config["secrets"]["lila_storage_encryption_key"]["environment"] == "LILA_STORAGE_ENCRYPTION_KEY"
+    assert "OPENAI_API_KEY_FILE" not in backend_environment
+    assert "SAFETY_IDENTIFIER_HMAC_KEY_FILE" not in backend_environment
     resolved = json.dumps(config)
     assert storage_key not in resolved
     if provider_key:
         assert provider_key not in resolved
+
+
+def test_realtime_compose_override_mounts_optional_credentials_as_secret_files(monkeypatch, tmp_path):
+    openai_key = "realtime-openai-test-secret"
+    safety_key = "realtime-hmac-test-secret"
+    openai_file = tmp_path / "openai-api-key"
+    safety_file = tmp_path / "safety-hmac-key"
+    openai_file.write_text(openai_key, encoding="ascii")
+    safety_file.write_text(safety_key, encoding="ascii")
+
+    config = _resolved_compose_config(
+        "docker-compose.yml",
+        "docker-compose.realtime.yml",
+        env_overrides={
+            "OPENAI_API_KEY_SECRET_FILE": str(openai_file.resolve()),
+            "SAFETY_IDENTIFIER_HMAC_KEY_SECRET_FILE": str(safety_file.resolve()),
+        },
+    )
+    backend = config["services"]["backend"]
+    environment = backend["environment"]
+
+    assert environment["OPENAI_API_KEY"] == ""
+    assert environment["SAFETY_IDENTIFIER_HMAC_KEY"] == ""
+    assert environment["OPENAI_API_KEY_FILE"] == "/run/secrets/openai_api_key"
+    assert environment["SAFETY_IDENTIFIER_HMAC_KEY_FILE"] == "/run/secrets/safety_identifier_hmac_key"
+
+    mounted = {
+        item if isinstance(item, str) else item["source"]
+        for item in backend["secrets"]
+    }
+    assert mounted == {
+        "lila_storage_encryption_key",
+        "openai_api_key",
+        "safety_identifier_hmac_key",
+    }
+    assert config["secrets"]["openai_api_key"]["file"] == str(openai_file.resolve())
+    assert config["secrets"]["safety_identifier_hmac_key"]["file"] == str(safety_file.resolve())
+
+    resolved = json.dumps(config)
+    assert openai_key not in resolved
+    assert safety_key not in resolved
 
 
 def test_backend_image_prepares_private_store_directory_for_runtime_uid():
@@ -93,7 +150,10 @@ def test_env_example_does_not_store_lila_secrets():
     assert values["LILA_MODEL_ID"] == ""
     assert values["LILA_PROVIDER_API_KEY"] == ""
     assert values["LILA_STORAGE_ENCRYPTION_KEY"] == ""
+    assert values["OPENAI_API_KEY"] == ""
+    assert values["SAFETY_IDENTIFIER_HMAC_KEY"] == ""
     assert values["LILA_DATABASE_PATH"] == LILA_DATABASE_PATH
+    assert values["LILA_LOCAL_PROVIDER_PORTS"] == "1234,8080,11434"
     assert values["AUTH_JWKS_URL"] == "https://YOUR_PROJECT_REF.supabase.co/auth/v1/.well-known/jwks.json"
     assert values["AUTH_ISSUER"] == "https://YOUR_PROJECT_REF.supabase.co/auth/v1"
     assert values["AUTH_AUDIENCE"] == "authenticated"
@@ -198,4 +258,130 @@ def test_operator_provider_requires_encrypted_storage(monkeypatch):
     monkeypatch.delenv("LILA_STORAGE_ENCRYPTION_KEY", raising=False)
 
     with pytest.raises(RuntimeError, match="Lila configuration is incomplete"):
+        Settings.from_env()
+
+def _set_minimal_development_settings_environment(monkeypatch):
+    monkeypatch.setenv("AUTH_JWKS_URL", "https://issuer.example/.well-known/jwks.json")
+    monkeypatch.setenv("AUTH_ISSUER", "https://issuer.example/")
+    monkeypatch.setenv("AUTH_AUDIENCE", "galaxy-android")
+    monkeypatch.setenv("GALAXY_ENVIRONMENT", "development")
+    for name in (
+        "LILA_DATABASE_PATH",
+        "LILA_STORAGE_ENCRYPTION_KEY",
+        "LILA_STORAGE_ENCRYPTION_KEY_FILE",
+        "LILA_PROVIDER_BASE_URL",
+        "LILA_MODEL_ID",
+        "LILA_PROVIDER_API_KEY",
+        "LILA_PROVIDER_API_KEY_FILE",
+        "LILA_LOCAL_PROVIDER_PORTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_settings_load_optional_realtime_secret_files_without_exposing_values(monkeypatch, tmp_path):
+    from galaxy_backend.config import Settings
+
+    openai_key = "openai-realtime-file-secret"
+    safety_key = "safety-hmac-file-secret-material"
+    openai_file = tmp_path / "openai-key"
+    safety_file = tmp_path / "safety-key"
+    openai_file.write_text(openai_key + "\n", encoding="ascii")
+    safety_file.write_text(safety_key + "\n", encoding="ascii")
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("SAFETY_IDENTIFIER_HMAC_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY_FILE", str(openai_file))
+    monkeypatch.setenv("SAFETY_IDENTIFIER_HMAC_KEY_FILE", str(safety_file))
+
+    settings = Settings.from_env()
+
+    assert settings.openai_api_key == openai_key
+    assert settings.safety_identifier_hmac_key == safety_key
+    assert openai_key not in repr(settings)
+    assert safety_key not in repr(settings)
+
+
+@pytest.mark.parametrize("name", ["OPENAI_API_KEY", "SAFETY_IDENTIFIER_HMAC_KEY"])
+def test_settings_reject_realtime_secret_value_and_file_ambiguity(monkeypatch, tmp_path, name):
+    from galaxy_backend.config import Settings
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    secret_file = tmp_path / (name.lower() + ".secret")
+    secret_file.write_text("file-secret", encoding="ascii")
+    monkeypatch.setenv(name, "direct-secret")
+    monkeypatch.setenv(name + "_FILE", str(secret_file))
+
+    with pytest.raises(RuntimeError, match=f"Set only one of {name}"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize("name", ["OPENAI_API_KEY", "SAFETY_IDENTIFIER_HMAC_KEY"])
+def test_settings_fail_closed_when_realtime_secret_file_is_missing(monkeypatch, tmp_path, name):
+    from galaxy_backend.config import Settings
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(name + "_FILE", str(tmp_path / (name.lower() + ".missing")))
+
+    with pytest.raises(RuntimeError, match=name + "_FILE could not be read"):
+        Settings.from_env()
+
+
+def test_settings_keep_direct_realtime_secret_environment_compatibility(monkeypatch):
+    from galaxy_backend.config import Settings
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "direct-openai-secret")
+    monkeypatch.setenv("SAFETY_IDENTIFIER_HMAC_KEY", "direct-safety-secret")
+
+    settings = Settings.from_env()
+
+    assert settings.openai_api_key == "direct-openai-secret"
+    assert settings.safety_identifier_hmac_key == "direct-safety-secret"
+
+
+
+
+def test_settings_default_and_custom_operator_local_provider_ports(monkeypatch):
+    from galaxy_backend.config import Settings
+    from galaxy_backend.lila_core.provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    default_settings = Settings.from_env()
+    assert default_settings.lila_local_provider_ports == DEFAULT_LOCAL_PROVIDER_PORTS
+
+    monkeypatch.setenv("LILA_LOCAL_PROVIDER_PORTS", "1234, 8080, 11434, 12345, 8188")
+    custom_settings = Settings.from_env()
+    assert custom_settings.lila_local_provider_ports == frozenset(
+        {1234, 8080, 11434, 12345, 8188}
+    )
+
+    max_ports = ",".join(str(port) for port in range(20000, 20032))
+    monkeypatch.setenv("LILA_LOCAL_PROVIDER_PORTS", max_ports)
+    assert len(Settings.from_env().lila_local_provider_ports) == 32
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "1234,",
+        "1234,,8080",
+        "1234,1234",
+        "80",
+        "65536",
+        "-1",
+        "1e3",
+        "１２３４",
+        ",".join(str(port) for port in range(20000, 20033)),
+    ],
+)
+def test_settings_reject_invalid_operator_local_provider_ports(monkeypatch, value):
+    from galaxy_backend.config import Settings
+
+    _set_minimal_development_settings_environment(monkeypatch)
+    monkeypatch.setenv("LILA_LOCAL_PROVIDER_PORTS", value)
+
+    with pytest.raises(RuntimeError, match="LILA_LOCAL_PROVIDER_PORTS"):
         Settings.from_env()

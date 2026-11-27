@@ -1,0 +1,448 @@
+package com.pitgpt.galaxy.data.providers.comfyui
+
+import android.content.Context
+import android.util.Base64
+import androidx.room.Room
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.pitgpt.galaxy.data.local.GalaxyDatabase
+import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
+import com.pitgpt.galaxy.ui.loadLatestRecoverableImageGenerationRequest
+import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import java.security.SecureRandom
+import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.runBlocking
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class RoomComfyUiJobStoreSqlCipherInstrumentedTest {
+    private lateinit var context: Context
+    private lateinit var databaseName: String
+    private lateinit var passphrase: ByteArray
+    private var database: GalaxyDatabase? = null
+
+    @Before
+    fun setUp() {
+        System.loadLibrary("sqlcipher")
+        context = InstrumentationRegistry.getInstrumentation().targetContext
+        databaseName = "comfyui-job-store-${UUID.randomUUID()}.db"
+        passphrase = ByteArray(32).also(SecureRandom()::nextBytes)
+    }
+
+    @After
+    fun tearDown() {
+        runCatching { database?.close() }
+        if (::context.isInitialized && ::databaseName.isInitialized) {
+            val file = context.getDatabasePath(databaseName)
+            file.delete()
+            File(file.path + "-wal").delete()
+            File(file.path + "-shm").delete()
+            File(file.path + "-journal").delete()
+        }
+        if (::passphrase.isInitialized) passphrase.fill(0)
+    }
+
+    @Test
+    fun submissionStateSurvivesSqlCipherReopenAndMissingRemoteHistoryDoesNotResubmit() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-durable-123",
+            requestId = "galaxy-request-durable-456",
+            createdAtEpochMillis = 1_794_230_400_000L
+        )
+        val generationRequest = ImageGenerationRequest(
+            id = "generation-request-durable",
+            conversationId = "conversation-durable",
+            characterId = "character-durable",
+            prompt = "A private prompt that must remain inside SQLCipher",
+            negativePrompt = "private negative prompt",
+            preferredMimeType = "image/png",
+            workflowId = "workflow-v1",
+            width = 768,
+            height = 1024,
+            seed = 42L,
+            createdAtEpochMillis = 1_794_230_400_001L
+        )
+        val activePromptId = UUID.nameUUIDFromBytes(
+            generationRequest.id.toByteArray(Charsets.UTF_8)
+        ).toString()
+        val activeRecord = ComfyUiJobRecord(
+            promptId = activePromptId,
+            requestId = generationRequest.id,
+            createdAtEpochMillis = generationRequest.createdAtEpochMillis
+        )
+
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val firstStore = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+        firstStore.put(record)
+        assertTrue(firstStore.markSubmissionStarted(record.promptId))
+        firstStore.markCancelled(record.promptId)
+        RoomImageGenerationRequestStore(firstDatabase.imageGenerationRequestDao()).put(generationRequest)
+
+        // Simulate an ambiguous acknowledgement after the durable claim. The provider must
+        // leave SUBMISSION_STARTED in SQLCipher rather than making the request safe to retry.
+        val firstTransport = RecordingTransport(
+            failure = IOException("simulated lost submission acknowledgement")
+        )
+        val uncertain = try {
+            createProvider(firstTransport, firstStore).submit(generationRequest)
+            throw AssertionError("The ambiguous transport failure must remain unresolved")
+        } catch (failure: ComfyUiSubmissionUncertainException) {
+            failure
+        }
+        assertEquals(activePromptId, uncertain.promptId)
+        assertEquals(listOf("POST"), firstTransport.methods)
+        assertEquals(activeRecord.copy(submissionStarted = true), firstStore.get(activePromptId))
+
+        firstDatabase.close()
+        database = null
+
+        val databaseFile = context.getDatabasePath(databaseName)
+        assertTrue("The SQLCipher database file must exist after closing Room", databaseFile.isFile)
+        val header = ByteArray(16)
+        FileInputStream(databaseFile).use { input ->
+            assertEquals(16, input.read(header))
+        }
+        assertFalse(
+            "The persisted Room database must not expose the plaintext SQLite header",
+            String(header, 0, 15, Charsets.US_ASCII) == "SQLite format 3"
+        )
+        val encryptedBytes = databaseFile.readBytes()
+        val encryptedText = String(encryptedBytes, Charsets.ISO_8859_1)
+        assertFalse("Prompt text must not appear in the SQLCipher file", encryptedText.contains("A private prompt"))
+        assertFalse("Negative prompt text must not appear in the SQLCipher file", encryptedText.contains("private negative prompt"))
+
+        val reopenedDatabase = openDatabase()
+        database = reopenedDatabase
+        val reopenedStore = RoomComfyUiJobStore(reopenedDatabase.comfyUiJobDao())
+        val expected = record.copy(cancelled = true, submissionStarted = true)
+        val expectedActive = activeRecord.copy(submissionStarted = true)
+        assertEquals(expected, reopenedStore.get(record.promptId))
+        assertEquals(expectedActive, reopenedStore.get(activePromptId))
+        assertEquals(listOf(expected, expectedActive), reopenedStore.all())
+
+        val reopenedRequests = RoomImageGenerationRequestStore(reopenedDatabase.imageGenerationRequestDao())
+        assertEquals(generationRequest, reopenedRequests.get(generationRequest.id))
+        assertEquals(listOf(generationRequest), reopenedRequests.all())
+
+        // Exercise the same correlation path used by the restored generation panel,
+        // against the reopened SQLCipher-backed stores rather than in-memory fakes.
+        val restored = loadLatestRecoverableImageGenerationRequest(
+            characterId = generationRequest.characterId,
+            conversationId = generationRequest.conversationId,
+            requestStore = reopenedRequests,
+            jobStore = reopenedStore
+        )
+        assertEquals(generationRequest, restored?.request)
+        assertEquals(expectedActive, restored?.job)
+        assertFalse(restored?.canResumeSafely ?: true)
+
+        // The new provider first reconciles the persisted prompt against ComfyUI after reopen.
+        // A queue miss followed by an empty history response is ambiguous, not permission to resubmit.
+        val resumedTransport = RecordingTransport(
+            responses = listOf(
+                ComfyUiApiResponse(200, """{"queue_running":[],"queue_pending":[]}"""),
+                ComfyUiApiResponse(200, "{}")
+            )
+        )
+        val resumedProvider = createProvider(resumedTransport, reopenedStore)
+        val missingRemoteJob = try {
+            resumedProvider.status(activePromptId)
+            throw AssertionError("A prompt missing from both queue and history must remain unresolved")
+        } catch (failure: ComfyUiApiException) {
+            failure
+        }
+        assertEquals(null, missingRemoteJob.httpStatusCode)
+        assertEquals(listOf("GET", "GET"), resumedTransport.methods)
+        assertEquals(
+            listOf(
+                "http://192.168.1.20:8188/queue",
+                "http://192.168.1.20:8188/history/$activePromptId"
+            ),
+            resumedTransport.urls
+        )
+        assertEquals(expectedActive, reopenedStore.get(activePromptId))
+
+        // Retrying the same durable request still returns its prompt ID without a second POST.
+        assertEquals(activePromptId, resumedProvider.submit(requireNotNull(restored).request))
+        assertEquals(listOf("GET", "GET"), resumedTransport.methods)
+        assertEquals(expectedActive, reopenedStore.get(activePromptId))
+    }
+
+
+    @Test
+    fun committedWalSnapshotRecoversSubmissionClaimWithoutShmAndRejectsReclaim() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-wal-submission-claim",
+            requestId = "request-wal-submission-claim",
+            createdAtEpochMillis = 1_794_230_600_000L
+        )
+        val generationRequest = ImageGenerationRequest(
+            id = record.requestId,
+            conversationId = "conversation-wal-submission-claim",
+            characterId = "character-wal-submission-claim",
+            prompt = "private positive prompt that must not appear in the SQLCipher WAL",
+            negativePrompt = "private negative prompt that must not appear in the SQLCipher WAL",
+            preferredMimeType = "image/png",
+            workflowId = "workflow-wal-confidentiality",
+            width = 768,
+            height = 1024,
+            seed = 42L,
+            createdAtEpochMillis = record.createdAtEpochMillis
+        )
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val sqlDatabase = firstDatabase.openHelper.writableDatabase
+        val journalMode = sqlDatabase.query("PRAGMA journal_mode").use { cursor ->
+            assertTrue("The SQLCipher helper must expose a journal mode", cursor.moveToFirst())
+            cursor.getString(0)
+        }
+        assertEquals("The recovery scenario requires WAL mode", "wal", journalMode.lowercase())
+
+        val store = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+        val requestStore = RoomImageGenerationRequestStore(firstDatabase.imageGenerationRequestDao())
+        requestStore.put(generationRequest)
+        store.put(record)
+        assertTrue(
+            "The first caller must durably claim the submission before the crash snapshot",
+            store.markSubmissionStarted(record.promptId)
+        )
+
+        val sourceFile = context.getDatabasePath(databaseName)
+        val sourceWal = File(sourceFile.path + "-wal")
+        assertTrue("A committed WAL must exist before the snapshot is copied", sourceWal.isFile)
+        assertTrue("The WAL must contain committed frames", sourceWal.length() > 32L)
+
+        val walBytes = sourceWal.readBytes()
+        try {
+            listOf(
+                "prompt ID" to record.promptId,
+                "request ID" to record.requestId,
+                "conversation ID" to generationRequest.conversationId,
+                "character ID" to generationRequest.characterId,
+                "positive prompt" to generationRequest.prompt,
+                "negative prompt" to generationRequest.negativePrompt.orEmpty()
+            ).forEach { (label, sensitiveValue) ->
+                assertFalse(
+                    "SQLCipher WAL pages must not expose the persisted $label",
+                    containsBytes(walBytes, sensitiveValue.toByteArray(Charsets.UTF_8))
+                )
+            }
+        } finally {
+            walBytes.fill(0)
+        }
+
+        // Model abrupt process loss using only the durable database + committed WAL files.
+        // SQLite must rebuild the transient shared-memory index when the snapshot is reopened.
+        val snapshotName = "$databaseName-submission-claim-snapshot"
+        val snapshotFile = context.getDatabasePath(snapshotName)
+        val snapshotWal = File(snapshotFile.path + "-wal")
+        var snapshotDatabase: GalaxyDatabase? = null
+        try {
+            sourceFile.copyTo(snapshotFile, overwrite = true)
+            sourceWal.copyTo(snapshotWal, overwrite = true)
+            assertFalse(
+                "The crash snapshot must not include SQLite's transient shared-memory sidecar",
+                File(snapshotFile.path + "-shm").exists()
+            )
+
+            snapshotDatabase = openDatabase(snapshotName)
+            val recoveredStore = RoomComfyUiJobStore(snapshotDatabase.comfyUiJobDao())
+            val recoveredRequestStore = RoomImageGenerationRequestStore(snapshotDatabase.imageGenerationRequestDao())
+            val claimedRecord = record.copy(submissionStarted = true)
+            assertEquals(
+                "The committed WAL must restore the durable submission claim",
+                claimedRecord,
+                recoveredStore.get(record.promptId)
+            )
+            assertEquals(
+                "The committed WAL must restore the encrypted generation request payload",
+                generationRequest,
+                recoveredRequestStore.get(record.requestId)
+            )
+            assertFalse(
+                "A recovered SUBMISSION_STARTED job must never be claimable a second time",
+                recoveredStore.markSubmissionStarted(record.promptId)
+            )
+            assertEquals(
+                "A rejected second claim must leave the recovered row unchanged",
+                claimedRecord,
+                recoveredStore.get(record.promptId)
+            )
+        } finally {
+            runCatching { snapshotDatabase?.close() }
+            snapshotFile.delete()
+            snapshotWal.delete()
+            File(snapshotFile.path + "-shm").delete()
+            File(snapshotFile.path + "-journal").delete()
+        }
+    }
+
+    @Test
+    fun concurrentSqlCipherStoresClaimSubmissionAtMostOnceAcrossDatabaseInstances() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-concurrent-claim",
+            requestId = "request-concurrent-claim",
+            createdAtEpochMillis = 1_794_230_500_000L
+        )
+        val firstDatabase = openDatabase()
+        database = firstDatabase
+        val secondDatabase = openDatabase()
+        try {
+            val firstStore = RoomComfyUiJobStore(firstDatabase.comfyUiJobDao())
+            val secondStore = RoomComfyUiJobStore(secondDatabase.comfyUiJobDao())
+            firstStore.put(record)
+
+            // Two independent Room instances share the same SQLCipher file. Concurrent
+            // conditional UPDATEs must allow exactly one caller to claim the submission.
+            val claims = coroutineScope {
+                (0 until 32).map { index ->
+                    async(Dispatchers.IO) {
+                        val store = if (index % 2 == 0) firstStore else secondStore
+                        store.markSubmissionStarted(record.promptId)
+                    }
+                }.awaitAll()
+            }
+
+            assertEquals("Only one writer may claim SUBMISSION_STARTED", 1, claims.count { it })
+            val claimedRecord = record.copy(submissionStarted = true)
+            assertEquals(claimedRecord, firstStore.get(record.promptId))
+            assertEquals(claimedRecord, secondStore.get(record.promptId))
+        } finally {
+            secondDatabase.close()
+        }
+    }
+
+    @Test
+    fun preparedJobCannotBeMarkedCancelledInSqlCipher() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-prepared-cancel-guard",
+            requestId = "request-prepared-cancel-guard",
+            createdAtEpochMillis = 1_794_230_700_000L
+        )
+        val opened = openDatabase()
+        database = opened
+        val store = RoomComfyUiJobStore(opened.comfyUiJobDao())
+        store.put(record)
+
+        val failure = try {
+            store.markCancelled(record.promptId)
+            null
+        } catch (exception: IllegalStateException) {
+            exception
+        }
+
+        assertNotNull("A PREPARED job must not transition directly to CANCELLED", failure)
+        assertEquals(record, store.get(record.promptId))
+    }
+
+    @Test
+    fun cancelledPreparedRowCannotAcquireSqlCipherSubmissionClaim() = runBlocking {
+        val record = ComfyUiJobRecord(
+            promptId = "prompt-cancelled-prepared-guard",
+            requestId = "request-cancelled-prepared-guard",
+            createdAtEpochMillis = 1_794_230_700_001L
+        )
+        val opened = openDatabase()
+        database = opened
+        val store = RoomComfyUiJobStore(opened.comfyUiJobDao())
+        store.put(record)
+
+        // Seed an inconsistent/legacy row to prove the SQL UPDATE fails closed even
+        // if a cancelled PREPARED record already exists in the encrypted database.
+        opened.openHelper.writableDatabase.execSQL(
+            "UPDATE comfyui_jobs SET cancelled = 1 WHERE promptId = ?",
+            arrayOf(record.promptId)
+        )
+
+        assertFalse(store.markSubmissionStarted(record.promptId))
+        assertEquals(record.copy(cancelled = true), store.get(record.promptId))
+    }
+
+    private fun containsBytes(container: ByteArray, candidate: ByteArray): Boolean {
+        if (candidate.isEmpty() || candidate.size > container.size) return false
+        return (0..container.size - candidate.size).any { start ->
+            candidate.indices.all { offset -> container[start + offset] == candidate[offset] }
+        }
+    }
+
+    private fun createProvider(
+        transport: RecordingTransport,
+        store: ComfyUiJobStore
+    ) = ComfyUiImageGenerationProvider(
+        config = ComfyUiConnectionConfig("http://192.168.1.20:8188"),
+        template = ComfyUiWorkflowTemplate(
+            id = "workflow-v1",
+            workflowJson = """{"1":{"inputs":{"text":"placeholder"}}}""",
+            positivePrompt = ComfyUiNodeInput("1", "text")
+        ),
+        clientId = "galaxy-recovery-test",
+        client = ComfyUiApiClient(transport),
+        jobs = store
+    )
+
+    private class RecordingTransport(
+        private val responses: List<ComfyUiApiResponse> = emptyList(),
+        private val failure: Exception? = null
+    ) : ComfyUiApiTransport {
+        val methods = mutableListOf<String>()
+        val urls = mutableListOf<String>()
+        private var responseIndex = 0
+
+        override suspend fun execute(
+            method: String,
+            url: String,
+            body: ByteArray?,
+            bearerToken: String?,
+            connectTimeoutMillis: Int,
+            readTimeoutMillis: Int,
+            maxResponseBytes: Int
+        ): ComfyUiApiResponse {
+            methods += method
+            urls += url
+            failure?.let { throw it }
+            return responses.getOrNull(responseIndex++)
+                ?: ComfyUiApiResponse(200, "{}")
+        }
+
+        override suspend fun getBinary(
+            url: String,
+            bearerToken: String?,
+            connectTimeoutMillis: Int,
+            readTimeoutMillis: Int,
+            maxResponseBytes: Int
+        ): ComfyUiBinaryResponse {
+            throw AssertionError("Image download is not expected during submission recovery")
+        }
+    }
+
+    private fun openDatabase(name: String = databaseName): GalaxyDatabase {
+        val keyBytes = Base64.encode(passphrase, Base64.NO_WRAP)
+        val opened = Room.databaseBuilder(context, GalaxyDatabase::class.java, name)
+            .openHelperFactory(SupportOpenHelperFactory(keyBytes, null, true))
+            .build()
+        try {
+            opened.openHelper.writableDatabase
+            return opened
+        } catch (failure: Exception) {
+            keyBytes.fill(0)
+            runCatching { opened.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+}

@@ -18,6 +18,10 @@ from galaxy_backend.lila_core.openai_compatible import (
 )
 from galaxy_backend.lila_core.openai_compatible import OpenAICompatibleModelAdapter
 from galaxy_backend.lila_core.provider_routing import create_provider_model_adapter
+from galaxy_backend.lila_core.provider_registry import (
+    DEFAULT_LOCAL_PROVIDER_PORTS,
+    validate_provider_endpoint,
+)
 
 
 def make_config(**overrides):
@@ -262,3 +266,84 @@ def test_provider_adapter_selection_distinguishes_native_and_openai_compatible_o
     assert isinstance(native, OllamaModelAdapter)
     assert isinstance(compatible, OpenAICompatibleModelAdapter)
     assert isinstance(cloud, OpenAICompatibleModelAdapter)
+
+
+
+@pytest.mark.parametrize(
+    ("runtime", "provider_id", "base_url", "port"),
+    [
+        (
+            "LM Studio",
+            "lm-studio",
+            "http://127.0.0.1:1234/v1",
+            1234,
+        ),
+        (
+            "llama.cpp server",
+            "llama-cpp",
+            "http://127.0.0.1:8080/v1",
+            8080,
+        ),
+    ],
+)
+def test_openai_compatible_local_runtime_profiles_support_discovery_and_chat(
+    runtime, provider_id, base_url, port
+):
+    assert port in DEFAULT_LOCAL_PROVIDER_PORTS
+    validate_provider_endpoint("local", base_url)
+    captured = []
+
+    async def handler(request):
+        captured.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "authorization": request.headers.get("Authorization"),
+                "body": json.loads(request.content) if request.content else None,
+            }
+        )
+        if request.method == "GET" and request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "qwen-local"}]})
+        if request.method == "POST" and request.url.path == "/v1/chat/completions":
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": f"{runtime} response"}}
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"error": "not found"})
+
+    async def scenario():
+        config = make_config(
+            provider_id=provider_id,
+            base_url=base_url,
+            model_id="qwen-local",
+            api_key=None,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            adapter = create_provider_model_adapter(client, "local", config)
+            assert isinstance(adapter, OpenAICompatibleModelAdapter)
+            assert not isinstance(adapter, OllamaModelAdapter)
+            models = await adapter.discover_models()
+            response = await adapter.generate(make_context())
+            return models, response
+
+    models, response = asyncio.run(scenario())
+
+    assert models == ("qwen-local",)
+    assert response.text == f"{runtime} response"
+    assert response.provider_id == provider_id
+    assert response.model_id == "qwen-local"
+    assert [(item["method"], item["path"]) for item in captured] == [
+        ("GET", "/v1/models"),
+        ("POST", "/v1/chat/completions"),
+    ]
+    assert all(item["authorization"] is None for item in captured)
+    assert captured[1]["body"]["model"] == "qwen-local"
+    assert captured[1]["body"]["stream"] is False

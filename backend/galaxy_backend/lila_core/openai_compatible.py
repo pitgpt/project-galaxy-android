@@ -174,73 +174,74 @@ class OpenAICompatibleModelAdapter:
 
         response_body = bytearray()
         try:
-            async with self._http_client.stream(
-                "GET",
-                self._config.base_url.rstrip("/") + "/models",
-                headers=headers,
-                timeout=httpx.Timeout(float(self._config.timeout_seconds)),
-                follow_redirects=False,
-            ) as response:
-                if response.status_code in {404, 405}:
-                    return None
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes(chunk_size=16 * 1024):
-                    if len(response_body) + len(chunk) > MAX_PROVIDER_MODEL_LIST_BYTES:
-                        raise ModelAdapterContractError(
-                            "The configured Lila model catalog exceeds the supported size"
-                        )
-                    response_body.extend(chunk)
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            if status_code in {408, 425, 429} or 500 <= status_code <= 599:
+            try:
+                async with self._http_client.stream(
+                    "GET",
+                    self._config.base_url.rstrip("/") + "/models",
+                    headers=headers,
+                    timeout=httpx.Timeout(float(self._config.timeout_seconds)),
+                    follow_redirects=False,
+                ) as response:
+                    if response.status_code in {404, 405}:
+                        return None
+                    response.raise_for_status()
+                    async for chunk in response.aiter_bytes(chunk_size=16 * 1024):
+                        if len(response_body) + len(chunk) > MAX_PROVIDER_MODEL_LIST_BYTES:
+                            raise ModelAdapterContractError(
+                                "The configured Lila model catalog exceeds the supported size"
+                            )
+                        response_body.extend(chunk)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code in {408, 425, 429} or 500 <= status_code <= 599:
+                    raise ModelProviderUnavailable(
+                        "The configured Lila model endpoint is temporarily unavailable"
+                    ) from None
+                if status_code in {401, 403}:
+                    raise ModelProviderConfigurationError(
+                        "authentication_rejected"
+                    ) from None
+                if 300 <= status_code <= 399:
+                    raise ModelProviderConfigurationError("redirect_refused") from None
+                if 400 <= status_code <= 499:
+                    raise ModelProviderConfigurationError("request_rejected") from None
                 raise ModelProviderUnavailable(
                     "The configured Lila model endpoint is temporarily unavailable"
                 ) from None
-            if status_code in {401, 403}:
-                raise ModelProviderConfigurationError(
-                    "authentication_rejected"
+            except httpx.HTTPError:
+                raise ModelProviderUnavailable(
+                    "The configured Lila model endpoint is temporarily unavailable"
                 ) from None
-            if 300 <= status_code <= 399:
-                raise ModelProviderConfigurationError("redirect_refused") from None
-            if 400 <= status_code <= 499:
-                raise ModelProviderConfigurationError("request_rejected") from None
-            raise ModelProviderUnavailable(
-                "The configured Lila model endpoint is temporarily unavailable"
-            ) from None
-        except httpx.HTTPError:
-            raise ModelProviderUnavailable(
-                "The configured Lila model endpoint is temporarily unavailable"
-            ) from None
 
-        try:
-            payload = json.loads(response_body)
-            data = payload["data"]
-            if not isinstance(data, list):
-                raise TypeError("model catalog data must be a list")
+            try:
+                payload = json.loads(response_body)
+                data = payload["data"]
+                if not isinstance(data, list):
+                    raise TypeError("model catalog data must be a list")
 
-            model_ids: list[str] = []
-            seen: set[str] = set()
-            for item in data[:MAX_DISCOVERED_MODELS]:
-                if not isinstance(item, dict):
-                    continue
-                model_id = item.get("id")
-                if not isinstance(model_id, str):
-                    continue
-                model_id = model_id.strip()
-                if (
-                    not model_id
-                    or len(model_id) > 256
-                    or any(ord(character) < 32 or ord(character) == 127 for character in model_id)
-                    or model_id in seen
-                ):
-                    continue
-                seen.add(model_id)
-                model_ids.append(model_id)
-            return tuple(model_ids)
-        except (KeyError, TypeError, ValueError):
-            raise ModelAdapterContractError(
-                "The configured Lila model provider returned an unsupported model catalog"
-            ) from None
+                model_ids: list[str] = []
+                seen: set[str] = set()
+                for item in data[:MAX_DISCOVERED_MODELS]:
+                    if not isinstance(item, dict):
+                        continue
+                    model_id = item.get("id")
+                    if not isinstance(model_id, str):
+                        continue
+                    model_id = model_id.strip()
+                    if (
+                        not model_id
+                        or len(model_id) > 256
+                        or any(ord(character) < 32 or ord(character) == 127 for character in model_id)
+                        or model_id in seen
+                    ):
+                        continue
+                    seen.add(model_id)
+                    model_ids.append(model_id)
+                return tuple(model_ids)
+            except (KeyError, TypeError, ValueError):
+                raise ModelAdapterContractError(
+                    "The configured Lila model provider returned an unsupported model catalog"
+                ) from None
         finally:
             response_body[:] = b"\0" * len(response_body)
 
@@ -283,84 +284,87 @@ class OpenAICompatibleModelAdapter:
             "messages": self._messages(context),
             "stream": False,
         }
+        response_body = bytearray()
         try:
-            async with self._http_client.stream(
-                "POST",
-                self._endpoint,
-                json=body,
-                headers=headers,
-                timeout=httpx.Timeout(float(self._config.timeout_seconds)),
-            ) as response:
-                response.raise_for_status()
-                response_body = bytearray()
-                async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                    if len(response_body) + len(chunk) > MAX_PROVIDER_RESPONSE_BYTES:
-                        raise ModelAdapterContractError(
-                            "The configured Lila model provider response exceeds the supported size"
-                        )
-                    response_body.extend(chunk)
-        except httpx.HTTPStatusError as exc:
-            # Classify only the numeric status. Never expose provider response
-            # bodies, headers, URLs, or diagnostics to the Core/API caller.
-            status_code = exc.response.status_code
-            if status_code in {408, 425, 429} or 500 <= status_code <= 599:
+            try:
+                async with self._http_client.stream(
+                    "POST",
+                    self._endpoint,
+                    json=body,
+                    headers=headers,
+                    timeout=httpx.Timeout(float(self._config.timeout_seconds)),
+                ) as response:
+                    response.raise_for_status()
+                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                        if len(response_body) + len(chunk) > MAX_PROVIDER_RESPONSE_BYTES:
+                            raise ModelAdapterContractError(
+                                "The configured Lila model provider response exceeds the supported size"
+                            )
+                        response_body.extend(chunk)
+            except httpx.HTTPStatusError as exc:
+                # Classify only the numeric status. Never expose provider response
+                # bodies, headers, URLs, or diagnostics to the Core/API caller.
+                status_code = exc.response.status_code
+                if status_code in {408, 425, 429} or 500 <= status_code <= 599:
+                    raise ModelProviderUnavailable(
+                        "The configured Lila model provider is temporarily unavailable"
+                    ) from None
+                if status_code in {401, 403}:
+                    raise ModelProviderConfigurationError(
+                        "authentication_rejected"
+                    ) from None
+                if status_code == 404:
+                    raise ModelProviderConfigurationError(
+                        "endpoint_or_model_not_found"
+                    ) from None
+                if 300 <= status_code <= 399:
+                    # Redirects remain disabled so credentials are never forwarded
+                    # to a different origin implicitly.
+                    raise ModelProviderConfigurationError("redirect_refused") from None
+                if 400 <= status_code <= 499:
+                    raise ModelProviderConfigurationError("request_rejected") from None
                 raise ModelProviderUnavailable(
                     "The configured Lila model provider is temporarily unavailable"
                 ) from None
-            if status_code in {401, 403}:
-                raise ModelProviderConfigurationError(
-                    "authentication_rejected"
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                # A connect failure occurs before the HTTP request is sent. The
+                # idempotency reservation can therefore be released safely, and an
+                # explicitly configured fallback may be attempted without risking a
+                # second billable generation.
+                raise ModelProviderConnectionUnavailable(
+                    "The configured Lila model provider could not be reached"
                 ) from None
-            if status_code == 404:
-                raise ModelProviderConfigurationError(
-                    "endpoint_or_model_not_found"
+            except httpx.HTTPError:
+                # Read/write/protocol failures may happen after the provider received
+                # the request. Keep the outcome ambiguous and retain the reservation.
+                raise ModelProviderUnavailable(
+                    "The configured Lila model provider is temporarily unavailable"
                 ) from None
-            if 300 <= status_code <= 399:
-                # Redirects remain disabled so credentials are never forwarded
-                # to a different origin implicitly.
-                raise ModelProviderConfigurationError("redirect_refused") from None
-            if 400 <= status_code <= 499:
-                raise ModelProviderConfigurationError("request_rejected") from None
-            raise ModelProviderUnavailable(
-                "The configured Lila model provider is temporarily unavailable"
-            ) from None
-        except (httpx.ConnectError, httpx.ConnectTimeout):
-            # A connect failure occurs before the HTTP request is sent. The
-            # idempotency reservation can therefore be released safely, and an
-            # explicitly configured fallback may be attempted without risking a
-            # second billable generation.
-            raise ModelProviderConnectionUnavailable(
-                "The configured Lila model provider could not be reached"
-            ) from None
-        except httpx.HTTPError:
-            # Read/write/protocol failures may happen after the provider received
-            # the request. Keep the outcome ambiguous and retain the reservation.
-            raise ModelProviderUnavailable(
-                "The configured Lila model provider is temporarily unavailable"
-            ) from None
 
-        try:
-            payload = json.loads(response_body)
-            choices = payload["choices"]
-            message = choices[0]["message"]
-            content = message["content"]
-        except (KeyError, IndexError, TypeError, ValueError):
-            raise ModelAdapterContractError(
-                "The configured Lila model provider returned an unsupported response"
-            ) from None
+            try:
+                payload = json.loads(response_body)
+                choices = payload["choices"]
+                message = choices[0]["message"]
+                content = message["content"]
+            except (KeyError, IndexError, TypeError, ValueError):
+                raise ModelAdapterContractError(
+                    "The configured Lila model provider returned an unsupported response"
+                ) from None
 
-        if not isinstance(content, str) or not content.strip():
-            raise ModelAdapterContractError(
-                "The configured Lila model provider returned no assistant text"
+            if not isinstance(content, str) or not content.strip():
+                raise ModelAdapterContractError(
+                    "The configured Lila model provider returned no assistant text"
+                )
+            if len(content) > 12_000:
+                raise ModelAdapterContractError(
+                    "The configured Lila model provider response exceeds the supported text length"
+                )
+
+            return CoreTurnResponse(
+                conversation_id=context.conversation_id,
+                text=content,
+                provider_id=self._config.provider_id,
+                model_id=self._config.model_id,
             )
-        if len(content) > 12_000:
-            raise ModelAdapterContractError(
-                "The configured Lila model provider response exceeds the supported text length"
-            )
-
-        return CoreTurnResponse(
-            conversation_id=context.conversation_id,
-            text=content,
-            provider_id=self._config.provider_id,
-            model_id=self._config.model_id,
-        )
+        finally:
+            response_body[:] = b"\0" * len(response_body)

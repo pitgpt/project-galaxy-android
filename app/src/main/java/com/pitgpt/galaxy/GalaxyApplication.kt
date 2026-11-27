@@ -4,6 +4,7 @@ import android.app.Application
 import com.pitgpt.galaxy.core.repository.CharacterRepository
 import com.pitgpt.galaxy.core.repository.ConversationRepository
 import com.pitgpt.galaxy.core.repository.MemoryRepository
+import com.pitgpt.galaxy.core.repository.ImageGenerationRequestStore
 import com.pitgpt.galaxy.core.usecase.InitializeGalaxy
 import com.pitgpt.galaxy.data.auth.EncryptedGalaxyBackendConfigStore
 import com.pitgpt.galaxy.data.auth.GalaxyBackendConfiguration
@@ -14,10 +15,16 @@ import com.pitgpt.galaxy.data.media.EncryptedMediaStore
 import com.pitgpt.galaxy.data.remote.GalaxyAccessTokenProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaTurnProvider
 import com.pitgpt.galaxy.data.remote.HttpLilaProviderCatalog
+import com.pitgpt.galaxy.data.remote.HttpLilaMemoryClient
+import com.pitgpt.galaxy.data.remote.LilaCoreImageGenerationProvider
 import com.pitgpt.galaxy.data.remote.HttpRealtimeSessionProvider
 import com.pitgpt.galaxy.data.repository.RoomCharacterRepository
 import com.pitgpt.galaxy.data.repository.RoomConversationRepository
 import com.pitgpt.galaxy.data.repository.RoomMemoryRepository
+import com.pitgpt.galaxy.data.repository.RoomGeneratedImageRepository
+import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
+import com.pitgpt.galaxy.data.providers.comfyui.RoomComfyUiJobStore
 
 /** Application-level composition root for Galaxy's local data and authentication layers. */
 class GalaxyApplication : Application() {
@@ -30,6 +37,9 @@ class GalaxyApplication : Application() {
      * image metadata remains a separate Room concern.
      */
     val mediaStore: EncryptedMediaStore by lazy { EncryptedMediaStore.fromContext(this) }
+    val generatedImages by lazy { RoomGeneratedImageRepository(database.generatedImageDao(), mediaStore) }
+    val imageGenerationRequests: ImageGenerationRequestStore by lazy { RoomImageGenerationRequestStore(database.imageGenerationRequestDao()) }
+    val comfyUiJobStore: ComfyUiJobStore by lazy { RoomComfyUiJobStore(database.comfyUiJobDao()) }
     private lateinit var backendConfigStore: EncryptedGalaxyBackendConfigStore
     private var activeBackendConfiguration: GalaxyBackendConfiguration? = null
 
@@ -42,6 +52,9 @@ class GalaxyApplication : Application() {
     @Volatile
     private var currentLilaProviderCatalog: HttpLilaProviderCatalog? = null
 
+    @Volatile
+    private var currentLilaMemoryClient: HttpLilaMemoryClient? = null
+
     private val initializeGalaxy by lazy { InitializeGalaxy(characters) }
 
     val auth: SupabaseAuthService?
@@ -52,6 +65,17 @@ class GalaxyApplication : Application() {
 
     val lilaProviderCatalog: HttpLilaProviderCatalog
         get() = checkNotNull(currentLilaProviderCatalog) { "Galaxy application has not been initialized." }
+
+    val lilaMemoryClient: HttpLilaMemoryClient
+        get() = checkNotNull(currentLilaMemoryClient) { "Galaxy application has not been initialized." }
+
+    /**
+     * Sole production ComfyUI path: Android talks to authenticated Lila Core, and Core
+     * contacts the configured ComfyUI endpoint under its server-side egress policy.
+     * Android never opens the user-configured ComfyUI URL directly.
+     */
+    val lilaCoreImageGenerationProvider: LilaCoreImageGenerationProvider
+        get() = LilaCoreImageGenerationProvider(lilaProviderCatalog, comfyUiJobStore)
 
     val hasBackendConfiguration: Boolean
         get() = activeBackendConfiguration != null
@@ -89,7 +113,11 @@ class GalaxyApplication : Application() {
         currentAuth = SupabaseClientFactory.createOrNull(this, configuration)
         val apiBaseUrl = configuration?.galaxyApiBaseUrl ?: BuildConfig.GALAXY_API_BASE_URL
         currentLilaTurnProvider = HttpLilaTurnProvider(apiBaseUrl, currentAuth)
-        currentLilaProviderCatalog = HttpLilaProviderCatalog(apiBaseUrl, currentAuth)
+        val providerCatalog = HttpLilaProviderCatalog(apiBaseUrl, currentAuth)
+        currentLilaProviderCatalog = providerCatalog
+        currentLilaMemoryClient = HttpLilaMemoryClient { method, path, body ->
+            providerCatalog.requestJson(method, path, body)
+        }
     }
 
     fun realtimeSessionProvider(tokenProvider: GalaxyAccessTokenProvider): HttpRealtimeSessionProvider {

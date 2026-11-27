@@ -4,6 +4,8 @@ import json
 import httpx
 import pytest
 
+import galaxy_backend.lila_core.openai_compatible as openai_compatible_module
+
 from galaxy_backend.lila_core.context import AssembledContext
 from galaxy_backend.lila_core.contracts import CoreTurnResponse
 from galaxy_backend.lila_core.memory import ConversationMessage, MemorySnippet
@@ -338,6 +340,46 @@ def test_model_discovery_uses_common_local_openai_compatible_contract(
     assert captured["authorization"] is None
 
 
+@pytest.mark.parametrize(
+    ("runtime", "base_url", "expected_url"),
+    [
+        ("LM Studio", "http://127.0.0.1:1234/v1", "http://127.0.0.1:1234/v1/chat/completions"),
+        ("Ollama OpenAI-compatible API", "http://127.0.0.1:11434/v1", "http://127.0.0.1:11434/v1/chat/completions"),
+        ("llama.cpp server OpenAI-compatible API", "http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1/chat/completions"),
+    ],
+)
+def test_local_openai_compatible_runtimes_generate_through_the_shared_chat_contract(
+    runtime, base_url, expected_url
+):
+    captured = {}
+
+    async def handler(request):
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": f"Ответ от {runtime}"}}]},
+        )
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(
+                client,
+                make_config(base_url=base_url, api_key=None, model_id="qwen-local"),
+            )
+            return await adapter.generate(make_context())
+
+    response = asyncio.run(scenario())
+    assert response.text == f"Ответ от {runtime}"
+    assert response.provider_id == "local-dev"
+    assert response.model_id == "qwen-local"
+    assert captured["url"] == expected_url
+    assert captured["authorization"] is None
+    assert captured["body"]["model"] == "qwen-local"
+    assert captured["body"]["messages"]
+
+
 @pytest.mark.parametrize("status_code", [404, 405])
 def test_model_discovery_reports_unsupported_route_without_generation(status_code):
     captured = []
@@ -405,3 +447,178 @@ def test_model_discovery_maps_auth_rejection_without_provider_details():
             assert "private-detail" not in str(captured.value)
 
     asyncio.run(scenario())
+
+
+def _track_provider_response_buffers(monkeypatch):
+    buffers = []
+
+    class TrackedByteArray(bytearray):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            buffers.append(self)
+
+    monkeypatch.setattr(
+        openai_compatible_module,
+        "bytearray",
+        TrackedByteArray,
+        raising=False,
+    )
+    return buffers
+
+
+def _assert_provider_response_buffers_zeroized(buffers):
+    assert len(buffers) == 1
+    assert bytes(buffers[0]) == bytes(len(buffers[0]))
+
+
+def test_generate_zeroizes_provider_response_body_after_success(monkeypatch):
+    buffers = _track_provider_response_buffers(monkeypatch)
+    raw = json.dumps(
+        {"choices": [{"message": {"content": "Ответ сохранён"}}]},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    stream = TrackedChunkStream([raw[:9], raw[9:]])
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            return await adapter.generate(make_context())
+
+    response = asyncio.run(scenario())
+    assert response.text == "Ответ сохранён"
+    assert stream.closed is True
+    _assert_provider_response_buffers_zeroized(buffers)
+
+
+def test_generate_zeroizes_provider_response_body_after_malformed_json(monkeypatch):
+    buffers = _track_provider_response_buffers(monkeypatch)
+
+    async def handler(request):
+        return httpx.Response(200, content=b'{"choices":')
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelAdapterContractError):
+                await adapter.generate(make_context())
+
+    asyncio.run(scenario())
+    _assert_provider_response_buffers_zeroized(buffers)
+
+
+def test_generate_zeroizes_partial_provider_response_body_after_stream_failure(monkeypatch):
+    buffers = _track_provider_response_buffers(monkeypatch)
+
+    class FailingChunkStream(httpx.AsyncByteStream):
+        def __init__(self):
+            self.closed = False
+
+        async def __aiter__(self):
+            yield b'{"choices":[{"message":'
+            raise httpx.ReadError("provider-secret private-provider-detail")
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = FailingChunkStream()
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelProviderUnavailable):
+                await adapter.generate(make_context())
+
+    asyncio.run(scenario())
+    assert stream.closed is True
+    _assert_provider_response_buffers_zeroized(buffers)
+
+
+def test_generate_zeroizes_provider_response_body_after_size_limit_failure(monkeypatch):
+    buffers = _track_provider_response_buffers(monkeypatch)
+    stream = TrackedChunkStream([b"x" * (64 * 1024) for _ in range(17)])
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelAdapterContractError, match="response exceeds the supported size"):
+                await adapter.generate(make_context())
+
+    asyncio.run(scenario())
+    assert stream.closed is True
+    _assert_provider_response_buffers_zeroized(buffers)
+
+
+def test_discover_models_zeroizes_provider_response_body_after_success(monkeypatch):
+    buffers = _track_provider_response_buffers(monkeypatch)
+    raw = json.dumps({"data": [{"id": "qwen-local"}]}).encode("utf-8")
+    stream = TrackedChunkStream([raw[:5], raw[5:]])
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            return await adapter.discover_models()
+
+    assert asyncio.run(scenario()) == ("qwen-local",)
+    assert stream.closed is True
+    _assert_provider_response_buffers_zeroized(buffers)
+
+
+def test_discover_models_zeroizes_partial_response_body_after_stream_failure(monkeypatch):
+    buffers = _track_provider_response_buffers(monkeypatch)
+
+    class FailingChunkStream(httpx.AsyncByteStream):
+        def __init__(self):
+            self.closed = False
+
+        async def __aiter__(self):
+            yield b'{"data":['
+            raise httpx.ReadError("provider-secret private-provider-detail")
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = FailingChunkStream()
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelProviderUnavailable):
+                await adapter.discover_models()
+
+    asyncio.run(scenario())
+    assert stream.closed is True
+    _assert_provider_response_buffers_zeroized(buffers)
+
+
+def test_discover_models_zeroizes_provider_response_body_after_size_limit_failure(monkeypatch):
+    buffers = _track_provider_response_buffers(monkeypatch)
+    stream = TrackedChunkStream([b"x" * (16 * 1024) for _ in range(5)])
+
+    async def handler(request):
+        return httpx.Response(200, stream=stream)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleModelAdapter(client, make_config())
+            with pytest.raises(ModelAdapterContractError, match="catalog exceeds"):
+                await adapter.discover_models()
+
+    asyncio.run(scenario())
+    assert stream.closed is True
+    _assert_provider_response_buffers_zeroized(buffers)
+

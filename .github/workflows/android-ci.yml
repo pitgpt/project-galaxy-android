@@ -2,9 +2,9 @@ name: Android CI
 
 on:
   push:
-    branches: [ main, feature/galaxy-lila-core-chat-client, feature/galaxy-lila-provider-settings ]
+    branches: [ main, feature/galaxy-lila-core-chat-client, feature/galaxy-lila-provider-settings, feature/galaxy-lila-comfyui-full-integration ]
   pull_request:
-    branches: [ main, feature/lila-encrypted-provider-registry ]
+    branches: [ main, feature/lila-encrypted-provider-registry, feature/galaxy-lila-provider-settings ]
 
 jobs:
   test:
@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+      - name: Test bounded Maven Central 429 retry wrapper
+        run: bash scripts/tests/gradle-maven-429-retry-test.sh
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -19,10 +21,8 @@ jobs:
           java-version: '17'
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
       - name: Run unit tests
-        run: gradle testDebugUnitTest
+        run: bash scripts/gradle-maven-429-retry.sh ./gradlew testDebugUnitTest
 
   backend-test:
     runs-on: ubuntu-latest
@@ -68,8 +68,6 @@ jobs:
           java-version: '17'
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
       - name: Enable KVM group permissions
         if: hashFiles('app/src/androidTest/**/*') != ''
         run: |
@@ -84,7 +82,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: gradle connectedDebugAndroidTest
+          script: bash scripts/gradle-maven-429-retry.sh ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=com.pitgpt.galaxy.data.remote.LiveLilaCoreAndroidE2EInstrumentedTest
       - name: Upload emulator diagnostics
         if: always() && hashFiles('app/src/androidTest/**/*') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -95,17 +93,445 @@ jobs:
           retention-days: 7
 
   windows-e2e-script:
-    name: Windows live E2E script syntax
-    runs-on: ubuntu-latest
+    name: Windows PowerShell 5.1 and 7 live E2E script self-tests
+    runs-on: windows-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-      - name: Parse script and verify Android conversation ID vector
+      - name: Set up JDK 17 for Gradle Wrapper validation
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify official Gradle Wrapper JAR and Windows launcher
+        shell: powershell
+        run: |
+          $expectedWrapperSha256 = '2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046'
+          $actualWrapperSha256 = (Get-FileHash .\gradle\wrapper\gradle-wrapper.jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualWrapperSha256 -ne $expectedWrapperSha256) {
+            throw 'Gradle Wrapper JAR checksum does not match the official Gradle 8.11.1 release.'
+          }
+          .\gradlew.bat --version
+      - name: Run PowerShell 5.1 self-tests
+        shell: powershell
+        run: |
+          $PSVersionTable
+          .\scripts\galaxy-live-e2e.ps1 -SelfTest
+          .\scripts\lila-comfyui-live-e2e.ps1 -SelfTest
+      - name: Run PowerShell 7 self-tests
         shell: pwsh
-        run: ./scripts/galaxy-live-e2e.ps1 -SelfTest
+        run: |
+          $PSVersionTable
+          .\scripts\galaxy-live-e2e.ps1 -SelfTest
+          .\scripts\lila-comfyui-live-e2e.ps1 -SelfTest
+
+  live-ollama-e2e:
+    name: Live Ollama + llama.cpp + ComfyUI Android companion E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUN_LILA_ANDROID_E2E: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/feature/galaxy-lila-comfyui-full-integration') || (github.event_name == 'pull_request' && github.head_ref == 'feature/galaxy-lila-comfyui-full-integration') }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Record backend Python interpreter for the authenticated Core server
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: echo "LILA_BACKEND_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
+      - name: Install pinned backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Start ephemeral Redis
+        run: |
+          docker run -d --name lila-live-redis \
+            -p 127.0.0.1:6379:6379 \
+            redis:7.4-alpine redis-server --save "" --appendonly no
+          for attempt in $(seq 1 30); do
+            if docker exec lila-live-redis redis-cli ping 2>/dev/null | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Redis did not become ready" >&2
+          exit 1
+      - name: Start isolated Ollama runtime and pull the bounded CPU model
+        run: |
+          docker volume create lila-live-ollama-models >/dev/null
+          docker run -d --name lila-live-ollama \
+            -p 127.0.0.1:11434:11434 \
+            -v lila-live-ollama-models:/root/.ollama \
+            -e OLLAMA_HOST=0.0.0.0:11434 \
+            -e OLLAMA_KEEP_ALIVE=5m \
+            ollama/ollama:0.33.2
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:11434/api/tags >/dev/null
+          docker exec lila-live-ollama ollama pull qwen2.5:0.5b
+          docker exec lila-live-ollama ollama list
+      - name: Run authenticated production-composition model E2E
+        working-directory: backend
+        env:
+          LILA_LIVE_OLLAMA_URL: http://127.0.0.1:11434
+          LILA_LIVE_OLLAMA_MODEL: qwen2.5:0.5b
+          REDIS_URL: redis://127.0.0.1:6379/15
+        run: pytest -q tests/test_lila_live_ollama_e2e.py -vv
+      - name: Build pinned llama.cpp CPU server and download verified GGUF
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          llama_commit="5d7bb89f4719243dc52fe387bcb67c3518256565"
+          llama_dir="$RUNNER_TEMP/llama.cpp"
+          model_file="$RUNNER_TEMP/lila-qwen2.5-0.5b-instruct-q4_k_m.gguf"
+          mkdir -p "$llama_dir"
+          git -C "$llama_dir" init
+          git -C "$llama_dir" remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C "$llama_dir" fetch --depth 1 origin "$llama_commit"
+          git -C "$llama_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$llama_dir" rev-parse HEAD)" = "$llama_commit"
+
+          cmake -S "$llama_dir" -B "$llama_dir/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_BUILD_UI=OFF
+          cmake --build "$llama_dir/build" --config Release --target llama-server --parallel 2
+          test -x "$llama_dir/build/bin/llama-server"
+
+          curl --fail --location --retry 3 --retry-all-errors \
+            --connect-timeout 20 --max-time 600 \
+            "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/21ef23001f314d0895bd8439b08157c2d4cd9bb7/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" \
+            --output "$model_file"
+          printf '%s  %s\n' \
+            "6eb923e7d26e9cea28811e1a8e852009b21242fb157b26149d3b188f3a8c8653" \
+            "$model_file" | sha256sum --check -
+      - name: Start llama.cpp OpenAI-compatible server
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          model_file="$RUNNER_TEMP/lila-qwen2.5-0.5b-instruct-q4_k_m.gguf"
+          server_bin="$RUNNER_TEMP/llama.cpp/build/bin/llama-server"
+          "$server_bin" \
+            --model "$model_file" \
+            --alias "qwen2.5-0.5b-llama-cpp" \
+            --ctx-size 2048 \
+            --threads 2 \
+            --parallel 1 \
+            --host 127.0.0.1 \
+            --port 8080 \
+            > "$RUNNER_TEMP/lila-llama-server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/lila-llama-server.pid"
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8080/v1/models \
+              -o "$RUNNER_TEMP/lila-llama-models.json" \
+              && python - "$RUNNER_TEMP/lila-llama-models.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          models = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("data", [])
+          if any(item.get("id") == "qwen2.5-0.5b-llama-cpp" for item in models):
+              raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+            then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/lila-llama-server.pid")" 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            tail -n 120 "$RUNNER_TEMP/lila-llama-server.log"
+            echo "Pinned llama.cpp server did not expose the expected model" >&2
+            exit 1
+          fi
+      - name: Set up Python 3.12 for pinned ComfyUI CPU runtime
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned CPU ComfyUI runtime
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          comfyui_dir="$RUNNER_TEMP/ComfyUI"
+          comfyui_venv="$RUNNER_TEMP/comfyui-venv"
+          python -m venv "$comfyui_venv"
+          "$comfyui_venv/bin/python" -m pip install --upgrade pip
+          "$comfyui_venv/bin/python" -m pip install \
+            torch==2.7.1+cpu torchvision==0.22.1+cpu torchaudio==2.7.1+cpu \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+          git clone --depth 1 --branch v0.46.0 https://github.com/Comfy-Org/ComfyUI.git "$comfyui_dir"
+          test "$(git -C "$comfyui_dir" rev-parse HEAD)" = "a277b5bf213e8a44fa34817b7770b54f86ef4cea"
+          cd "$comfyui_dir"
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          excluded = {"torch", "torchvision", "torchaudio"}
+          kept = []
+          for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                  kept.append(line)
+                  continue
+              match = re.match(r"^([A-Za-z0-9_.-]+)", stripped)
+              package = match.group(1).lower() if match else ""
+              if package not in excluded:
+                  kept.append(line)
+          destination = Path(os.environ["RUNNER_TEMP"]) / "comfyui-requirements-android-e2e.txt"
+          destination.write_text(chr(10).join(kept) + chr(10), encoding="utf-8")
+          PY
+          "$comfyui_venv/bin/python" -m pip install -r "$RUNNER_TEMP/comfyui-requirements-android-e2e.txt"
+      - name: Start pinned ComfyUI CPU API server for Android image E2E
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/comfyui-venv/bin/python" "$RUNNER_TEMP/ComfyUI/main.py" \
+            --cpu --listen 127.0.0.1 --port 8188 --disable-auto-launch \
+            > "$RUNNER_TEMP/lila-android-comfyui.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/lila-android-comfyui.pid"
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/lila-android-comfyui.pid")" 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            tail -n 160 "$RUNNER_TEMP/lila-android-comfyui.log"
+            echo "Pinned ComfyUI CPU server did not become ready" >&2
+            exit 1
+          fi
+      - name: Set up JDK 17 for live Android/Core E2E
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle for live Android/Core E2E
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        uses: gradle/actions/setup-gradle@v4
+      - name: Generate ephemeral HTTPS CA and backend certificate
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/lila-android-e2e"
+          mkdir -p "$work"
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$work/ca.key" -out "$work/ca.crt" -days 1 \
+            -subj "/CN=Galaxy Lila Android E2E CA" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign"
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout "$work/server.key" -out "$work/server.csr" \
+            -subj "/CN=10.0.2.2"
+          cat > "$work/server.ext" <<'EOF'
+          basicConstraints=critical,CA:FALSE
+          keyUsage=critical,digitalSignature,keyEncipherment
+          extendedKeyUsage=serverAuth
+          subjectAltName=IP:10.0.2.2,IP:127.0.0.1
+          EOF
+          openssl x509 -req -in "$work/server.csr" \
+            -CA "$work/ca.crt" -CAkey "$work/ca.key" -CAcreateserial \
+            -out "$work/server.crt" -days 1 -sha256 \
+            -extfile "$work/server.ext"
+          {
+            echo "LILA_ANDROID_E2E_CA_CERT=$work/ca.crt"
+            echo "LILA_ANDROID_E2E_TLS_CERT=$work/server.crt"
+            echo "LILA_ANDROID_E2E_TLS_KEY=$work/server.key"
+            echo "LILA_ANDROID_E2E_CONFIG_PATH=$work/config.json"
+          } >> "$GITHUB_ENV"
+      - name: Run Android client against live Lila Core on API 33
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        env:
+          ANDROID_I_WANT_MY_TCG: "yes"
+          PYTHONPATH: ${{ github.workspace }}/backend
+          LILA_LIVE_OLLAMA_URL: http://127.0.0.1:11434
+          LILA_LIVE_LLAMA_CPP_URL: http://127.0.0.1:8080/v1
+          LILA_LIVE_COMFYUI_URL: http://127.0.0.1:8188
+          LILA_LIVE_LLAMA_CPP_MODEL: qwen2.5-0.5b-llama-cpp
+          LILA_LIVE_OLLAMA_MODEL: qwen2.5:0.5b
+          REDIS_URL: redis://127.0.0.1:6379/15
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 33
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -writable-system
+          script: bash "$GITHUB_WORKSPACE/backend/scripts/run_lila_android_live_e2e.sh"
+      - name: Upload redacted Android/Core request diagnostics
+        if: failure() && env.RUN_LILA_ANDROID_E2E == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lila-android-core-request-diagnostics
+          path: |
+            ${{ runner.temp }}/lila-android-e2e/requests.jsonl
+            ${{ runner.temp }}/lila-android-e2e/provider-requests.jsonl
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: Remove ephemeral runtime services and Android E2E credentials
+        if: always()
+        run: |
+          adb shell rm -f /data/local/tmp/lila-android-e2e.json 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/lila-android-e2e-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/lila-android-e2e-server.pid")" 2>/dev/null || true
+          fi
+          rm -f "$RUNNER_TEMP/lila-android-e2e/config.json" \
+            "$RUNNER_TEMP/lila-android-e2e/ca.key" \
+            "$RUNNER_TEMP/lila-android-e2e/server.key" \
+            "$RUNNER_TEMP/lila-android-e2e/requests.jsonl" \
+            "$RUNNER_TEMP/lila-android-e2e/provider-requests.jsonl"
+          rm -rf "$RUNNER_TEMP/lila-android-e2e-private"
+          if [ -f "$RUNNER_TEMP/lila-llama-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/lila-llama-server.pid")" 2>/dev/null || true
+          fi
+          rm -f "$RUNNER_TEMP/lila-llama-server.pid" \
+            "$RUNNER_TEMP/lila-qwen2.5-0.5b-instruct-q4_k_m.gguf" \
+            "$RUNNER_TEMP/lila-llama-models.json"
+          rm -rf "$RUNNER_TEMP/llama.cpp"
+          if [ -f "$RUNNER_TEMP/lila-android-comfyui.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/lila-android-comfyui.pid")" 2>/dev/null || true
+          fi
+          rm -f "$RUNNER_TEMP/lila-android-comfyui.pid" "$RUNNER_TEMP/lila-android-comfyui.log"
+          rm -rf "$RUNNER_TEMP/ComfyUI" "$RUNNER_TEMP/comfyui-venv" "$RUNNER_TEMP/comfyui-requirements-android-e2e.txt"
+          docker rm -f lila-live-ollama lila-live-redis 2>/dev/null || true
+          docker volume rm lila-live-ollama-models 2>/dev/null || true
+
+  live-comfyui-e2e:
+    name: Production JWT and Redis ComfyUI Core image lifecycle E2E (CPU smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Create isolated Python environments
+        run: |
+          python -m venv "$RUNNER_TEMP/comfyui-venv"
+          python -m venv "$RUNNER_TEMP/backend-venv"
+      - name: Install pinned CPU PyTorch for ComfyUI
+        run: |
+          "$RUNNER_TEMP/comfyui-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/comfyui-venv/bin/python" -m pip install \
+            torch==2.7.1+cpu torchvision==0.22.1+cpu torchaudio==2.7.1+cpu \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Check out pinned official ComfyUI v0.46.0
+        run: |
+          git clone --depth 1 --branch v0.46.0 https://github.com/Comfy-Org/ComfyUI.git "$RUNNER_TEMP/ComfyUI"
+          test "$(git -C "$RUNNER_TEMP/ComfyUI" rev-parse HEAD)" = "a277b5bf213e8a44fa34817b7770b54f86ef4cea"
+      - name: Install pinned ComfyUI runtime dependencies
+        run: |
+          cd "$RUNNER_TEMP/ComfyUI"
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          excluded = {"torch", "torchvision", "torchaudio"}
+          kept = []
+          for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                  kept.append(line)
+                  continue
+              match = re.match(r"^([A-Za-z0-9_.-]+)", stripped)
+              package = match.group(1).lower() if match else ""
+              if package not in excluded:
+                  kept.append(line)
+          destination = Path(os.environ["RUNNER_TEMP"]) / "comfyui-requirements-ci.txt"
+          destination.write_text(chr(10).join(kept) + chr(10), encoding="utf-8")
+          PY
+          "$RUNNER_TEMP/comfyui-venv/bin/python" -m pip install -r "$RUNNER_TEMP/comfyui-requirements-ci.txt"
+      - name: Install backend test dependencies
+        run: |
+          "$RUNNER_TEMP/backend-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/backend-venv/bin/python" -m pip install -r backend/requirements.txt
+      - name: Start ephemeral Redis for production image E2E
+        run: |
+          docker run -d --name lila-live-comfyui-redis \
+            -p 127.0.0.1:6379:6379 \
+            redis:7.4-alpine redis-server --save "" --appendonly no
+          for attempt in $(seq 1 30); do
+            if docker exec lila-live-comfyui-redis redis-cli ping 2>/dev/null | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Redis did not become ready" >&2
+          exit 1
+      - name: Start real ComfyUI CPU API server
+        run: |
+          "$RUNNER_TEMP/comfyui-venv/bin/python" "$RUNNER_TEMP/ComfyUI/main.py" \
+            --cpu --listen 127.0.0.1 --port 8188 --disable-auto-launch \
+            > "$RUNNER_TEMP/comfyui.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/comfyui.pid"
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/comfyui.pid")" 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            tail -n 160 "$RUNNER_TEMP/comfyui.log"
+            exit 1
+          fi
+      - name: Run production-authenticated Core image lifecycle, Redis quotas and restart E2E
+        env:
+          LILA_LIVE_COMFYUI_URL: http://127.0.0.1:8188
+          REDIS_URL: redis://127.0.0.1:6379/14
+          PYTHONPATH: ${{ github.workspace }}/backend
+        run: |
+          "$RUNNER_TEMP/backend-venv/bin/python" -m pytest -q \
+            backend/tests/test_lila_core_images.py::test_live_comfyui_core_image_lifecycle_and_encrypted_history_survive_restart -vv
+      - name: Upload ComfyUI runtime log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lila-live-comfyui-runtime-log
+          path: ${{ runner.temp }}/comfyui.log
+          if-no-files-found: ignore
+          retention-days: 3
+      - name: Stop ComfyUI and Redis
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/comfyui.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/comfyui.pid")" 2>/dev/null || true
+          fi
+          docker rm -f lila-live-comfyui-redis 2>/dev/null || true
 
   build:
-    needs: [test, backend-test, instrumented-test, windows-e2e-script]
+    needs: [test, backend-test, instrumented-test, windows-e2e-script, live-ollama-e2e, live-comfyui-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -117,10 +543,8 @@ jobs:
           java-version: '17'
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
       - name: Assemble debug APK
-        run: gradle assembleDebug
+        run: bash scripts/gradle-maven-429-retry.sh ./gradlew assembleDebug
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:

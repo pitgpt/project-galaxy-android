@@ -54,6 +54,9 @@ class CoreTurnService:
                 assistant_message=response.text,
                 provider_id=response.provider_id,
                 model_id=response.model_id,
+                fallback_from_provider_id=response.fallback_from_provider_id,
+                fallback_from_model_id=response.fallback_from_model_id,
+                fallback_reason=response.fallback_reason,
             )
             return response
 

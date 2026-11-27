@@ -8,8 +8,16 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from galaxy_backend.config import Settings
+from galaxy_backend.lila_core.adapters import ModelProviderConnectionUnavailable
+from galaxy_backend.lila_core.context import AssembledContext
 from galaxy_backend.lila_core.contracts import CoreTurnResponse
 from galaxy_backend.lila_core.memory import MemorySnippet
+from galaxy_backend.lila_core.openai_compatible import ModelProviderUnavailable
+from galaxy_backend.lila_core.provider_routing import (
+    OwnerScopedModelAdapterResolver,
+    SelectedFallbackProviderUnavailable,
+)
+from galaxy_backend.lila_core.provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
 from galaxy_backend.lila_core.sqlite_store import (
     LilaStoreIntegrityError,
     ProviderAlreadyExists,
@@ -186,7 +194,7 @@ def test_schema_v4_migration_preserves_history_and_adds_provider_catalog(tmp_pat
     ]
     assert memories[0].content == "memory survives"
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 7
     assert database.execute(
         "SELECT COUNT(*) FROM lila_providers"
     ).fetchone()[0] == 1
@@ -239,7 +247,7 @@ class RecordingLimiter:
             raise self.error
 
 
-def make_settings():
+def make_settings(local_ports=DEFAULT_LOCAL_PROVIDER_PORTS):
     return Settings(
         openai_api_key=None,
         auth_jwks_url="https://issuer.example/.well-known/jwks.json",
@@ -249,13 +257,14 @@ def make_settings():
         allowed_voices=frozenset({"alloy"}),
         allowed_character_ids=frozenset({"galaxy.default"}),
         environment="test",
+        lila_local_provider_ports=frozenset(local_ports),
     )
 
 
-def make_client(tmp_path, limiter=None, provider_http_client_factory=None):
+def make_client(tmp_path, limiter=None, provider_http_client_factory=None, settings=None):
     store = SqliteLilaStore(tmp_path / "lila.sqlite3", KEY)
     app = create_app(
-        settings=make_settings(),
+        settings=settings or make_settings(),
         http_client=FakeHttpClient(),
         authenticator=FakeAuthenticator(),
         lila_turn_rate_limiter=limiter or RecordingLimiter(),
@@ -417,6 +426,54 @@ def test_provider_api_rejects_unsafe_endpoint_classes(tmp_path):
     assert local.status_code == 200
     assert local.json()["provider_type"] == "local"
     assert host_gateway.status_code == 200
+
+
+
+
+def test_provider_api_accepts_custom_local_port_only_when_operator_allowlisted(tmp_path):
+    custom_port = 12345
+    payload = create_payload(
+        provider_id="local-custom-port",
+        provider_type="local",
+        base_url=f"http://127.0.0.1:{custom_port}/v1",
+        api_key=None,
+    )
+
+    default_dir = tmp_path / "default"
+    default_dir.mkdir(mode=0o700)
+    default_client, _ = make_client(default_dir)
+    with default_client:
+        rejected_by_default = default_client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=payload,
+        )
+
+    custom_dir = tmp_path / "custom"
+    custom_dir.mkdir(mode=0o700)
+    custom_client, _ = make_client(
+        custom_dir,
+        settings=make_settings(local_ports=DEFAULT_LOCAL_PROVIDER_PORTS | {custom_port}),
+    )
+    with custom_client:
+        accepted = custom_client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json=payload,
+        )
+        private_network_target = custom_client.post(
+            "/v1/lila/providers",
+            headers=auth(),
+            json={
+                **payload,
+                "provider_id": "local-private-network",
+                "base_url": f"http://192.168.1.20:{custom_port}/v1",
+            },
+        )
+
+    assert rejected_by_default.status_code == 422
+    assert accepted.status_code == 200
+    assert private_network_target.status_code == 422
 
 
 def test_provider_api_requires_auth_and_obeys_per_user_rate_limit(tmp_path):
@@ -653,10 +710,16 @@ def test_schema_v5_migration_preserves_encrypted_provider_catalog(tmp_path):
     assert providers[0]["provider_id"] == "cloud-main"
 
     database = sqlite3.connect(path)
-    assert database.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 7
     assert database.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lila_conversation_models'"
     ).fetchone()[0] == 1
+    columns = {row[1] for row in database.execute("PRAGMA table_info(lila_turn_metadata)")}
+    assert {
+        "fallback_from_provider_id",
+        "fallback_from_model_id",
+        "fallback_reason",
+    }.issubset(columns)
     database.close()
 
 
@@ -677,18 +740,35 @@ def test_conversation_model_selection_is_encrypted_owner_scoped_and_survives_res
         ),
         create_only=True,
     ))
+    run(first.save_provider(
+        principal_id="private-owner-a",
+        provider=make_provider(
+            provider_id="cloud-backup",
+            base_url="https://backup.vendor.net/v1",
+            model_id="backup-model",
+            api_key="backup-provider-secret",
+        ),
+        create_only=True,
+    ))
     run(first.set_conversation_model(
         principal_id="private-owner-a",
         conversation_id="private-conversation-a",
         provider_id="cloud-main",
         model_id="model-b",
+        fallback_provider_id="cloud-backup",
+        fallback_model_id="backup-model",
     ))
 
     second = SqliteLilaStore(path, KEY)
     assert run(second.get_conversation_model(
         principal_id="private-owner-a",
         conversation_id="private-conversation-a",
-    )) == {"provider_id": "cloud-main", "model_id": "model-b"}
+    )) == {
+        "provider_id": "cloud-main",
+        "model_id": "model-b",
+        "fallback_provider_id": "cloud-backup",
+        "fallback_model_id": "backup-model",
+    }
     assert run(second.get_conversation_model(
         principal_id="private-owner-b",
         conversation_id="private-conversation-a",
@@ -712,6 +792,9 @@ def test_conversation_model_selection_is_encrypted_owner_scoped_and_survives_res
         b"private-conversation-a",
         b"cloud-main",
         b"model-b",
+        b"cloud-backup",
+        b"backup-model",
+        b"backup-provider-secret",
     ):
         assert value not in database_bytes
 
@@ -773,6 +856,8 @@ def test_conversation_model_api_validates_discovery_and_restores_selection(tmp_p
         "selected": True,
         "provider_id": "cloud-main",
         "model_id": "model-b",
+        "fallback_provider_id": None,
+        "fallback_model_id": None,
     }
     assert restored.status_code == 200
     assert restored.json() == selected.json()
@@ -973,7 +1058,8 @@ def test_ambiguous_turn_failure_is_marked_and_never_generates_again(tmp_path):
     assert "provider-secret" not in failed.text
     assert "private-provider-detail" not in failed.text
     assert replay.status_code == 409
-    assert "still processing" in replay.json()["detail"]
+    assert "unresolved" in replay.json()["detail"]
+    assert "query its status before retrying" in replay.json()["detail"]
     assert outbound == [
         ("GET", "/v1/models"),
         ("POST", "/v1/chat/completions"),
@@ -1242,13 +1328,12 @@ def test_invalid_generated_response_marks_outcome_unknown_and_keeps_reservation(
 def test_local_provider_runs_authenticated_api_to_core_history_over_real_pinned_socket(tmp_path):
     """Exercise the complete owner-managed local path over a real TCP socket.
 
-    The test uses only loopback and one of the production allowlisted runtime
-    ports. It does not depend on an installed model runtime or external network.
+    The test uses only loopback and an operator-approved custom runtime port.
+    It does not depend on an installed model runtime or external network.
     """
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    from galaxy_backend.lila_core.provider_egress import create_provider_http_client
     from galaxy_backend.lila_core.provider_registry import DEFAULT_LOCAL_PROVIDER_PORTS
 
     class ProviderHandler(BaseHTTPRequestHandler):
@@ -1298,29 +1383,17 @@ def test_local_provider_runs_authenticated_api_to_core_history_over_real_pinned_
                 "choices": [{"message": {"content": content}}],
             })
 
-    server = None
-    for candidate_port in sorted(DEFAULT_LOCAL_PROVIDER_PORTS):
-        try:
-            server = ThreadingHTTPServer(("127.0.0.1", candidate_port), ProviderHandler)
-            break
-        except OSError:
-            continue
-    if server is None:
-        pytest.skip("No production-allowlisted local model port is available")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ProviderHandler)
 
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
 
-    def real_provider_client_factory(provider_type, timeout_seconds):
-        from galaxy_backend.lila_core.provider_egress import create_provider_http_client
-        return create_provider_http_client(provider_type, timeout_seconds)
-
     try:
         client, store = make_client(
             tmp_path,
-            provider_http_client_factory=real_provider_client_factory,
+            settings=make_settings(local_ports=DEFAULT_LOCAL_PROVIDER_PORTS | {port}),
         )
         headers = {
             **auth(),
@@ -1481,6 +1554,10 @@ def test_turn_result_status_is_owner_and_conversation_scoped_and_replays_complet
             "avatar_events": [],
             "provider_id": "cloud-primary",
             "model_id": "model-a",
+            "fallback_used": False,
+            "fallback_from_provider_id": None,
+            "fallback_from_model_id": None,
+            "fallback_reason": None,
         },
     }
     assert "private status request" not in completed.text
@@ -1778,3 +1855,357 @@ def test_memory_api_rejects_blank_content_and_obeys_per_user_rate_limit(tmp_path
 
     assert invalid.status_code == 422
     assert rate_limited.status_code == 429
+
+
+
+def test_conversation_model_api_persists_and_restores_explicit_fallback(tmp_path):
+    factory_calls = []
+
+    async def handler(request):
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        if request.url.host == "backup.vendor.net":
+            return httpx.Response(200, json={"data": [{"id": "backup-model"}]})
+        return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+
+    client, _ = make_client(
+        tmp_path,
+        provider_http_client_factory=make_provider_http_client_factory(handler, factory_calls),
+    )
+    primary_payload = make_provider()
+    backup_payload = make_provider(
+        provider_id="cloud-backup",
+        base_url="https://backup.vendor.net/v1",
+        model_id="backup-model",
+        api_key="backup-secret",
+    )
+    with client:
+        primary = client.post("/v1/lila/providers", headers=auth(), json=primary_payload)
+        backup = client.post("/v1/lila/providers", headers=auth(), json=backup_payload)
+        selected = client.put(
+            "/v1/lila/conversations/conversation-fallback/model",
+            headers=auth(),
+            json={
+                "provider_id": "cloud-main",
+                "model_id": "model-a",
+                "fallback_provider_id": "cloud-backup",
+                "fallback_model_id": "backup-model",
+            },
+        )
+        restored = client.get(
+            "/v1/lila/conversations/conversation-fallback/model",
+            headers=auth(),
+        )
+        invalid_same_provider = client.put(
+            "/v1/lila/conversations/conversation-invalid/model",
+            headers=auth(),
+            json={
+                "provider_id": "cloud-main",
+                "model_id": "model-a",
+                "fallback_provider_id": "cloud-main",
+                "fallback_model_id": "model-a",
+            },
+        )
+
+    assert primary.status_code == 200
+    assert backup.status_code == 200
+    assert selected.status_code == 200
+    expected = {
+        "conversation_id": "conversation-fallback",
+        "selected": True,
+        "provider_id": "cloud-main",
+        "model_id": "model-a",
+        "fallback_provider_id": "cloud-backup",
+        "fallback_model_id": "backup-model",
+    }
+    assert selected.json() == expected
+    assert restored.json() == expected
+    assert invalid_same_provider.status_code == 422
+    assert factory_calls == [("cloud", 30.0), ("cloud", 30.0)]
+
+
+def _fallback_provider(provider_id, host, model_id):
+    return {
+        "provider_id": provider_id,
+        "provider_type": "cloud",
+        "base_url": f"https://{host}/v1",
+        "model_id": model_id,
+        "api_key": None,
+        "timeout_seconds": 5.0,
+        "capabilities": ["chat"],
+        "enabled": True,
+    }
+
+
+class _FallbackRegistry:
+    def __init__(self, records):
+        self.records = records
+
+    async def get_provider(self, *, principal_id, provider_id):
+        return self.records.get(provider_id)
+
+    async def list_providers(self, *, principal_id):
+        return list(self.records.values())
+
+
+class _FallbackSelectionStore:
+    def __init__(self, selection):
+        self.selection = selection
+
+    async def get_conversation_model(self, *, principal_id, conversation_id):
+        return self.selection
+
+
+def _fallback_resolver(records, selection, handler):
+    return OwnerScopedModelAdapterResolver(
+        registry=_FallbackRegistry(records),
+        selection_store=_FallbackSelectionStore(selection),
+        default_adapter=None,
+        system_prompt="You are Lila.",
+        http_client_factory=lambda provider_type, timeout: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=timeout,
+        ),
+    )
+
+
+def _fallback_context():
+    return AssembledContext(conversation_id="conversation-1", messages=())
+
+
+def test_explicit_fallback_runs_only_after_pre_send_connection_failure():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "primary.vendor.net":
+            raise httpx.ConnectError("private transport detail", request=request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Ответ резервной модели"}}]},
+        )
+
+    resolver = _fallback_resolver(
+        {
+            "primary": _fallback_provider("primary", "primary.vendor.net", "primary-model"),
+            "backup": _fallback_provider("backup", "backup.vendor.net", "backup-model"),
+        },
+        {
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "fallback_provider_id": "backup",
+            "fallback_model_id": "backup-model",
+        },
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    result = run(execute())
+    assert result.text == "Ответ резервной модели"
+    assert result.provider_id == "backup"
+    assert result.model_id == "backup-model"
+    assert result.fallback_used is True
+    assert result.fallback_from_provider_id == "primary"
+    assert result.fallback_from_model_id == "primary-model"
+    assert result.fallback_reason == "primary_connection_unavailable"
+    assert calls == ["primary.vendor.net", "backup.vendor.net"]
+
+
+def test_ambiguous_primary_http_failure_never_triggers_fallback():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(503, json={"error": "private provider detail"})
+
+    resolver = _fallback_resolver(
+        {
+            "primary": _fallback_provider("primary", "primary.vendor.net", "primary-model"),
+            "backup": _fallback_provider("backup", "backup.vendor.net", "backup-model"),
+        },
+        {
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "fallback_provider_id": "backup",
+            "fallback_model_id": "backup-model",
+        },
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    with pytest.raises(ModelProviderUnavailable):
+        run(execute())
+    assert calls == ["primary.vendor.net"]
+
+
+def test_missing_primary_uses_only_the_explicit_owner_fallback():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Ответ резервной модели"}}]},
+        )
+
+    resolver = _fallback_resolver(
+        {"backup": _fallback_provider("backup", "backup.vendor.net", "backup-model")},
+        {
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "fallback_provider_id": "backup",
+            "fallback_model_id": "backup-model",
+        },
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    result = run(execute())
+    assert result.fallback_used is True
+    assert result.fallback_reason == "primary_provider_unavailable"
+    assert result.provider_id == "backup"
+    assert calls == ["backup.vendor.net"]
+
+
+def test_primary_connection_failure_without_configured_fallback_does_not_choose_another_provider():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        raise httpx.ConnectError("offline", request=request)
+
+    resolver = _fallback_resolver(
+        {
+            "primary": _fallback_provider("primary", "primary.vendor.net", "primary-model"),
+            "other": _fallback_provider("other", "other.vendor.net", "other-model"),
+        },
+        {"provider_id": "primary", "model_id": "primary-model"},
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    with pytest.raises(ModelProviderConnectionUnavailable):
+        run(execute())
+    assert calls == ["primary.vendor.net"]
+
+
+def test_primary_connection_failure_with_missing_configured_fallback_is_explicit():
+    calls = []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        raise httpx.ConnectError("offline", request=request)
+
+    resolver = _fallback_resolver(
+        {"primary": _fallback_provider("primary", "primary.vendor.net", "primary-model")},
+        {
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "fallback_provider_id": "backup",
+            "fallback_model_id": "backup-model",
+        },
+        handler,
+    )
+
+    async def execute():
+        adapter = await resolver("owner-a", "conversation-1")
+        return await adapter.generate(_fallback_context())
+
+    with pytest.raises(SelectedFallbackProviderUnavailable):
+        run(execute())
+    assert calls == ["primary.vendor.net"]
+
+
+def test_schema_v6_migration_adds_fallback_history_columns_without_data_loss(tmp_path):
+    path = tmp_path / "lila.sqlite3"
+    store = SqliteLilaStore(path, KEY)
+    database = sqlite3.connect(path)
+    database.execute("PRAGMA foreign_keys=ON")
+    database.execute(
+        """CREATE TABLE lila_messages (
+            owner_key TEXT NOT NULL,
+            conversation_key TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK(sequence > 0),
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+            ciphertext BLOB NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            PRIMARY KEY(owner_key, conversation_key, sequence)
+        ) WITHOUT ROWID"""
+    )
+    database.execute(
+        """CREATE TABLE lila_meta (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            key_check BLOB NOT NULL
+        )"""
+    )
+    database.execute(
+        "INSERT INTO lila_meta(singleton, key_check) VALUES(1, ?)",
+        (store._key_check(),),
+    )
+    database.execute(
+        """CREATE TABLE lila_memories (
+            owner_key TEXT NOT NULL,
+            memory_key TEXT NOT NULL,
+            nonce BLOB NOT NULL CHECK(length(nonce) = 12),
+            ciphertext BLOB NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY(owner_key, memory_key)
+        ) WITHOUT ROWID"""
+    )
+    database.execute(
+        """CREATE TABLE lila_turn_metadata (
+            owner_key TEXT NOT NULL,
+            conversation_key TEXT NOT NULL,
+            assistant_sequence INTEGER NOT NULL CHECK(assistant_sequence > 0),
+            provider_id TEXT CHECK(provider_id IS NULL OR length(provider_id) BETWEEN 1 AND 64),
+            model_id TEXT CHECK(model_id IS NULL OR length(model_id) BETWEEN 1 AND 256),
+            PRIMARY KEY(owner_key, conversation_key, assistant_sequence),
+            FOREIGN KEY(owner_key, conversation_key, assistant_sequence)
+                REFERENCES lila_messages(owner_key, conversation_key, sequence)
+                ON DELETE CASCADE,
+            CHECK(provider_id IS NOT NULL OR model_id IS NOT NULL)
+        ) WITHOUT ROWID"""
+    )
+    database.execute(
+        "INSERT INTO lila_messages VALUES(?, ?, ?, ?, ?, ?, ?)",
+        ("owner-key", "conversation-key", 2, "assistant", bytes(12), b"ciphertext", 1000),
+    )
+    database.execute(
+        "INSERT INTO lila_turn_metadata VALUES(?, ?, ?, ?, ?)",
+        ("owner-key", "conversation-key", 2, "primary-provider", "primary-model"),
+    )
+    database.execute("PRAGMA user_version=6")
+    database.commit()
+    database.close()
+
+    migrated = SqliteLilaStore(path, KEY)
+    run(migrated.initialize())
+
+    database = sqlite3.connect(path)
+    assert database.execute("PRAGMA user_version").fetchone()[0] == 7
+    columns = {row[1] for row in database.execute("PRAGMA table_info(lila_turn_metadata)")}
+    assert {
+        "fallback_from_provider_id",
+        "fallback_from_model_id",
+        "fallback_reason",
+    }.issubset(columns)
+    row = database.execute(
+        "SELECT provider_id, model_id, fallback_from_provider_id, fallback_from_model_id, fallback_reason "
+        "FROM lila_turn_metadata WHERE assistant_sequence=2"
+    ).fetchone()
+    assert row == ("primary-provider", "primary-model", None, None, None)
+    database.close()

@@ -3,23 +3,35 @@ package com.pitgpt.galaxy.data.local
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import com.pitgpt.galaxy.data.local.dao.CharacterDao
+import com.pitgpt.galaxy.data.local.dao.ComfyUiJobDao
 import com.pitgpt.galaxy.data.local.dao.ConversationMessageDao
+import com.pitgpt.galaxy.data.local.dao.GeneratedImageDao
+import com.pitgpt.galaxy.data.local.dao.ImageGenerationRequestDao
 import com.pitgpt.galaxy.data.local.dao.MemoryDao
 import com.pitgpt.galaxy.data.local.entity.CharacterEntity
+import com.pitgpt.galaxy.data.local.entity.ComfyUiJobEntity
 import com.pitgpt.galaxy.data.local.entity.ConversationMessageEntity
+import com.pitgpt.galaxy.data.local.entity.GeneratedImageEntity
+import com.pitgpt.galaxy.data.local.entity.ImageGenerationRequestEntity
 import com.pitgpt.galaxy.data.local.entity.MemoryEntity
 
 @Database(
     entities = [
         CharacterEntity::class,
         ConversationMessageEntity::class,
-        MemoryEntity::class
+        MemoryEntity::class,
+        ComfyUiJobEntity::class,
+        GeneratedImageEntity::class,
+        ImageGenerationRequestEntity::class
     ],
-    version = 2,
+    version = 6,
     exportSchema = false
 )
 abstract class GalaxyDatabase : RoomDatabase() {
     abstract fun characterDao(): CharacterDao
     abstract fun conversationMessageDao(): ConversationMessageDao
     abstract fun memoryDao(): MemoryDao
+    abstract fun comfyUiJobDao(): ComfyUiJobDao
+    abstract fun generatedImageDao(): GeneratedImageDao
+    abstract fun imageGenerationRequestDao(): ImageGenerationRequestDao
 }

@@ -217,13 +217,17 @@ class RedisLilaTurnRateLimiter:
         limit: int,
         daily_limit: int,
         window_seconds: int = 60,
+        key_prefix: str = "galaxy:lila:turns",
     ) -> None:
         if limit < 1 or daily_limit < 1 or window_seconds < 1:
             raise ValueError("Lila turn rate limits must be positive")
+        if not isinstance(key_prefix, str) or not key_prefix.strip() or any(char in key_prefix for char in "{} \r\n"):
+            raise ValueError("Lila rate-limit key prefix is invalid")
         self.redis = redis_client
         self.limit = limit
         self.daily_limit = daily_limit
         self.window_seconds = window_seconds
+        self.key_prefix = key_prefix.rstrip(":")
 
     async def check(self, user_id: str) -> None:
         if not isinstance(user_id, str) or not user_id.strip():
@@ -234,8 +238,8 @@ class RedisLilaTurnRateLimiter:
         daily_bucket = int(now // 86400)
         user_digest = sha256(user_id.encode("utf-8")).hexdigest()
         # The shared Redis hash tag keeps both keys in one Redis Cluster slot.
-        minute_key = f"galaxy:lila:turns:{{{user_digest}}}:minute:{minute_bucket}"
-        daily_key = f"galaxy:lila:turns:{{{user_digest}}}:day:{daily_bucket}"
+        minute_key = f"{self.key_prefix}:{{{user_digest}}}:minute:{minute_bucket}"
+        daily_key = f"{self.key_prefix}:{{{user_digest}}}:day:{daily_bucket}"
         minute_ttl_ms = max(
             1, int(((minute_bucket + 1) * self.window_seconds - now) * 1000)
         )

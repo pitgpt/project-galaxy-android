@@ -168,6 +168,32 @@ class EncryptedMediaStoreTest {
     }
 
     @Test
+    fun boundedReadZeroizesAccumulatorWhenLimitIsInvalidBeforeReadingInput() {
+        val sensitive = "preexisting-secret-buffer".toByteArray()
+        val accumulator = ZeroizingByteArrayOutputStream(sensitive.size)
+        accumulator.write(sensitive)
+        val originalBackingBuffer = accumulator.backingBufferForTesting
+        var inputRead = false
+        val input = object : InputStream() {
+            override fun read(): Int {
+                inputRead = true
+                return -1
+            }
+        }
+
+        assertThrows(IllegalArgumentException::class.java) {
+            EncryptedMediaStore.readBounded(input, -1, accumulator)
+        }
+
+        assertFalse("Input must not be read when the limit is invalid", inputRead)
+        assertTrue("The pre-existing accumulator contents must be wiped", accumulator.isWiped)
+        assertTrue(
+            "The original backing array must be wiped",
+            originalBackingBuffer.all { it == 0.toByte() }
+        )
+    }
+
+    @Test
     fun boundedReadZeroizesScratchAndAccumulatorBuffersAfterSuccess() {
         val expected = "encrypted-media-buffer".toByteArray()
         var scratchBuffer: ByteArray? = null

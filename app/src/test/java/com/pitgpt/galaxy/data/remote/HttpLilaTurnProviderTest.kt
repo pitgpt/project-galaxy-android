@@ -61,8 +61,12 @@ class HttpLilaTurnProviderTest {
             JSONObject()
                 .put("conversation_id", "conversation-1")
                 .put("text", "Привет! Я Лила.")
-                .put("provider_id", "cloud-primary")
-                .put("model_id", "model-a")
+                .put("provider_id", "backup-provider")
+                .put("model_id", "backup-model")
+                .put("fallback_used", true)
+                .put("fallback_from_provider_id", "primary-provider")
+                .put("fallback_from_model_id", "primary-model")
+                .put("fallback_reason", "primary_connection_unavailable")
                 .toString()
         )
         val provider = HttpLilaTurnProvider(
@@ -75,9 +79,13 @@ class HttpLilaTurnProviderTest {
 
         assertEquals("conversation-1", result.conversationId)
         assertEquals("Привет! Я Лила.", result.text)
-        assertEquals("cloud-primary", result.providerId)
-        assertEquals("model-a", result.modelId)
-        assertEquals("cloud-primary · model-a", result.displayModel)
+        assertEquals("backup-provider", result.providerId)
+        assertEquals("backup-model", result.modelId)
+        assertEquals("backup-provider · backup-model", result.displayModel)
+        assertTrue(result.fallbackUsed)
+        assertEquals("primary-provider", result.fallbackFromProviderId)
+        assertEquals("primary-model", result.fallbackFromModelId)
+        assertEquals("primary_connection_unavailable", result.fallbackReason)
         assertEquals("Bearer test-access-token", connection.requestHeaders["Authorization"])
         assertEquals(idempotencyKey, connection.requestHeaders["Idempotency-Key"])
         assertEquals("application/json; charset=utf-8", connection.requestHeaders["Content-Type"])
@@ -222,6 +230,27 @@ class HttpLilaTurnProviderTest {
         assertEquals("GET", pending.requestMethod)
         assertTrue(pending.requestBody.size() == 0)
 
+        val unknown = FakeConnection(
+            URL("https://api.example.test/v1/lila/conversations/00000000-0000-4000-8000-000000000501/turns/$idempotencyKey"),
+            200,
+            JSONObject()
+                .put("conversation_id", "00000000-0000-4000-8000-000000000501")
+                .put("status", "outcome_unknown")
+                .put("response", JSONObject.NULL)
+                .toString()
+        )
+        val unknownProvider = HttpLilaTurnProvider(
+            "https://api.example.test",
+            GalaxyAccessTokenProvider { "test-access-token" },
+            connectionFactory = { unknown }
+        )
+        assertEquals(
+            LilaTurnStatus.OUTCOME_UNKNOWN,
+            unknownProvider.getTurnStatus("00000000-0000-4000-8000-000000000501", idempotencyKey)?.status
+        )
+        assertEquals("GET", unknown.requestMethod)
+        assertTrue(unknown.requestBody.size() == 0)
+
         val notFound = FakeConnection(
             URL("https://api.example.test/v1/lila/conversations/00000000-0000-4000-8000-000000000501/turns/$idempotencyKey"),
             404,
@@ -263,7 +292,11 @@ class HttpLilaTurnProviderTest {
                             .put("content", "third").put("created_at_epoch_millis", 3000))
                         .put(JSONObject().put("sequence", 4).put("role", "assistant")
                             .put("content", "fourth").put("created_at_epoch_millis", 4000)
-                            .put("provider_id", "cloud-primary").put("model_id", "model-a"))
+                            .put("provider_id", "backup-provider").put("model_id", "backup-model")
+                            .put("fallback_used", true)
+                            .put("fallback_from_provider_id", "primary-provider")
+                            .put("fallback_from_model_id", "primary-model")
+                            .put("fallback_reason", "primary_provider_unavailable"))
                 )
                 .put("next_before_sequence", 3)
                 .toString(),
@@ -293,9 +326,13 @@ class HttpLilaTurnProviderTest {
 
         assertEquals(listOf("first", "second", "third", "fourth"), history.map { it.content })
         assertEquals(listOf(1L, 2L, 3L, 4L), history.map { it.sequence })
-        assertEquals("cloud-primary", history.last().providerId)
-        assertEquals("model-a", history.last().modelId)
-        assertEquals("cloud-primary · model-a", history.last().displayModelLabel)
+        assertEquals("backup-provider", history.last().providerId)
+        assertEquals("backup-model", history.last().modelId)
+        assertEquals("backup-provider · backup-model", history.last().displayModelLabel)
+        assertTrue(history.last().fallbackUsed)
+        assertEquals("primary-provider", history.last().fallbackFromProviderId)
+        assertEquals("primary-model", history.last().fallbackFromModelId)
+        assertEquals("primary_provider_unavailable", history.last().fallbackReason)
         assertEquals(2, connections.size)
         assertEquals("GET", connections[0].requestMethod)
         assertEquals("Bearer test-access-token", connections[0].requestHeaders["Authorization"])

@@ -358,11 +358,14 @@ class EncryptedMediaStore private constructor(
             maxBytes: Int,
             output: ZeroizingByteArrayOutputStream
         ): ByteArray {
-            require(maxBytes in 0 until Int.MAX_VALUE) { "The media read limit is invalid." }
-            val buffer = ByteArray(READ_BUFFER_BYTES)
+            var scratchBuffer: ByteArray? = null
             var totalBytes = 0
 
             try {
+                require(maxBytes in 0 until Int.MAX_VALUE) { "The media read limit is invalid." }
+                val buffer = ByteArray(READ_BUFFER_BYTES)
+                scratchBuffer = buffer
+
                 while (true) {
                     val remaining = maxBytes - totalBytes
                     val count = input.read(buffer, 0, minOf(buffer.size, remaining + 1))
@@ -387,7 +390,7 @@ class EncryptedMediaStore private constructor(
 
                 return output.copyAndWipe()
             } finally {
-                buffer.fill(0)
+                scratchBuffer?.fill(0)
                 output.wipe()
             }
         }

@@ -36,6 +36,12 @@ from .memory import (
 )
 
 
+# The provider HTTP timeout is capped at 120 seconds. Five minutes leaves room
+# for request scheduling and durable completion while making abandoned
+# reservations visible. This is observational only: it never unlocks a retry.
+IDEMPOTENT_TURN_UNKNOWN_AFTER_MS = 5 * 60 * 1000
+
+
 class ProviderAlreadyExists(RuntimeError):
     """An owner already has a provider with this identifier."""
 
@@ -66,7 +72,7 @@ class SqliteLilaStore:
     This adapter does not make an ephemeral container filesystem durable.
     """
 
-    _SCHEMA_VERSION = 6
+    _SCHEMA_VERSION = 7
     _NONCE_BYTES = 12
     _MEMORY_BACKFILL_BATCH = 128
     _MAX_MEMORY_CANDIDATES = 256
@@ -173,7 +179,7 @@ class SqliteLilaStore:
                         ) WITHOUT ROWID"""
                     )
                     version = 1
-                elif version not in {1, 2, 3, 4, 5, self._SCHEMA_VERSION}:
+                elif version not in {1, 2, 3, 4, 5, 6, self._SCHEMA_VERSION}:
                     raise RuntimeError("Unsupported Lila database schema version")
                 else:
                     row = connection.execute(
@@ -236,6 +242,32 @@ class SqliteLilaStore:
                         CHECK(provider_id IS NOT NULL OR model_id IS NOT NULL)
                     ) WITHOUT ROWID"""
                 )
+                # Version 7 adds non-secret fallback identity/reason to assistant history metadata.
+                # Existing rows remain valid with NULL fallback columns.
+                metadata_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(lila_turn_metadata)").fetchall()
+                }
+                fallback_columns = (
+                    (
+                        "fallback_from_provider_id",
+                        "TEXT CHECK(fallback_from_provider_id IS NULL OR length(fallback_from_provider_id) BETWEEN 1 AND 64)",
+                    ),
+                    (
+                        "fallback_from_model_id",
+                        "TEXT CHECK(fallback_from_model_id IS NULL OR length(fallback_from_model_id) BETWEEN 1 AND 256)",
+                    ),
+                    (
+                        "fallback_reason",
+                        "TEXT CHECK(fallback_reason IS NULL OR fallback_reason IN ('primary_connection_unavailable', 'primary_provider_unavailable'))",
+                    ),
+                )
+                for column_name, declaration in fallback_columns:
+                    if column_name not in metadata_columns:
+                        connection.execute(
+                            f"ALTER TABLE lila_turn_metadata ADD COLUMN {column_name} {declaration}"
+                        )
+
                 # Version 5 stores owner-managed provider configuration as authenticated ciphertext.
                 # Provider IDs and owner IDs are represented only by HMAC-derived indexes.
                 connection.execute(
@@ -467,7 +499,8 @@ class SqliteLilaStore:
             if before_sequence is None:
                 rows = connection.execute(
                     "SELECT m.sequence, m.role, m.nonce, m.ciphertext, m.created_at_ms, "
-                    "t.provider_id, t.model_id FROM lila_messages AS m "
+                    "t.provider_id, t.model_id, t.fallback_from_provider_id, "
+                    "t.fallback_from_model_id, t.fallback_reason FROM lila_messages AS m "
                     "LEFT JOIN lila_turn_metadata AS t ON "
                     "t.owner_key=m.owner_key AND t.conversation_key=m.conversation_key "
                     "AND t.assistant_sequence=m.sequence "
@@ -478,7 +511,8 @@ class SqliteLilaStore:
             else:
                 rows = connection.execute(
                     "SELECT m.sequence, m.role, m.nonce, m.ciphertext, m.created_at_ms, "
-                    "t.provider_id, t.model_id FROM lila_messages AS m "
+                    "t.provider_id, t.model_id, t.fallback_from_provider_id, "
+                    "t.fallback_from_model_id, t.fallback_reason FROM lila_messages AS m "
                     "LEFT JOIN lila_turn_metadata AS t ON "
                     "t.owner_key=m.owner_key AND t.conversation_key=m.conversation_key "
                     "AND t.assistant_sequence=m.sequence "
@@ -509,6 +543,10 @@ class SqliteLilaStore:
                         created_at_epoch_millis=int(row["created_at_ms"]),
                         provider_id=row["provider_id"],
                         model_id=row["model_id"],
+                        fallback_used=row["fallback_from_provider_id"] is not None,
+                        fallback_from_provider_id=row["fallback_from_provider_id"],
+                        fallback_from_model_id=row["fallback_from_model_id"],
+                        fallback_reason=row["fallback_reason"],
                     )
                 )
             except Exception:
@@ -597,13 +635,22 @@ class SqliteLilaStore:
         connection = self._connect()
         try:
             row = connection.execute(
-                "SELECT conversation_key, state, response_nonce, response_ciphertext "
+                "SELECT conversation_key, state, response_nonce, response_ciphertext, updated_at_ms "
                 "FROM lila_turn_requests WHERE owner_key=? AND request_key=?",
                 (owner_key, request_key),
             ).fetchone()
             if row is None or row["conversation_key"] != conversation_key:
                 return "not_found", None
             if row["state"] == "pending":
+                pending_age_ms = max(
+                    0,
+                    int(time.time() * 1000) - int(row["updated_at_ms"]),
+                )
+                if pending_age_ms >= IDEMPOTENT_TURN_UNKNOWN_AFTER_MS:
+                    # The upstream outcome may be unknown after process death.
+                    # Keep the durable reservation pending so no retry can
+                    # trigger a second potentially billable generation.
+                    return "outcome_unknown", None
                 return "pending", None
             if (
                 row["state"] != "completed"
@@ -731,6 +778,9 @@ class SqliteLilaStore:
             ciphertext,
             validated_response.provider_id,
             validated_response.model_id,
+            validated_response.fallback_from_provider_id,
+            validated_response.fallback_from_model_id,
+            validated_response.fallback_reason,
         )
 
     def _complete_idempotent_turn_sync(
@@ -745,6 +795,9 @@ class SqliteLilaStore:
         response_ciphertext: bytes,
         provider_id: str | None,
         model_id: str | None,
+        fallback_from_provider_id: str | None,
+        fallback_from_model_id: str | None,
+        fallback_reason: str | None,
     ) -> None:
         connection = self._connect()
         try:
@@ -784,7 +837,15 @@ class SqliteLilaStore:
                         (owner_key, conversation_key, sequence, role, message_nonce, message_ciphertext, now),
                     )
                 self._insert_turn_metadata(
-                    connection, owner_key, conversation_key, current + 2, provider_id, model_id
+                    connection,
+                    owner_key,
+                    conversation_key,
+                    current + 2,
+                    provider_id,
+                    model_id,
+                    fallback_from_provider_id,
+                    fallback_from_model_id,
+                    fallback_reason,
                 )
                 updated = connection.execute(
                     "UPDATE lila_turn_requests SET state='completed', response_nonce=?, "
@@ -859,8 +920,30 @@ class SqliteLilaStore:
         assistant_sequence: int,
         provider_id: str | None,
         model_id: str | None,
+        fallback_from_provider_id: str | None = None,
+        fallback_from_model_id: str | None = None,
+        fallback_reason: str | None = None,
     ) -> None:
-        if provider_id is None and model_id is None:
+        fallback_values = (
+            fallback_from_provider_id,
+            fallback_from_model_id,
+            fallback_reason,
+        )
+        if any(value is not None for value in fallback_values) and not all(
+            value is not None for value in fallback_values
+        ):
+            raise ValueError("fallback history metadata must be stored together")
+        if fallback_from_provider_id is not None:
+            if provider_id is None or model_id is None:
+                raise ValueError("fallback history requires the actual provider and model")
+            if fallback_from_provider_id == provider_id:
+                raise ValueError("fallback history must identify a different primary provider")
+            if fallback_reason not in {
+                "primary_connection_unavailable",
+                "primary_provider_unavailable",
+            }:
+                raise ValueError("fallback history reason is invalid")
+        if provider_id is None and model_id is None and fallback_from_provider_id is None:
             return
         if provider_id is not None and (
             not isinstance(provider_id, str) or not provider_id.strip() or len(provider_id) > 64
@@ -870,10 +953,32 @@ class SqliteLilaStore:
             not isinstance(model_id, str) or not model_id.strip() or len(model_id) > 256
         ):
             raise ValueError("model_id must be a non-empty identifier within 256 characters")
+        if fallback_from_provider_id is not None and (
+            not isinstance(fallback_from_provider_id, str)
+            or not fallback_from_provider_id.strip()
+            or len(fallback_from_provider_id) > 64
+        ):
+            raise ValueError("fallback_from_provider_id is invalid")
+        if fallback_from_model_id is not None and (
+            not isinstance(fallback_from_model_id, str)
+            or not fallback_from_model_id.strip()
+            or len(fallback_from_model_id) > 256
+        ):
+            raise ValueError("fallback_from_model_id is invalid")
         connection.execute(
-            "INSERT INTO lila_turn_metadata(owner_key, conversation_key, assistant_sequence, provider_id, model_id) "
-            "VALUES(?, ?, ?, ?, ?)",
-            (owner_key, conversation_key, assistant_sequence, provider_id, model_id),
+            "INSERT INTO lila_turn_metadata(owner_key, conversation_key, assistant_sequence, "
+            "provider_id, model_id, fallback_from_provider_id, fallback_from_model_id, fallback_reason) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                owner_key,
+                conversation_key,
+                assistant_sequence,
+                provider_id,
+                model_id,
+                fallback_from_provider_id,
+                fallback_from_model_id,
+                fallback_reason,
+            ),
         )
 
     async def append_turn(
@@ -885,6 +990,9 @@ class SqliteLilaStore:
         assistant_message: str,
         provider_id: str | None = None,
         model_id: str | None = None,
+        fallback_from_provider_id: str | None = None,
+        fallback_from_model_id: str | None = None,
+        fallback_reason: str | None = None,
     ) -> None:
         user = ConversationMessage(role="user", content=user_message)
         assistant = ConversationMessage(role="assistant", content=assistant_message)
@@ -892,7 +1000,16 @@ class SqliteLilaStore:
         owner_key = self._owner_key(principal_id)
         conversation_key = self._resource_key("conversation", conversation_id, 128)
         await asyncio.to_thread(
-            self._append_turn_sync, owner_key, conversation_key, user, assistant, provider_id, model_id
+            self._append_turn_sync,
+            owner_key,
+            conversation_key,
+            user,
+            assistant,
+            provider_id,
+            model_id,
+            fallback_from_provider_id,
+            fallback_from_model_id,
+            fallback_reason,
         )
 
     def _append_turn_sync(
@@ -903,6 +1020,9 @@ class SqliteLilaStore:
         assistant: ConversationMessage,
         provider_id: str | None,
         model_id: str | None,
+        fallback_from_provider_id: str | None,
+        fallback_from_model_id: str | None,
+        fallback_reason: str | None,
     ) -> None:
         connection = self._connect()
         try:
@@ -929,7 +1049,15 @@ class SqliteLilaStore:
                         (owner_key, conversation_key, sequence, role, nonce, ciphertext, now),
                     )
                 self._insert_turn_metadata(
-                    connection, owner_key, conversation_key, current + 2, provider_id, model_id
+                    connection,
+                    owner_key,
+                    conversation_key,
+                    current + 2,
+                    provider_id,
+                    model_id,
+                    fallback_from_provider_id,
+                    fallback_from_model_id,
+                    fallback_reason,
                 )
                 connection.execute("COMMIT")
             except BaseException:
@@ -1358,7 +1486,7 @@ class SqliteLilaStore:
         provider_key: str,
         nonce: bytes,
         ciphertext: bytes,
-    ) -> dict[str, str]:
+    ) -> dict[str, str | None]:
         plaintext = bytearray(
             self._decrypt(
                 nonce,
@@ -1375,7 +1503,21 @@ class SqliteLilaStore:
             self._validate_model_selection(provider_id, model_id)
             if self._resource_key("provider", provider_id, 64) != provider_key:
                 raise TypeError("provider identifier does not match its authenticated index")
-            return {"provider_id": provider_id, "model_id": model_id}
+            result: dict[str, str | None] = {
+                "provider_id": provider_id,
+                "model_id": model_id,
+            }
+            fallback_provider_id = payload.get("fallback_provider_id")
+            fallback_model_id = payload.get("fallback_model_id")
+            if (fallback_provider_id is None) != (fallback_model_id is None):
+                raise TypeError("fallback provider and model must be stored together")
+            if fallback_provider_id is not None:
+                self._validate_model_selection(fallback_provider_id, fallback_model_id)
+                if fallback_provider_id == provider_id:
+                    raise TypeError("fallback provider must differ from primary provider")
+                result["fallback_provider_id"] = fallback_provider_id
+                result["fallback_model_id"] = fallback_model_id
+            return result
         except LilaStoreIntegrityError:
             raise
         except Exception:
@@ -1392,16 +1534,34 @@ class SqliteLilaStore:
         conversation_id: str,
         provider_id: str,
         model_id: str,
+        fallback_provider_id: str | None = None,
+        fallback_model_id: str | None = None,
     ) -> None:
-        """Persist an explicit owner-scoped provider/model selection for one conversation."""
+        """Persist an encrypted owner-scoped primary and optional fallback selection."""
         self._validate_model_selection(provider_id, model_id)
+        if (fallback_provider_id is None) != (fallback_model_id is None):
+            raise ValueError("fallback provider and model must be configured together")
+        if fallback_provider_id is not None:
+            self._validate_model_selection(fallback_provider_id, fallback_model_id)
+            if fallback_provider_id == provider_id:
+                raise ValueError("fallback must use a different provider")
         await self.initialize()
         owner_key = self._owner_key(principal_id)
         conversation_key = self._resource_key("conversation", conversation_id, 128)
         provider_key = self._resource_key("provider", provider_id, 64)
+        fallback_provider_key = (
+            self._resource_key("provider", fallback_provider_id, 64)
+            if fallback_provider_id is not None else None
+        )
+        selection_payload = {"provider_id": provider_id, "model_id": model_id}
+        if fallback_provider_id is not None:
+            selection_payload.update({
+                "fallback_provider_id": fallback_provider_id,
+                "fallback_model_id": fallback_model_id,
+            })
         payload = bytearray(
             json.dumps(
-                {"provider_id": provider_id, "model_id": model_id},
+                selection_payload,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -1418,6 +1578,7 @@ class SqliteLilaStore:
             owner_key,
             conversation_key,
             provider_key,
+            fallback_provider_key,
             nonce,
             ciphertext,
         )
@@ -1427,6 +1588,7 @@ class SqliteLilaStore:
         owner_key: str,
         conversation_key: str,
         provider_key: str,
+        fallback_provider_key: str | None,
         nonce: bytes,
         ciphertext: bytes,
     ) -> None:
@@ -1445,6 +1607,25 @@ class SqliteLilaStore:
                 )
                 if not provider["enabled"]:
                     raise ProviderDisabled("Provider is disabled")
+                if fallback_provider_key is not None:
+                    if fallback_provider_key == provider_key:
+                        raise ValueError("fallback must use a different provider")
+                    fallback_row = connection.execute(
+                        "SELECT nonce, ciphertext FROM lila_providers WHERE owner_key=? AND provider_key=?",
+                        (owner_key, fallback_provider_key),
+                    ).fetchone()
+                    if fallback_row is None:
+                        raise ProviderNotFound("Fallback provider not found for owner")
+                    fallback_provider = self._decode_provider(
+                        owner_key,
+                        fallback_provider_key,
+                        fallback_row["nonce"],
+                        fallback_row["ciphertext"],
+                    )
+                    if not fallback_provider["enabled"]:
+                        raise ProviderDisabled("Fallback provider is disabled")
+                    if "chat" not in fallback_provider.get("capabilities", []):
+                        raise ValueError("Fallback provider does not support chat")
                 now = int(time.time() * 1000)
                 connection.execute(
                     """INSERT INTO lila_conversation_models(
@@ -1471,7 +1652,7 @@ class SqliteLilaStore:
         *,
         principal_id: str,
         conversation_id: str,
-    ) -> dict[str, str] | None:
+    ) -> dict[str, str | None] | None:
         await self.initialize()
         owner_key = self._owner_key(principal_id)
         conversation_key = self._resource_key("conversation", conversation_id, 128)

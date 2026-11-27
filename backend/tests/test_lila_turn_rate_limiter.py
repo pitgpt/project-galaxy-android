@@ -83,6 +83,24 @@ def test_redis_lila_limiter_uses_hashed_owner_keys_and_separate_namespace():
     assert daily_ttl > minute_ttl
 
 
+def test_redis_lila_limiter_supports_a_separate_image_read_namespace():
+    redis = FakeRedis()
+    limiter = RedisLilaTurnRateLimiter(
+        redis,
+        limit=120,
+        daily_limit=2000,
+        key_prefix="galaxy:lila:image-reads",
+    )
+
+    run(limiter.check("user-a"))
+    minute_key, daily_key, _minute_ttl, _daily_ttl = redis.calls[0]
+    assert minute_key.startswith("galaxy:lila:image-reads:{")
+    assert daily_key.startswith("galaxy:lila:image-reads:{")
+    assert minute_key.split("}", 1)[0] == daily_key.split("}", 1)[0]
+    assert "user-a" not in minute_key
+    assert "user-a" not in daily_key
+
+
 def test_redis_lila_limiter_enforces_daily_turn_limit():
     redis = FakeRedis()
     limiter = RedisLilaTurnRateLimiter(redis, limit=10, daily_limit=1)

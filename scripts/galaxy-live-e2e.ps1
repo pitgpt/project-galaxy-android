@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 Runs one authenticated live Galaxy-to-Lila model turn using the same owner/character
@@ -6,8 +6,10 @@ conversation ID that Galaxy Android derives locally.
 
 .DESCRIPTION
 This is an executable Windows validation harness, not a deployment script.
-It requires an HTTPS Lila backend and a running model server reachable FROM THE
-BACKEND process/container. It never writes tokens or provider keys to disk or logs.
+It requires HTTPS for remote Lila backends. For local Docker Compose, HTTP is
+allowed only on loopback (the Compose backend port is bound to 127.0.0.1:8000).
+The model server must be reachable FROM THE BACKEND process/container. It never
+writes tokens or provider keys to disk or logs.
 
 Default local target is LM Studio on Windows behind Docker Desktop:
   http://host.docker.internal:1234/v1
@@ -523,31 +525,88 @@ function ConvertTo-EncodedPathSegment {
     return [Uri]::EscapeDataString($Value)
 }
 
-# Verify the deterministic ID algorithm against a fixed vector before using credentials.
+function Get-ValidatedBackendUri {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $parsed = $null
+    try {
+        $parsed = [Uri]::new($Value.Trim())
+    }
+    catch {
+        throw 'BackendBaseUrl must be an absolute HTTPS URL or loopback HTTP URL.'
+    }
+
+    $loopbackHttp = $parsed.Scheme -eq 'http' -and $parsed.IsLoopback
+    if (-not $parsed.IsAbsoluteUri -or
+        ($parsed.Scheme -ne 'https' -and -not $loopbackHttp) -or
+        -not [string]::IsNullOrWhiteSpace($parsed.UserInfo) -or
+        -not [string]::IsNullOrWhiteSpace($parsed.Query) -or
+        -not [string]::IsNullOrWhiteSpace($parsed.Fragment) -or
+        $parsed.AbsolutePath.Trim('/') -ne '') {
+        throw 'BackendBaseUrl must use HTTPS, except HTTP on loopback for local development; credentials, query, fragment, and paths are not allowed.'
+    }
+
+    return $parsed
+}
+
+function Test-BackendUrlPolicy {
+    $https = Get-ValidatedBackendUri -Value 'https://lila.example.invalid'
+    if ($https.Scheme -ne 'https') {
+        throw 'The HTTPS backend URL was not accepted.'
+    }
+
+    $ipv4Loopback = Get-ValidatedBackendUri -Value 'http://127.0.0.1:8000'
+    if ($ipv4Loopback.Scheme -ne 'http' -or -not $ipv4Loopback.IsLoopback) {
+        throw 'The IPv4 loopback backend URL was not accepted.'
+    }
+
+    $localhost = Get-ValidatedBackendUri -Value 'http://localhost:8000'
+    if (-not $localhost.IsLoopback) {
+        throw 'The localhost backend URL was not accepted.'
+    }
+
+    $ipv6Loopback = Get-ValidatedBackendUri -Value 'http://[::1]:8000'
+    if (-not $ipv6Loopback.IsLoopback) {
+        throw 'The IPv6 loopback backend URL was not accepted.'
+    }
+
+    $rejectedUrls = @(
+        'http://example.invalid',
+        'http://host.docker.internal:8000',
+        'http://192.168.1.10:8000',
+        'http://127.0.0.1:8000/api',
+        'http://user@127.0.0.1:8000',
+        'http://127.0.0.1:8000/?token=secret'
+    )
+    foreach ($candidate in $rejectedUrls) {
+        $rejected = $false
+        try {
+            Get-ValidatedBackendUri -Value $candidate | Out-Null
+        }
+        catch {
+            $rejected = $true
+        }
+        if (-not $rejected) {
+            throw 'The backend URL policy accepted a non-loopback HTTP or non-origin URL.'
+        }
+    }
+}
+
+# Verify URL policy and deterministic IDs before using credentials.
+Test-BackendUrlPolicy
 Test-ConversationIdDerivation
 Test-BoundedResponseRead
 if ($SelfTest) {
+    Write-Host 'Backend URL policy (HTTPS + loopback-only HTTP): PASS'
     Write-Host 'Galaxy Android conversation-ID compatibility: PASS'
     Write-Host 'Bounded HTTP response reader: PASS'
     exit 0
 }
 
 if ([string]::IsNullOrWhiteSpace($BackendBaseUrl)) {
-    $BackendBaseUrl = Read-Host 'Lila backend HTTPS base URL (for example https://lila.example.com)'
+    $BackendBaseUrl = Read-Host 'Lila backend URL (HTTPS remote, or http://127.0.0.1:8000 for local Compose)'
 }
-try {
-    $backendUri = [Uri]::new($BackendBaseUrl)
-}
-catch {
-    throw 'BackendBaseUrl must be a valid absolute HTTPS URL.'
-}
-if ($backendUri.Scheme -ne 'https' -or
-    -not [string]::IsNullOrWhiteSpace($backendUri.UserInfo) -or
-    -not [string]::IsNullOrWhiteSpace($backendUri.Query) -or
-    -not [string]::IsNullOrWhiteSpace($backendUri.Fragment) -or
-    $backendUri.AbsolutePath.Trim('/') -ne '') {
-    throw 'BackendBaseUrl must be an HTTPS origin without credentials, query, fragment, or path.'
-}
+$backendUri = Get-ValidatedBackendUri -Value $BackendBaseUrl
 $script:BackendBaseUrl = $backendUri.AbsoluteUri.TrimEnd('/')
 
 if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl)) {

@@ -1,12 +1,14 @@
+import json
 import logging
 import time
 import uuid
 from uuid import UUID
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from .lila_core.contracts import (
@@ -45,9 +47,28 @@ from .lila_core.service import CoreTurnService, ModelAdapterContractError
 from .lila_core.provider_routing import (
     OwnerScopedModelAdapterResolver,
     ProviderSelectionRequired,
+    SelectedFallbackProviderUnavailable,
     SelectedProviderUnavailable,
     create_provider_model_adapter,
 )
+from .lila_core.image_generation import (
+    ComfyUiFailure,
+    ComfyUiProviderConfigRequest,
+    ImageGenerationHistoryResponse,
+    ImageGenerationJobResponse,
+    ImageGenerationRequest,
+    ImageProviderConnectionTestResponse,
+    ImageProviderConfigurationResponse,
+    ImageProviderNotConfigured,
+    ImageProviderSummary,
+    ImageJobNotCancellable,
+)
+from .lila_core.image_store import (
+    ImageIdempotencyConflict,
+    ImageJobNotFound,
+    SqliteLilaImageStore,
+)
+from .lila_core.image_generation import LilaImageGenerationService
 from .lila_core.sqlite_store import (
     ProviderAlreadyExists,
     ProviderDisabled,
@@ -75,6 +96,31 @@ VOICE_ID_ALIASES = {
     "voice.feminine_calm": "shimmer",
     "voice.neutral": "alloy",
 }
+
+
+MAX_REALTIME_SESSION_RESPONSE_BYTES = 16 * 1024
+
+
+async def _read_bounded_json_response(response: httpx.Response, max_bytes: int) -> Any:
+    """Read and parse a small upstream JSON response without unbounded buffering."""
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except (TypeError, ValueError):
+            raise ValueError("Unexpected provider response") from None
+        if declared_length < 0 or declared_length > max_bytes:
+            raise ValueError("Realtime provider response exceeds size limit")
+
+    raw = bytearray()
+    try:
+        async for chunk in response.aiter_bytes(chunk_size=4096):
+            if len(raw) + len(chunk) > max_bytes:
+                raise ValueError("Realtime provider response exceeds size limit")
+            raw.extend(chunk)
+        return json.loads(raw)
+    finally:
+        raw[:] = b"\x00" * len(raw)
 
 
 SERVER_INSTRUCTIONS = (
@@ -144,10 +190,18 @@ def create_app(
     lila_store: Any | None = None,
     lila_memory_reader: Any | None = None,
     lila_memory_writer: Any | None = None,
+    lila_image_store: SqliteLilaImageStore | None = None,
+    lila_image_service: LilaImageGenerationService | None = None,
+    lila_image_read_rate_limiter: Any | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.settings = settings or Settings.from_env()
+        if app.state.lila_provider_http_client_factory is None:
+            app.state.lila_provider_http_client_factory = partial(
+                create_provider_http_client,
+                local_allowed_ports=app.state.settings.lila_local_provider_ports,
+            )
         app.state.http_client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0))
         app.state.owns_http_client = http_client is None
         app.state.authenticator = authenticator or JwtAuthenticator(app.state.settings)
@@ -212,12 +266,36 @@ def create_app(
                 app.state.settings.lila_turns_per_day,
             )
 
+        if app.state.settings.environment == "production":
+            app.state.lila_image_read_rate_limiter = RedisLilaTurnRateLimiter(
+                app.state.redis,
+                app.state.settings.lila_image_reads_per_minute,
+                app.state.settings.lila_image_reads_per_day,
+                key_prefix="galaxy:lila:image-reads",
+            )
+        elif lila_image_read_rate_limiter is not None:
+            app.state.lila_image_read_rate_limiter = lila_image_read_rate_limiter
+        elif app.state.redis is not None:
+            app.state.lila_image_read_rate_limiter = RedisLilaTurnRateLimiter(
+                app.state.redis,
+                app.state.settings.lila_image_reads_per_minute,
+                app.state.settings.lila_image_reads_per_day,
+                key_prefix="galaxy:lila:image-reads",
+            )
+        else:
+            app.state.lila_image_read_rate_limiter = InMemoryLilaTurnRateLimiter(
+                app.state.settings.lila_image_reads_per_minute,
+                app.state.settings.lila_image_reads_per_day,
+            )
+
         app.state.lila_store = lila_store
         app.state.lila_history_reader = lila_history_reader
         app.state.lila_memory_reader = lila_memory_reader or lila_store
         app.state.lila_memory_writer = lila_memory_writer or lila_store
         app.state.lila_provider_adapter = lila_provider_adapter
         app.state.lila_provider_registry = lila_provider_registry
+        app.state.lila_image_store = lila_image_store
+        app.state.lila_image_service = lila_image_service
         if (
             lila_core_service is None
             and app.state.settings.lila_configuration_requested
@@ -267,6 +345,7 @@ def create_app(
                 default_adapter=default_adapter,
                 system_prompt=app.state.settings.lila_system_prompt,
                 http_client_factory=app.state.lila_provider_http_client_factory,
+                local_allowed_ports=app.state.settings.lila_local_provider_ports,
             )
             app.state.lila_core_service = CoreTurnService(
                 ContextAssembler(store, store),
@@ -282,6 +361,19 @@ def create_app(
             app.state.lila_core_service = None
             app.state.lila_provider_adapter = lila_provider_adapter
 
+        image_store = lila_image_store
+        if image_store is None and app.state.settings.lila_storage_is_configured:
+            image_store = SqliteLilaImageStore(
+                app.state.settings.lila_database_path,
+                app.state.settings.lila_storage_encryption_key,
+            )
+        if image_store is not None:
+            await image_store.initialize()
+        app.state.lila_image_store = image_store
+        app.state.lila_image_service = lila_image_service or (
+            LilaImageGenerationService(image_store) if image_store is not None else None
+        )
+
         yield
         if app.state.redis is not None:
             await app.state.redis.aclose()
@@ -296,9 +388,10 @@ def create_app(
     app.state.lila_memory_writer = lila_memory_writer or lila_store
     app.state.lila_provider_adapter = lila_provider_adapter
     app.state.lila_provider_registry = lila_provider_registry
-    app.state.lila_provider_http_client_factory = (
-        lila_provider_http_client_factory or create_provider_http_client
-    )
+    app.state.lila_image_store = lila_image_store
+    app.state.lila_image_service = lila_image_service
+    app.state.lila_image_read_rate_limiter = lila_image_read_rate_limiter
+    app.state.lila_provider_http_client_factory = lila_provider_http_client_factory
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
@@ -426,6 +519,11 @@ def create_app(
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
     ):
+        if not memory_id.strip() or len(memory_id) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Lila memory identifier is invalid",
+            )
         writer = await require_lila_memory_component(request, user_id, writer=True)
         try:
             memory = MemorySnippet(memory_id=memory_id, content=payload.content)
@@ -451,19 +549,14 @@ def create_app(
     async def search_lila_memories(
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
-        query: str = Query(min_length=1, max_length=512),
+        query: str = Query(default="", max_length=512),
         limit: int = Query(default=8, ge=1, le=20),
     ):
         reader = await require_lila_memory_component(request, user_id, writer=False)
-        if not query.strip():
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Lila memory search query is invalid",
-            )
         try:
             records = await reader.search_relevant_memories(
                 principal_id=user_id,
-                query=query,
+                query=query.strip(),
                 limit=limit,
             )
             memories = [MemorySnippet.model_validate(record) for record in records]
@@ -484,12 +577,12 @@ def create_app(
         request: Request,
         user_id: Annotated[str, Depends(current_user)],
     ):
-        writer = await require_lila_memory_component(request, user_id, writer=True)
         if not memory_id.strip() or len(memory_id) > 128:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Lila memory identifier is invalid",
             )
+        writer = await require_lila_memory_component(request, user_id, writer=True)
         try:
             deleted = await writer.delete_memory(
                 principal_id=user_id,
@@ -544,8 +637,13 @@ def create_app(
         capabilities: list[str],
         enabled: bool,
         system_prompt: str,
+        local_allowed_ports: frozenset[int],
     ) -> dict[str, object]:
-        validate_provider_endpoint(provider_type, base_url)
+        validate_provider_endpoint(
+            provider_type,
+            base_url,
+            local_allowed_ports=local_allowed_ports,
+        )
         # Reuse the adapter's strict URL, identifier, credential and timeout
         # validation without making an outbound request.
         OpenAICompatibleConfig(
@@ -604,6 +702,7 @@ def create_app(
                 capabilities=list(payload.capabilities),
                 enabled=payload.enabled,
                 system_prompt=request.app.state.settings.lila_system_prompt,
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
             )
             await registry.save_provider(
                 principal_id=user_id, provider=record, create_only=True
@@ -666,6 +765,7 @@ def create_app(
                 capabilities=list(payload.capabilities),
                 enabled=payload.enabled,
                 system_prompt=request.app.state.settings.lila_system_prompt,
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
             )
             await registry.save_provider(
                 principal_id=user_id, provider=record, create_only=False
@@ -763,7 +863,11 @@ def create_app(
 
         try:
             provider_type = str(record["provider_type"])
-            validate_provider_endpoint(provider_type, str(record["base_url"]))
+            validate_provider_endpoint(
+                provider_type,
+                str(record["base_url"]),
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
+            )
             config = OpenAICompatibleConfig(
                 provider_id=str(record["provider_id"]),
                 base_url=str(record["base_url"]),
@@ -876,7 +980,11 @@ def create_app(
                 timeout_seconds=timeout_seconds,
                 system_prompt=request.app.state.settings.lila_system_prompt,
             )
-            validate_provider_endpoint(provider_type, config.base_url)
+            validate_provider_endpoint(
+                provider_type,
+                config.base_url,
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
+            )
         except (KeyError, TypeError, ValueError):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -983,6 +1091,8 @@ def create_app(
             selected=True,
             provider_id=selection["provider_id"],
             model_id=selection["model_id"],
+            fallback_provider_id=selection.get("fallback_provider_id"),
+            fallback_model_id=selection.get("fallback_model_id"),
         )
 
     @app.put(
@@ -1025,7 +1135,11 @@ def create_app(
 
         try:
             provider_type = str(record["provider_type"])
-            validate_provider_endpoint(provider_type, str(record["base_url"]))
+            validate_provider_endpoint(
+                provider_type,
+                str(record["base_url"]),
+                local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
+            )
             config = OpenAICompatibleConfig(
                 provider_id=payload.provider_id,
                 base_url=str(record["base_url"]),
@@ -1068,12 +1182,91 @@ def create_app(
                 status_code=422,
                 detail="The selected model is not available from this provider",
             )
+
+        if payload.fallback_provider_id is not None:
+            fallback_model_id = payload.fallback_model_id
+            if fallback_model_id is None:
+                raise HTTPException(status_code=422, detail="Fallback model is required")
+            try:
+                fallback_record = await registry.get_provider(
+                    principal_id=user_id,
+                    provider_id=payload.fallback_provider_id,
+                )
+            except Exception:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Lila fallback provider catalog is temporarily unavailable",
+                    headers={"Retry-After": "5"},
+                ) from None
+            if fallback_record is None:
+                raise HTTPException(status_code=404, detail="Lila fallback provider not found")
+            if not fallback_record.get("enabled"):
+                raise HTTPException(status_code=409, detail="Lila fallback provider is disabled")
+            if "chat" not in fallback_record.get("capabilities", []):
+                raise HTTPException(status_code=422, detail="Lila fallback provider does not support chat")
+            try:
+                fallback_type = str(fallback_record["provider_type"])
+                fallback_url = str(fallback_record["base_url"])
+                fallback_timeout = float(fallback_record["timeout_seconds"])
+                validate_provider_endpoint(
+                    fallback_type,
+                    fallback_url,
+                    local_allowed_ports=request.app.state.settings.lila_local_provider_ports,
+                )
+                fallback_config = OpenAICompatibleConfig(
+                    provider_id=payload.fallback_provider_id,
+                    base_url=fallback_url,
+                    model_id=fallback_model_id,
+                    api_key=fallback_record.get("api_key"),
+                    timeout_seconds=fallback_timeout,
+                    system_prompt=request.app.state.settings.lila_system_prompt,
+                )
+                fallback_client = request.app.state.lila_provider_http_client_factory(
+                    fallback_type,
+                    fallback_timeout,
+                )
+                async with fallback_client:
+                    fallback_adapter = create_provider_model_adapter(
+                        fallback_client, fallback_type, fallback_config
+                    )
+                    fallback_discovered = await fallback_adapter.discover_models()
+            except ModelProviderConfigurationError as exc:
+                raise HTTPException(status_code=502, detail=exc.public_detail) from None
+            except ModelProviderUnavailable:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Lila fallback model endpoint is temporarily unavailable",
+                    headers={"Retry-After": "5"},
+                ) from None
+            except ModelAdapterContractError:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Lila fallback provider returned an invalid model catalog",
+                ) from None
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Stored Lila fallback provider configuration is invalid",
+                ) from None
+            except Exception:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Lila fallback model selection is temporarily unavailable",
+                    headers={"Retry-After": "5"},
+                ) from None
+            if fallback_discovered is not None and fallback_model_id not in fallback_discovered:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The selected fallback model is not available from this provider",
+                )
         try:
             await store.set_conversation_model(
                 principal_id=user_id,
                 conversation_id=conversation_id,
                 provider_id=payload.provider_id,
                 model_id=payload.model_id,
+                fallback_provider_id=payload.fallback_provider_id,
+                fallback_model_id=payload.fallback_model_id,
             )
         except ProviderNotFound:
             raise HTTPException(status_code=404, detail="Lila provider not found") from None
@@ -1093,6 +1286,8 @@ def create_app(
             selected=True,
             provider_id=payload.provider_id,
             model_id=payload.model_id,
+            fallback_provider_id=payload.fallback_provider_id,
+            fallback_model_id=payload.fallback_model_id,
         )
 
     @app.post(
@@ -1208,6 +1403,286 @@ def create_app(
             response=response,
         )
 
+
+    async def require_lila_image_service(request: Request, user_id: str):
+        service = request.app.state.lila_image_service
+        if service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image generation is not configured",
+            )
+        return service
+
+    async def check_lila_image_rate_limit(request: Request, user_id: str):
+        try:
+            await request.app.state.lila_turn_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image service is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    async def check_lila_image_read_rate_limit(request: Request, user_id: str):
+        try:
+            await request.app.state.lila_image_read_rate_limiter.check(user_id)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image reads are temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get(
+        "/v1/lila/image-providers/comfyui",
+        response_model=ImageProviderSummary,
+    )
+    async def get_lila_comfyui_provider(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
+        try:
+            return await service.provider_summary(principal_id=user_id)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image provider settings are temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get(
+        "/v1/lila/image-providers/comfyui/config",
+        response_model=ImageProviderConfigurationResponse,
+    )
+    async def get_lila_comfyui_provider_configuration(
+        request: Request,
+        response: Response,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return await service.provider_configuration(principal_id=user_id)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image provider configuration is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.put(
+        "/v1/lila/image-providers/comfyui",
+        response_model=ImageProviderSummary,
+    )
+    async def put_lila_comfyui_provider(
+        payload: ComfyUiProviderConfigRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_rate_limit(request, user_id)
+        try:
+            return await service.configure_provider(principal_id=user_id, payload=payload)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="ComfyUI provider configuration is invalid or outside the local endpoint allowlist",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image provider settings could not be saved",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.post(
+        "/v1/lila/image-providers/comfyui/test",
+        response_model=ImageProviderConnectionTestResponse,
+    )
+    async def test_lila_comfyui_provider(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_rate_limit(request, user_id)
+        try:
+            return await service.test_provider(principal_id=user_id)
+        except ImageProviderNotConfigured:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Configure a ComfyUI endpoint and workflow before testing the provider",
+            ) from None
+        except ComfyUiFailure:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="ComfyUI connection test failed",
+                headers={"Retry-After": "5"},
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="ComfyUI connection test is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.post(
+        "/v1/lila/images",
+        response_model=ImageGenerationJobResponse,
+    )
+    async def create_lila_image(
+        payload: ImageGenerationRequest,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+        idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_rate_limit(request, user_id)
+        try:
+            return await service.submit(
+                principal_id=user_id,
+                idempotency_key=str(idempotency_key),
+                request=payload,
+            )
+        except ImageProviderNotConfigured:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Configure a ComfyUI image provider before generating an image",
+            ) from None
+        except ImageIdempotencyConflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Idempotency-Key was already used for a different image request",
+            ) from None
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Image generation request is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image generation is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get(
+        "/v1/lila/images",
+        response_model=ImageGenerationHistoryResponse,
+    )
+    async def get_lila_image_history(
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+        conversation_id: str = Query(min_length=1, max_length=128),
+        limit: int = Query(default=50, ge=1, le=50),
+        cursor: str | None = Query(default=None, max_length=256),
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
+        try:
+            return await service.history(
+                principal_id=user_id,
+                conversation_id=conversation_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Image history request is invalid",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image history is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get(
+        "/v1/lila/images/{job_id}",
+        response_model=ImageGenerationJobResponse,
+    )
+    async def get_lila_image_job(
+        job_id: UUID,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
+        try:
+            return await service.get_job(principal_id=user_id, job_id=str(job_id))
+        except ImageJobNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image job not found") from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image job status is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.post(
+        "/v1/lila/images/{job_id}/cancel",
+        response_model=ImageGenerationJobResponse,
+    )
+    async def cancel_lila_image_job(
+        job_id: UUID,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_rate_limit(request, user_id)
+        try:
+            return await service.cancel(principal_id=user_id, job_id=str(job_id))
+        except ImageJobNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image job not found") from None
+        except ImageJobNotCancellable:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only a confirmed queued ComfyUI image job can be cancelled",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image cancellation is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+
+    @app.get("/v1/lila/images/{job_id}/asset")
+    async def get_lila_image_asset(
+        job_id: UUID,
+        request: Request,
+        user_id: Annotated[str, Depends(current_user)],
+    ):
+        service = await require_lila_image_service(request, user_id)
+        await check_lila_image_read_rate_limit(request, user_id)
+        try:
+            asset = await service.asset(principal_id=user_id, job_id=str(job_id))
+        except ImageJobNotFound:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image asset not found") from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Lila image asset is temporarily unavailable",
+                headers={"Retry-After": "5"},
+            ) from None
+        if asset is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image asset not found")
+        return Response(
+            content=asset["bytes"],
+            media_type=asset["mime_type"],
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Length": str(asset["byte_size"]),
+            },
+        )
+
     @app.post("/v1/lila/turns", response_model=CoreTurnResponse)
     async def create_lila_turn(
         payload: CoreTurnRequest,
@@ -1248,13 +1723,21 @@ def create_app(
         except IdempotentTurnInProgress:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="A turn with this Idempotency-Key is still processing; retry the same request.",
-                headers={"Retry-After": "2"},
+                detail="A turn with this Idempotency-Key is unresolved; query its status before retrying.",
+                headers={
+                    "Retry-After": "2",
+                    "X-Lila-Outcome-Unknown": "true",
+                },
             ) from None
         except ProviderSelectionRequired:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Select a model provider for this conversation before sending a message.",
+            ) from None
+        except SelectedFallbackProviderUnavailable:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The primary provider failed before generation and the configured fallback is unavailable; choose another provider or disable fallback.",
             ) from None
         except SelectedProviderUnavailable:
             raise HTTPException(
@@ -1344,13 +1827,17 @@ def create_app(
         }
 
         try:
-            response = await request.app.state.http_client.post(
+            async with request.app.state.http_client.stream(
+                "POST",
                 "https://api.openai.com/v1/realtime/client_secrets",
                 json=provider_body,
                 headers=headers,
-            )
-            response.raise_for_status()
-            data = response.json()
+            ) as response:
+                response.raise_for_status()
+                data = await _read_bounded_json_response(
+                    response,
+                    MAX_REALTIME_SESSION_RESPONSE_BYTES,
+                )
             secret = data.get("value")
             expires_at = data.get("expires_at")
             provider_session_id = (data.get("session") or {}).get("id")

@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -126,6 +127,8 @@ class HttpLilaProviderCatalogTest {
                 .put("selected", true)
                 .put("provider_id", "cloud-main")
                 .put("model_id", "model-b")
+                .put("fallback_provider_id", "cloud-backup")
+                .put("fallback_model_id", "backup-model")
                 .toString()
         )
         val connections = mutableListOf<FakeConnection>()
@@ -140,7 +143,9 @@ class HttpLilaProviderCatalogTest {
         )
 
         val probe = catalog.probeProvider("cloud-main")
-        val selection = catalog.setConversationModel("conversation-1", "cloud-main", "model-b")
+        val selection = catalog.setConversationModel(
+            "conversation-1", "cloud-main", "model-b", "cloud-backup", "backup-model"
+        )
 
         assertTrue(probe.connectionReachable)
         assertTrue(probe.modelDiscoverySupported)
@@ -148,10 +153,14 @@ class HttpLilaProviderCatalogTest {
         assertFalse(probe.chatCompletionVerified)
         assertTrue(selection.selected)
         assertEquals("model-b", selection.modelId)
+        assertEquals("cloud-backup", selection.fallbackProviderId)
+        assertEquals("backup-model", selection.fallbackModelId)
         assertEquals("PUT", selectionConnection.requestMethod)
         val request = JSONObject(String(selectionConnection.requestBody.toByteArray(), Charsets.UTF_8))
         assertEquals("cloud-main", request.getString("provider_id"))
         assertEquals("model-b", request.getString("model_id"))
+        assertEquals("cloud-backup", request.getString("fallback_provider_id"))
+        assertEquals("backup-model", request.getString("fallback_model_id"))
         assertTrue(connections.all { it.disconnected })
     }
 
@@ -165,6 +174,8 @@ class HttpLilaProviderCatalogTest {
                 .put("selected", true)
                 .put("provider_id", "local-main")
                 .put("model_id", "qwen-local")
+                .put("fallback_provider_id", "cloud-backup")
+                .put("fallback_model_id", "backup-model")
                 .toString()
         )
         val catalog = HttpLilaProviderCatalog(
@@ -178,6 +189,8 @@ class HttpLilaProviderCatalogTest {
         assertTrue(selection.selected)
         assertEquals("local-main", selection.providerId)
         assertEquals("qwen-local", selection.modelId)
+        assertEquals("cloud-backup", selection.fallbackProviderId)
+        assertEquals("backup-model", selection.fallbackModelId)
         assertEquals("GET", connection.requestMethod)
         assertTrue(connection.disconnected)
     }
@@ -300,6 +313,29 @@ class HttpLilaProviderCatalogTest {
         assertFalse(ambiguousError.message.orEmpty().contains("provider-secret"))
     }
 
+    @Test
+    fun imageTransportSendsIdempotencyAndBoundsBinaryAssets() = runBlocking {
+        val requestId = "00000000-0000-0000-0000-000000000002"
+        val submitConnection = FakeConnection(URL("https://api.example.test/v1/lila/images"), 200, "{}")
+        val catalog = HttpLilaProviderCatalog("https://api.example.test", GalaxyAccessTokenProvider { "token" }, connectionFactory = { submitConnection })
+        catalog.requestJson("POST", "/v1/lila/images", JSONObject().put("conversation_id", "00000000-0000-0000-0000-000000000001"), idempotencyKey = requestId)
+        assertEquals(requestId, submitConnection.requestHeaders["Idempotency-Key"])
+        assertTrue(submitConnection.disconnected)
+        val bytes = byteArrayOf(1, 2, 3, 4)
+        val imageConnection = FakeConnection(URL("https://api.example.test/v1/lila/images/00000000-0000-0000-0000-000000000003/asset"), 200, "", mapOf("Content-Type" to "image/png", "Content-Length" to "4"), bytes)
+        val imageCatalog = HttpLilaProviderCatalog("https://api.example.test", GalaxyAccessTokenProvider { "token" }, connectionFactory = { imageConnection })
+        val result = imageCatalog.requestBinary("/v1/lila/images/00000000-0000-0000-0000-000000000003/asset", 4, "image/png")
+        assertEquals("image/png", result.contentType)
+        assertArrayEquals(bytes, result.bytes)
+        result.bytes.fill(0)
+        assertTrue(imageConnection.disconnected)
+        val oversizedConnection = FakeConnection(URL("https://api.example.test/v1/lila/images/00000000-0000-0000-0000-000000000003/asset"), 200, "", mapOf("Content-Type" to "image/png", "Content-Length" to "5"), byteArrayOf(1,2,3,4,5))
+        val oversizedCatalog = HttpLilaProviderCatalog("https://api.example.test", GalaxyAccessTokenProvider { "token" }, connectionFactory = { oversizedConnection })
+        val error = expectApiError { oversizedCatalog.requestBinary("/v1/lila/images/00000000-0000-0000-0000-000000000003/asset", 4, "image/png") }
+        assertTrue(error.message.orEmpty().contains("размер"))
+        assertTrue(oversizedConnection.disconnected)
+    }
+
     private suspend fun expectApiError(block: suspend () -> Unit): GalaxyApiException {
         try {
             block()
@@ -323,7 +359,8 @@ class HttpLilaProviderCatalogTest {
         url: URL,
         private val status: Int,
         private val response: String,
-        private val responseHeaders: Map<String, String> = emptyMap()
+        private val responseHeaders: Map<String, String> = emptyMap(),
+        private val responseBytes: ByteArray? = null
     ) : HttpURLConnection(url) {
         val requestBody = ByteArrayOutputStream()
         val requestHeaders = mutableMapOf<String, String>()
@@ -334,7 +371,7 @@ class HttpLilaProviderCatalogTest {
         override fun usingProxy(): Boolean = false
         override fun getOutputStream(): OutputStream = requestBody
         override fun getInputStream(): InputStream =
-            ByteArrayInputStream(response.toByteArray(Charsets.UTF_8))
+            ByteArrayInputStream(responseBytes ?: response.toByteArray(Charsets.UTF_8))
         override fun getResponseCode(): Int = status
         override fun getHeaderField(name: String): String? = responseHeaders[name]
         override fun setRequestProperty(key: String, value: String) {
