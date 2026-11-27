@@ -3,6 +3,7 @@ package com.pitgpt.galaxy.data.local
 import android.content.Context
 import android.util.Base64
 import androidx.room.Room
+import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import java.io.File
@@ -161,6 +162,7 @@ object GalaxyDatabaseFactory {
                         GalaxyDatabase::class.java,
                         DATABASE_NAME
                     )
+                        .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
                         .openHelperFactory(ZeroizingSqlCipherOpenHelperFactory(passphraseProvider))
                         .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                         .build()
