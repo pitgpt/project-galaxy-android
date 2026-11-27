@@ -98,6 +98,7 @@ def main() -> None:
     llama_cpp_url = os.environ["LILA_LIVE_LLAMA_CPP_URL"].rstrip("/")
     model_id = os.environ["LILA_LIVE_OLLAMA_MODEL"]
     llama_cpp_model_id = os.environ["LILA_LIVE_LLAMA_CPP_MODEL"]
+    comfyui_url = os.environ["LILA_LIVE_COMFYUI_URL"].rstrip("/")
     redis_url = os.environ["REDIS_URL"]
     tls_cert = os.environ["LILA_ANDROID_E2E_TLS_CERT"]
     tls_key = os.environ["LILA_ANDROID_E2E_TLS_KEY"]
@@ -133,6 +134,16 @@ def main() -> None:
         parsed_llama_cpp.fragment,
     ) != ("http", "127.0.0.1", 8080, "/v1", "", ""):
         raise RuntimeError("The Android E2E llama.cpp endpoint must use the isolated local server")
+    parsed_comfyui = urlsplit(comfyui_url)
+    if (
+        parsed_comfyui.scheme,
+        parsed_comfyui.hostname,
+        parsed_comfyui.port,
+        parsed_comfyui.path,
+        parsed_comfyui.query,
+        parsed_comfyui.fragment,
+    ) != ("http", "127.0.0.1", 8188, "", "", ""):
+        raise RuntimeError("The Android E2E ComfyUI endpoint must use the isolated local CPU server")
     if (
         not model_id.strip()
         or not llama_cpp_model_id.strip()
@@ -207,6 +218,7 @@ def main() -> None:
         "second_provider_base_url": llama_cpp_url,
         "model_id": model_id,
         "second_model_id": llama_cpp_model_id,
+        "comfyui_base_url": comfyui_url,
     }
     descriptor = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:

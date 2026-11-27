@@ -124,9 +124,9 @@ jobs:
           .\scripts\lila-comfyui-live-e2e.ps1 -SelfTest
 
   live-ollama-e2e:
-    name: Live Ollama + llama.cpp model E2E
+    name: Live Ollama + llama.cpp + ComfyUI Android companion E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       RUN_LILA_ANDROID_E2E: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/feature/galaxy-lila-comfyui-full-integration') || (github.event_name == 'pull_request' && github.head_ref == 'feature/galaxy-lila-comfyui-full-integration') }}
     steps:
@@ -136,6 +136,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Record backend Python interpreter for the authenticated Core server
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: echo "LILA_BACKEND_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
       - name: Install pinned backend dependencies
         working-directory: backend
         run: |
@@ -256,6 +259,69 @@ jobs:
             echo "Pinned llama.cpp server did not expose the expected model" >&2
             exit 1
           fi
+      - name: Set up Python 3.12 for pinned ComfyUI CPU runtime
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned CPU ComfyUI runtime
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          comfyui_dir="$RUNNER_TEMP/ComfyUI"
+          comfyui_venv="$RUNNER_TEMP/comfyui-venv"
+          python -m venv "$comfyui_venv"
+          "$comfyui_venv/bin/python" -m pip install --upgrade pip
+          "$comfyui_venv/bin/python" -m pip install \
+            torch==2.7.1+cpu torchvision==0.22.1+cpu torchaudio==2.7.1+cpu \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+          git clone --depth 1 --branch v0.46.0 https://github.com/Comfy-Org/ComfyUI.git "$comfyui_dir"
+          test "$(git -C "$comfyui_dir" rev-parse HEAD)" = "a277b5bf213e8a44fa34817b7770b54f86ef4cea"
+          cd "$comfyui_dir"
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          excluded = {"torch", "torchvision", "torchaudio"}
+          kept = []
+          for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                  kept.append(line)
+                  continue
+              match = re.match(r"^([A-Za-z0-9_.-]+)", stripped)
+              package = match.group(1).lower() if match else ""
+              if package not in excluded:
+                  kept.append(line)
+          destination = Path(os.environ["RUNNER_TEMP"]) / "comfyui-requirements-android-e2e.txt"
+          destination.write_text(chr(10).join(kept) + chr(10), encoding="utf-8")
+          PY
+          "$comfyui_venv/bin/python" -m pip install -r "$RUNNER_TEMP/comfyui-requirements-android-e2e.txt"
+      - name: Start pinned ComfyUI CPU API server for Android image E2E
+        if: env.RUN_LILA_ANDROID_E2E == 'true'
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/comfyui-venv/bin/python" "$RUNNER_TEMP/ComfyUI/main.py" \
+            --cpu --listen 127.0.0.1 --port 8188 --disable-auto-launch \
+            > "$RUNNER_TEMP/lila-android-comfyui.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/lila-android-comfyui.pid"
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8188/system_stats >/dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/lila-android-comfyui.pid")" 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            tail -n 160 "$RUNNER_TEMP/lila-android-comfyui.log"
+            echo "Pinned ComfyUI CPU server did not become ready" >&2
+            exit 1
+          fi
       - name: Set up JDK 17 for live Android/Core E2E
         if: env.RUN_LILA_ANDROID_E2E == 'true'
         uses: actions/setup-java@v4
@@ -302,6 +368,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/backend
           LILA_LIVE_OLLAMA_URL: http://127.0.0.1:11434
           LILA_LIVE_LLAMA_CPP_URL: http://127.0.0.1:8080/v1
+          LILA_LIVE_COMFYUI_URL: http://127.0.0.1:8188
           LILA_LIVE_LLAMA_CPP_MODEL: qwen2.5-0.5b-llama-cpp
           LILA_LIVE_OLLAMA_MODEL: qwen2.5:0.5b
           REDIS_URL: redis://127.0.0.1:6379/15
@@ -343,6 +410,11 @@ jobs:
             "$RUNNER_TEMP/lila-qwen2.5-0.5b-instruct-q4_k_m.gguf" \
             "$RUNNER_TEMP/lila-llama-models.json"
           rm -rf "$RUNNER_TEMP/llama.cpp"
+          if [ -f "$RUNNER_TEMP/lila-android-comfyui.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/lila-android-comfyui.pid")" 2>/dev/null || true
+          fi
+          rm -f "$RUNNER_TEMP/lila-android-comfyui.pid" "$RUNNER_TEMP/lila-android-comfyui.log"
+          rm -rf "$RUNNER_TEMP/ComfyUI" "$RUNNER_TEMP/comfyui-venv" "$RUNNER_TEMP/comfyui-requirements-android-e2e.txt"
           docker rm -f lila-live-ollama lila-live-redis 2>/dev/null || true
           docker volume rm lila-live-ollama-models 2>/dev/null || true
 

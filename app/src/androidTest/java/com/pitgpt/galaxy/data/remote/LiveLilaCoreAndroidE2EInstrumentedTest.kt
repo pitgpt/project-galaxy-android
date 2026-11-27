@@ -5,10 +5,18 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.GalaxyApplication
 import com.pitgpt.galaxy.core.model.ConversationMessage
+import com.pitgpt.galaxy.core.model.ImageGenerationRequest
+import com.pitgpt.galaxy.core.model.ImageGenerationState
 import com.pitgpt.galaxy.core.model.MessageRole
+import com.pitgpt.galaxy.core.usecase.PersistGeneratedImageResult
+import com.pitgpt.galaxy.core.usecase.SubmitImageGeneration
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiNodeInput
+import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 import com.pitgpt.galaxy.ui.lilaFallbackNoticeText
 import com.pitgpt.galaxy.ui.mergeRemoteHistory
+import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -79,6 +87,9 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
         val app = InstrumentationRegistry.getInstrumentation()
             .targetContext.applicationContext as GalaxyApplication
         val llamaCppProviderId = requiredString(config, "llama_cpp_provider_id")
+        var generatedImageRequestId: String? = null
+        var generatedImageJobId: String? = null
+        var generatedImageAssetId: String? = null
 
         try {
             val created = catalogStep("create-provider") {
@@ -421,6 +432,136 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertEquals(llamaCppProviderId, restoredFallbackSelection.fallbackProviderId)
             assertEquals(llamaCppModelId, restoredFallbackSelection.fallbackModelId)
 
+            // Generate an image through the same authenticated Core and conversation used
+            // by the real Ollama/llama.cpp chat above. ComfyUI runs as a pinned CPU API
+            // server in this job; this verifies the complete transport/storage path without
+            // claiming SDXL checkpoint inference.
+            val imageProvider = app.lilaCoreImageGenerationProvider
+            val imageWorkflowId = "lila.android-live-empty-image.v1"
+            val imageWorkflowJson = JSONObject()
+                .put(
+                    "1",
+                    JSONObject()
+                        .put("class_type", "EmptyImage")
+                        .put(
+                            "inputs",
+                            JSONObject()
+                                .put("width", 64)
+                                .put("height", 64)
+                                .put("batch_size", 1)
+                                .put("color", 3368652)
+                        )
+                )
+                .put(
+                    "2",
+                    JSONObject()
+                        .put("class_type", "SaveImage")
+                        .put(
+                            "inputs",
+                            JSONObject()
+                                .put("images", org.json.JSONArray().put("1").put(0))
+                                .put("filename_prefix", "lila-android-live")
+                        )
+                )
+                .toString()
+            val imageWorkflow = ComfyUiWorkflowTemplate(
+                id = imageWorkflowId,
+                workflowJson = imageWorkflowJson,
+                positivePrompt = ComfyUiNodeInput("2", "filename_prefix"),
+                width = ComfyUiNodeInput("1", "width"),
+                height = ComfyUiNodeInput("1", "height")
+            ).also { it.validateMappings() }
+            val imageConfiguration = imageProvider.configureProvider(
+                baseUrl = requiredString(config, "comfyui_base_url"),
+                workflow = imageWorkflow,
+                timeoutSeconds = 10.0
+            )
+            assertTrue(imageConfiguration.configured)
+            assertEquals(imageWorkflowId, imageConfiguration.workflowId)
+            val imageProbe = imageProvider.testProvider()
+            assertTrue(imageProbe.connectionReachable)
+            assertEquals(imageWorkflowId, imageProbe.workflowId)
+
+            val imageRequest = ImageGenerationRequest(
+                id = UUID.randomUUID().toString(),
+                conversationId = conversationId,
+                characterId = storageCharacterId,
+                prompt = "lila-android-live-${UUID.randomUUID()}",
+                preferredMimeType = "image/png",
+                workflowId = imageWorkflowId,
+                width = 64,
+                height = 64,
+                createdAtEpochMillis = System.currentTimeMillis()
+            )
+            generatedImageRequestId = imageRequest.id
+            app.imageGenerationRequests.put(imageRequest)
+            val imageJobId = SubmitImageGeneration(imageProvider)(imageRequest)
+            generatedImageJobId = imageJobId
+
+            var imageStatus = imageProvider.status(imageJobId)
+            val imageDeadline = System.currentTimeMillis() + 120_000L
+            while (
+                imageStatus.state != ImageGenerationState.COMPLETED &&
+                imageStatus.state != ImageGenerationState.FAILED &&
+                imageStatus.state != ImageGenerationState.CANCELLED &&
+                System.currentTimeMillis() < imageDeadline
+            ) {
+                delay(500)
+                imageStatus = imageProvider.status(imageJobId)
+            }
+            assertEquals("ComfyUI image job did not complete", ImageGenerationState.COMPLETED, imageStatus.state)
+
+            val imageHistoryJob = imageProvider.history(conversationId)
+                .singleOrNull { it.jobId == imageJobId }
+            assertNotNull("The image job must be visible in the same Core conversation", imageHistoryJob)
+            assertEquals(conversationId, imageHistoryJob!!.conversationId)
+            assertEquals(imageRequest.prompt, imageHistoryJob.prompt)
+            assertEquals("completed", imageHistoryJob.state)
+
+            val storedImage = PersistGeneratedImageResult(imageProvider, app.generatedImages)(
+                imageRequest,
+                imageJobId
+            )
+            generatedImageAssetId = storedImage.assetId
+            assertEquals(imageRequest.id, storedImage.requestId)
+            assertEquals(conversationId, storedImage.conversationId)
+            assertEquals(storageCharacterId, storedImage.characterId)
+            assertEquals(
+                1,
+                app.generatedImages.listForConversation(conversationId)
+                    .count { it.requestId == imageRequest.id }
+            )
+            assertEquals(imageRequest, app.imageGenerationRequests.get(imageRequest.id))
+            val localJob = app.comfyUiJobStore.get(imageJobId)
+            assertNotNull(localJob)
+            assertEquals(imageRequest.id, localJob!!.requestId)
+
+            val persistedBytes = app.generatedImages.read(storedImage.assetId)
+            try {
+                val pngSignature = byteArrayOf(
+                    0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+                )
+                assertTrue(persistedBytes.size >= 24)
+                assertTrue(persistedBytes.copyOfRange(0, 8).contentEquals(pngSignature))
+                fun pngInt(offset: Int): Int =
+                    ((persistedBytes[offset].toInt() and 0xff) shl 24) or
+                        ((persistedBytes[offset + 1].toInt() and 0xff) shl 16) or
+                        ((persistedBytes[offset + 2].toInt() and 0xff) shl 8) or
+                        (persistedBytes[offset + 3].toInt() and 0xff)
+                assertEquals(64, pngInt(16))
+                assertEquals(64, pngInt(20))
+                val digest = MessageDigest.getInstance("SHA-256")
+                    .digest(persistedBytes)
+                    .joinToString("") { "%02x".format(it) }
+                assertEquals(storedImage.sha256, digest)
+                assertEquals(storedImage.byteSize, persistedBytes.size.toLong())
+            } finally {
+                persistedBytes.fill(0)
+            }
+
+            // The text turns and image job share the same stable conversation ID.
+            assertEquals(6, turnProvider.loadAllHistory(conversationId).size)
+
             val integrity = app.database.openHelper.writableDatabase
                 .query("PRAGMA integrity_check").use { cursor ->
                     assertTrue(cursor.moveToFirst())
@@ -429,7 +570,16 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             assertEquals("ok", integrity)
         } finally {
             // The owner and provider are unique to this CI invocation. Remove only
-            // this test's local conversation and provider; the backend DB is ephemeral.
+            // this test's local data; the backend database and ComfyUI runtime are ephemeral.
+            generatedImageAssetId?.let { assetId ->
+                runCatching { app.generatedImages.delete(assetId) }
+            }
+            generatedImageRequestId?.let { requestId ->
+                runCatching { app.imageGenerationRequests.delete(requestId) }
+            }
+            generatedImageJobId?.let { jobId ->
+                runCatching { app.comfyUiJobStore.delete(jobId) }
+            }
             runCatching { app.conversations.clearForCharacter(storageCharacterId) }
             runCatching { catalog.deleteProvider(llamaCppProviderId) }
             runCatching { catalog.deleteProvider(providerId) }

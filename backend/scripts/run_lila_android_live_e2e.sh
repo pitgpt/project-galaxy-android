@@ -36,7 +36,8 @@ adb shell restorecon "/system/etc/security/cacerts/${cert_hash}.0"
 adb reboot
 lila_wait_for_android_framework
 
-nohup python backend/scripts/lila_android_e2e_server.py > "$server_log" 2>&1 < /dev/null &
+backend_python="${LILA_BACKEND_PYTHON:-python}"
+nohup "$backend_python" backend/scripts/lila_android_e2e_server.py > "$server_log" 2>&1 < /dev/null &
 server_pid=$!
 printf '%s\n' "$server_pid" > "$server_pid_file"
 
