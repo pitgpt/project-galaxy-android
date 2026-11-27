@@ -19,7 +19,6 @@ jobs:
           java-version: '17'
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
 
@@ -67,7 +66,6 @@ jobs:
           java-version: '17'
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
       - name: Enable KVM group permissions
         if: hashFiles('app/src/androidTest/**/*') != ''
         run: |
@@ -267,7 +265,6 @@ jobs:
       - name: Set up Gradle for live Android/Core E2E
         if: env.RUN_LILA_ANDROID_E2E == 'true'
         uses: gradle/actions/setup-gradle@v4
-        with:
       - name: Generate ephemeral HTTPS CA and backend certificate
         if: env.RUN_LILA_ANDROID_E2E == 'true'
         run: |
@@ -472,7 +469,6 @@ jobs:
           java-version: '17'
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
       - name: Assemble debug APK
         run: ./gradlew assembleDebug
       - name: Upload debug APK
