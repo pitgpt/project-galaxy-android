@@ -23,14 +23,8 @@ import com.pitgpt.galaxy.data.repository.RoomConversationRepository
 import com.pitgpt.galaxy.data.repository.RoomMemoryRepository
 import com.pitgpt.galaxy.data.repository.RoomGeneratedImageRepository
 import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
-import com.pitgpt.galaxy.data.providers.EncryptedProviderStore
-import com.pitgpt.galaxy.data.providers.ProviderSettingsIo
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiConnectionConfig
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiJobStore
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntime
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiRuntimeFactory
 import com.pitgpt.galaxy.data.providers.comfyui.RoomComfyUiJobStore
-import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 
 /** Application-level composition root for Galaxy's local data and authentication layers. */
 class GalaxyApplication : Application() {
@@ -43,12 +37,9 @@ class GalaxyApplication : Application() {
      * image metadata remains a separate Room concern.
      */
     val mediaStore: EncryptedMediaStore by lazy { EncryptedMediaStore.fromContext(this) }
-    val providerStore: EncryptedProviderStore by lazy { EncryptedProviderStore(this) }
-    private val providerSettingsIo by lazy { ProviderSettingsIo(providerStore) }
     val generatedImages by lazy { RoomGeneratedImageRepository(database.generatedImageDao(), mediaStore) }
     val imageGenerationRequests: ImageGenerationRequestStore by lazy { RoomImageGenerationRequestStore(database.imageGenerationRequestDao()) }
     val comfyUiJobStore: ComfyUiJobStore by lazy { RoomComfyUiJobStore(database.comfyUiJobDao()) }
-    private val comfyUiRuntimeFactory by lazy { ComfyUiRuntimeFactory(comfyUiJobStore, generatedImages) }
     private lateinit var backendConfigStore: EncryptedGalaxyBackendConfigStore
     private var activeBackendConfiguration: GalaxyBackendConfiguration? = null
 
@@ -78,7 +69,11 @@ class GalaxyApplication : Application() {
     val lilaMemoryClient: HttpLilaMemoryClient
         get() = checkNotNull(currentLilaMemoryClient) { "Galaxy application has not been initialized." }
 
-    /** Authenticated image adapter; ComfyUI credentials remain in the Core vault. */
+    /**
+     * Sole production ComfyUI path: Android talks to authenticated Lila Core, and Core
+     * contacts the configured ComfyUI endpoint under its server-side egress policy.
+     * Android never opens the user-configured ComfyUI URL directly.
+     */
     val lilaCoreImageGenerationProvider: LilaCoreImageGenerationProvider
         get() = LilaCoreImageGenerationProvider(lilaProviderCatalog, comfyUiJobStore)
 
@@ -124,12 +119,6 @@ class GalaxyApplication : Application() {
             providerCatalog.requestJson(method, path, body)
         }
     }
-
-    fun createComfyUiRuntime(config: ComfyUiConnectionConfig, template: ComfyUiWorkflowTemplate, clientId: String): ComfyUiRuntime =
-        comfyUiRuntimeFactory.create(config, template, clientId)
-
-    suspend fun createComfyUiRuntimeFromSavedSettings(clientId: String): ComfyUiRuntime =
-        comfyUiRuntimeFactory.createFromProviderSettings(providerSettingsIo.load(), clientId)
 
     fun realtimeSessionProvider(tokenProvider: GalaxyAccessTokenProvider): HttpRealtimeSessionProvider {
         val apiBaseUrl = activeBackendConfiguration?.galaxyApiBaseUrl
