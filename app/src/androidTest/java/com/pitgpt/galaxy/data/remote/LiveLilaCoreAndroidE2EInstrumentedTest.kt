@@ -1,9 +1,20 @@
 package com.pitgpt.galaxy.data.remote
 
+import android.content.Context
 import android.os.ParcelFileDescriptor
+import android.util.Base64
+import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pitgpt.galaxy.GalaxyApplication
+import com.pitgpt.galaxy.data.local.EncryptedDatabaseKeyStore
+import com.pitgpt.galaxy.data.local.GalaxyDatabase
+import com.pitgpt.galaxy.data.local.GalaxyDatabaseFactory
+import com.pitgpt.galaxy.data.local.ZeroizingSqlCipherOpenHelperFactory
+import com.pitgpt.galaxy.data.media.EncryptedMediaStore
+import com.pitgpt.galaxy.data.providers.comfyui.RoomComfyUiJobStore
+import com.pitgpt.galaxy.data.repository.RoomGeneratedImageRepository
+import com.pitgpt.galaxy.data.repository.RoomImageGenerationRequestStore
 import com.pitgpt.galaxy.core.model.ConversationMessage
 import com.pitgpt.galaxy.core.model.ImageGenerationRequest
 import com.pitgpt.galaxy.core.model.ImageGenerationState
@@ -14,6 +25,7 @@ import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiNodeInput
 import com.pitgpt.galaxy.data.providers.comfyui.ComfyUiWorkflowTemplate
 import com.pitgpt.galaxy.ui.lilaFallbackNoticeText
 import com.pitgpt.galaxy.ui.mergeRemoteHistory
+import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.delay
@@ -568,6 +580,53 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
                     cursor.getString(0)
                 }
             assertEquals("ok", integrity)
+
+            // Open a second Room/SQLCipher instance against the same encrypted file.
+            // This forces a fresh Android Keystore unwrap and verifies that the image
+            // metadata, request/job correlation, and AES-GCM bytes survive a database reopen.
+            val reopenedDatabase = openIndependentEncryptedDatabase(app)
+            try {
+                reopenedDatabase.openHelper.writableDatabase
+                val reopenedImages = RoomGeneratedImageRepository(
+                    reopenedDatabase.generatedImageDao(),
+                    EncryptedMediaStore.fromContext(app)
+                )
+                assertEquals(storedImage, reopenedImages.get(storedImage.assetId))
+                assertEquals(
+                    listOf(storedImage),
+                    reopenedImages.listForConversation(conversationId)
+                )
+                assertEquals(storedImage, reopenedImages.getForRequest(imageRequest.id))
+                assertEquals(
+                    imageRequest,
+                    RoomImageGenerationRequestStore(reopenedDatabase.imageGenerationRequestDao())
+                        .get(imageRequest.id)
+                )
+                val reopenedJob = RoomComfyUiJobStore(reopenedDatabase.comfyUiJobDao())
+                    .get(imageJobId)
+                assertNotNull(reopenedJob)
+                assertEquals(imageRequest.id, reopenedJob!!.requestId)
+
+                val reopenedBytes = reopenedImages.read(storedImage.assetId)
+                try {
+                    assertEquals(storedImage.byteSize, reopenedBytes.size.toLong())
+                    val reopenedDigest = MessageDigest.getInstance("SHA-256")
+                        .digest(reopenedBytes)
+                        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                    assertEquals(storedImage.sha256, reopenedDigest)
+                } finally {
+                    reopenedBytes.fill(0)
+                }
+
+                val reopenedIntegrity = reopenedDatabase.openHelper.writableDatabase
+                    .query("PRAGMA integrity_check").use { cursor ->
+                        assertTrue(cursor.moveToFirst())
+                        cursor.getString(0)
+                    }
+                assertEquals("ok", reopenedIntegrity)
+            } finally {
+                reopenedDatabase.close()
+            }
         } finally {
             // The owner and provider are unique to this CI invocation. Remove only
             // this test's local data; the backend database and ComfyUI runtime are ephemeral.
@@ -584,6 +643,42 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             runCatching { catalog.deleteProvider(llamaCppProviderId) }
             runCatching { catalog.deleteProvider(providerId) }
         }
+    }
+
+    private fun openIndependentEncryptedDatabase(context: Context): GalaxyDatabase {
+        System.loadLibrary("sqlcipher")
+        val appContext = context.applicationContext
+        val databaseName = "galaxy.db"
+        val databaseFile = appContext.getDatabasePath(databaseName)
+        check(databaseFile.isFile) { "The encrypted Galaxy database is missing." }
+        val encryptedTemporaryFile = File(
+            databaseFile.parentFile,
+            databaseFile.name + ".encrypted-tmp"
+        )
+        val keyStore = EncryptedDatabaseKeyStore(appContext)
+        val passphraseProvider = {
+            val key = keyStore.getOrCreateDatabaseKey(
+                databaseExists = databaseFile.exists(),
+                databaseIsPlaintext = false,
+                encryptedTemporaryExists = encryptedTemporaryFile.exists()
+            )
+            try {
+                Base64.encode(key, Base64.NO_WRAP)
+            } finally {
+                key.fill(0)
+            }
+        }
+
+        return Room.databaseBuilder(appContext, GalaxyDatabase::class.java, databaseName)
+            .openHelperFactory(ZeroizingSqlCipherOpenHelperFactory(passphraseProvider))
+            .addMigrations(
+                GalaxyDatabaseFactory.MIGRATION_1_2,
+                GalaxyDatabaseFactory.MIGRATION_2_3,
+                GalaxyDatabaseFactory.MIGRATION_3_4,
+                GalaxyDatabaseFactory.MIGRATION_4_5,
+                GalaxyDatabaseFactory.MIGRATION_5_6
+            )
+            .build()
     }
 
     private fun readEphemeralConfig(): JSONObject {
