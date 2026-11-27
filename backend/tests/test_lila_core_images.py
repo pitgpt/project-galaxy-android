@@ -817,6 +817,13 @@ def test_only_confirmed_queued_jobs_can_be_cancelled(tmp_path):
     with pytest.raises(ImageJobNotCancellable):
         run(service2.cancel(principal_id="owner", job_id=running_job.job_id))
     assert state2["post_queue"] == 0
+    assert state2["post_prompt"] == 1
+    # The pinned ComfyUI v0.46.0 /interrupt route checks a queue snapshot,
+    # then calls global interrupt_processing(); never invoke it on a shared runtime.
+    assert ("POST", "/interrupt") not in state2["requests"]
+    assert ("POST", "/queue") not in state2["requests"]
+    persisted_running = run(_store2.get_job(principal_id="owner", job_id=running_job.job_id))
+    assert persisted_running["state"] == "running"
 
 
 def test_comfyui_redirects_and_oversized_responses_are_rejected():
