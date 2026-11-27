@@ -436,7 +436,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
             // by the real Ollama/llama.cpp chat above. ComfyUI runs as a pinned CPU API
             // server in this job; this verifies the complete transport/storage path without
             // claiming SDXL checkpoint inference.
-            val imageProvider = app.lilaCoreImageGenerationProvider
+            val imageProvider = LilaCoreImageGenerationProvider(catalog, app.comfyUiJobStore)
             val imageWorkflowId = "lila.android-live-empty-image.v1"
             val imageWorkflowJson = JSONObject()
                 .put(
