@@ -24,6 +24,46 @@ class ComfyUiConnectionTest {
     }
 
     @Test
+    fun acceptsIpv6LoopbackAndTailscaleUniqueLocalAddressOverHttp() {
+        assertEquals(
+            "http://[::1]:8188",
+            ComfyUiConnectionConfig("http://[::1]:8188").normalizedBaseUrl
+        )
+        assertEquals(
+            "http://[fd7a:115c:a1e0::1]:8188",
+            ComfyUiConnectionConfig("http://[fd7a:115c:a1e0::1]:8188").normalizedBaseUrl
+        )
+    }
+
+    @Test
+    fun rejectsIpv4AndIpv6LinkLocalEndpointsOverHttp() {
+        listOf(
+            "http://169.254.1.25:8188",
+            "http://[fe80::1]:8188",
+            "http://[fe80::1%25wlan0]:8188"
+        ).forEach { url ->
+            assertThrows(IllegalArgumentException::class.java) {
+                ComfyUiConnectionConfig(url)
+            }
+        }
+    }
+
+    @Test
+    fun rejectsNonCanonicalOrNonPrivateIpv4LiteralsOverHttp() {
+        listOf(
+            "http://010.0.0.1:8188",
+            "http://192.168.001.25:8188",
+            "http://192.168.1.999:8188",
+            "http://127.1:8188",
+            "http://2130706433:8188"
+        ).forEach { url ->
+            assertThrows(IllegalArgumentException::class.java) {
+                ComfyUiConnectionConfig(url)
+            }
+        }
+    }
+
+    @Test
     fun rejectsDnsHostnamesForCleartextEvenWhenTheyUseLocalSuffixes() {
         listOf(
             "http://comfy.local:8188",

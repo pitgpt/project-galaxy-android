@@ -1,5 +1,7 @@
 package com.pitgpt.galaxy.data.providers.comfyui
 
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.URI
 
 /**
@@ -103,27 +105,34 @@ object ComfyUiEndpointPolicy {
         if (host == "localhost") return true
 
         if (host.contains(':')) {
-            // IPv6 literals only; no DNS lookup is performed by this validator.
-            val normalized = host.substringBefore('%').lowercase()
-            return normalized == "::1" ||
-                normalized.startsWith("fc") ||
-                normalized.startsWith("fd") ||
-                normalized.startsWith("fe8") ||
-                normalized.startsWith("fe9") ||
-                normalized.startsWith("fea") ||
-                normalized.startsWith("feb")
+            // A colon makes this an IPv6-literal parse; no DNS lookup is performed. Scoped
+            // literals are rejected because HTTP link-local destinations are not allowlisted.
+            if ('%' in host) return false
+            val address = runCatching { InetAddress.getByName(host) }.getOrNull() as? Inet6Address
+                ?: return false
+            val firstOctet = address.address[0].toInt() and 0xff
+            // Allow loopback and RFC 4193 unique-local addresses (fc00::/7). This includes
+            // Tailscale's fd7a:115c:a1e0::/48 range. IPv6 link-local (fe80::/10) is excluded.
+            return address.isLoopbackAddress || (firstOctet and 0xfe) == 0xfc
         }
 
         val octets = host.split('.')
-        if (octets.size != 4 || octets.any { it.isEmpty() || it.any { ch -> !ch.isDigit() } }) {
+        if (octets.size != 4 || octets.any { octet ->
+                octet.isEmpty() ||
+                    octet.length > 3 ||
+                    (octet.length > 1 && octet.startsWith('0')) ||
+                    octet.any { it !in '0'..'9' }
+            }
+        ) {
             return false
         }
         val ip = octets.map { it.toIntOrNull() ?: return false }
         if (ip.any { it !in 0..255 }) return false
 
+        // RFC 1918, loopback, and the CGNAT range used by Tailscale. IPv4 link-local
+        // (169.254/16), documentation, benchmark, multicast and reserved ranges are excluded.
         return ip[0] == 10 ||
             ip[0] == 127 ||
-            (ip[0] == 169 && ip[1] == 254) ||
             (ip[0] == 172 && ip[1] in 16..31) ||
             (ip[0] == 192 && ip[1] == 168) ||
             (ip[0] == 100 && ip[1] in 64..127)
