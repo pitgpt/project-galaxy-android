@@ -24,6 +24,7 @@ from galaxy_backend.lila_core.image_generation import (
     ComfyUiImageAdapter,
     ComfyUiProviderConfigRequest,
     ComfyUiWorkflowConfig,
+    IMAGE_PROVIDER_RECOVERY_GRACE_SECONDS,
     ImageGenerationRequest,
     image_seed_for_idempotency_key,
     ImageJobNotCancellable,
@@ -226,7 +227,7 @@ def make_handler(mode):
                 })
             return httpx.Response(200, json={"queue_running": [], "queue_pending": []})
         if request.url.path.startswith("/history/"):
-            if state["mode"] == "completed":
+            if state["mode"] in {"completed", "result-unavailable"}:
                 prompt_id = request.url.path.rsplit("/", 1)[-1]
                 return httpx.Response(200, json={
                     prompt_id: {
@@ -242,6 +243,8 @@ def make_handler(mode):
             state["mode"] = "cancelled"
             return httpx.Response(200, json={"deleted": [state["prompt_id"]]})
         if request.url.path == "/view":
+            if state["mode"] == "result-unavailable":
+                return httpx.Response(503, json={"error": "temporary result outage"})
             return httpx.Response(200, content=image, headers={"content-type": "image/png"})
         return httpx.Response(404, json={})
 
@@ -688,8 +691,64 @@ def test_queued_image_job_recovers_and_persists_result_after_service_restart(tmp
     assert history.jobs[0].job_id == job.job_id
     assert history.jobs[0].state == "completed"
 
+def test_confirmed_queued_job_missing_from_provider_fails_after_recovery_grace(tmp_path):
+    service, _store, state = make_service(tmp_path, mode="missing")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    job = run(service.submit(
+        principal_id="owner", idempotency_key=str(uuid4()), request=request_payload()
+    ))
+    assert job.state == "queued"
+    clock = [job.updated_at_epoch_millis]
+    service.clock_ms = lambda: clock[0]
+
+    clock[0] += (IMAGE_PROVIDER_RECOVERY_GRACE_SECONDS - 1) * 1000
+    still_queued = run(service.get_job(principal_id="owner", job_id=job.job_id))
+    assert still_queued.state == "queued"
+
+    clock[0] += 2_000
+    failed = run(service.get_job(principal_id="owner", job_id=job.job_id))
+    assert failed.state == "failed"
+    assert failed.error_code == "provider_job_missing"
+    assert state["post_prompt"] == 1
+
+
+def test_result_pending_recovers_when_provider_asset_returns_before_grace(tmp_path):
+    service, _store, state = make_service(tmp_path, mode="result-unavailable")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    job = run(service.submit(
+        principal_id="owner", idempotency_key=str(uuid4()), request=request_payload()
+    ))
+    pending = run(service.get_job(principal_id="owner", job_id=job.job_id))
+    assert pending.state == "result_pending"
+
+    clock = [pending.updated_at_epoch_millis + (IMAGE_PROVIDER_RECOVERY_GRACE_SECONDS - 1) * 1000]
+    service.clock_ms = lambda: clock[0]
+    state["mode"] = "completed"
+    recovered = run(service.get_job(principal_id="owner", job_id=job.job_id))
+    assert recovered.state == "completed"
+    assert recovered.asset is not None
+    assert state["post_prompt"] == 1
+
+
+def test_result_pending_becomes_terminal_after_recovery_grace(tmp_path):
+    service, _store, state = make_service(tmp_path, mode="result-unavailable")
+    run(service.configure_provider(principal_id="owner", payload=provider_payload()))
+    job = run(service.submit(
+        principal_id="owner", idempotency_key=str(uuid4()), request=request_payload()
+    ))
+    pending = run(service.get_job(principal_id="owner", job_id=job.job_id))
+    assert pending.state == "result_pending"
+
+    clock = [pending.updated_at_epoch_millis + IMAGE_PROVIDER_RECOVERY_GRACE_SECONDS * 1000]
+    service.clock_ms = lambda: clock[0]
+    failed = run(service.get_job(principal_id="owner", job_id=job.job_id))
+    assert failed.state == "failed"
+    assert failed.error_code == "provider_result_unavailable"
+    assert state["post_prompt"] == 1
+
+
 def test_submission_unknown_is_never_resubmitted_on_idempotent_retry(tmp_path):
-    service, _store, state = make_service(tmp_path, mode="submit-unknown")
+    service, store, state = make_service(tmp_path, mode="submit-unknown")
     run(service.configure_provider(principal_id="owner", payload=provider_payload()))
     key = str(uuid4())
     first = run(service.submit(
@@ -701,6 +760,13 @@ def test_submission_unknown_is_never_resubmitted_on_idempotent_retry(tmp_path):
     assert first.job_id == second.job_id
     assert first.state == "submission_unknown"
     assert second.state == "submission_unknown"
+
+    persisted = run(store.get_job(principal_id="owner", job_id=first.job_id))
+    service.clock_ms = lambda: persisted["updated_at_epoch_millis"] + (
+        IMAGE_PROVIDER_RECOVERY_GRACE_SECONDS + 1
+    ) * 1000
+    still_unknown = run(service.get_job(principal_id="owner", job_id=first.job_id))
+    assert still_unknown.state == "submission_unknown"
     assert state["post_prompt"] == 1
 
 
