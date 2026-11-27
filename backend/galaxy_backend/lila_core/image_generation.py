@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -28,6 +29,7 @@ MAX_COMFYUI_JSON_BYTES = 1024 * 1024
 MAX_COMFYUI_IMAGE_BYTES = 25 * 1024 * 1024
 MAX_COMFYUI_CHECKPOINTS = 256
 MAX_COMFYUI_CHECKPOINT_NAME_CHARS = 512
+IMAGE_PROVIDER_RECOVERY_GRACE_SECONDS = 10 * 60
 COMFYUI_LOCAL_PORTS = frozenset({8188})
 
 
@@ -625,9 +627,16 @@ class ComfyUiImageAdapter:
 class LilaImageGenerationService:
     """Owner-scoped image orchestration; provider state is snapshotted into each job."""
 
-    def __init__(self, store: SqliteLilaImageStore, client_factory=None):
+    def __init__(self, store: SqliteLilaImageStore, client_factory=None, clock_ms=None):
         self.store = store
         self.client_factory = client_factory or self._default_client_factory
+        self.clock_ms = clock_ms or (lambda: int(time.time() * 1000))
+
+    def _recovery_grace_expired(self, job: dict[str, Any]) -> bool:
+        updated_at = job.get("updated_at_epoch_millis")
+        if not isinstance(updated_at, int) or isinstance(updated_at, bool) or updated_at <= 0:
+            return False
+        return self.clock_ms() - updated_at >= IMAGE_PROVIDER_RECOVERY_GRACE_SECONDS * 1000
 
     @staticmethod
     def _default_client_factory(*, timeout_seconds: float, local_allowed_ports):
@@ -833,6 +842,13 @@ class LilaImageGenerationService:
                     principal_id=principal_id, job_id=job["job_id"],
                     state="submission_unknown", error_code="submission_outcome_unknown",
                 )
+            if job["state"] in {"queued", "running"} and self._recovery_grace_expired(job):
+                # A confirmed provider job that disappears from both queue and history
+                # cannot be safely resubmitted. End the stale job instead of polling forever.
+                return await self.store.update_job(
+                    principal_id=principal_id, job_id=job["job_id"],
+                    state="failed", error_code="provider_job_missing",
+                )
             return job
         if state == "completed" or images_ready:
             current = job
@@ -870,6 +886,11 @@ class LilaImageGenerationService:
                         principal_id=principal_id, job_id=current["job_id"],
                         state="failed", error_code=failure.code,
                     )
+                if current["state"] == "result_pending" and self._recovery_grace_expired(current):
+                    return await self.store.update_job(
+                        principal_id=principal_id, job_id=current["job_id"],
+                        state="failed", error_code="provider_result_unavailable",
+                    )
                 if current["state"] != "result_pending":
                     return await self.store.update_job(
                         principal_id=principal_id, job_id=current["job_id"],
@@ -877,6 +898,11 @@ class LilaImageGenerationService:
                     )
                 return current
             except Exception:
+                if current["state"] == "result_pending" and self._recovery_grace_expired(current):
+                    return await self.store.update_job(
+                        principal_id=principal_id, job_id=current["job_id"],
+                        state="failed", error_code="result_persistence_failed",
+                    )
                 if current["state"] != "result_pending":
                     return await self.store.update_job(
                         principal_id=principal_id, job_id=current["job_id"],
