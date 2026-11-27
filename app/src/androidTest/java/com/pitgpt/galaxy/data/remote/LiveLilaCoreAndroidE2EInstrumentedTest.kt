@@ -581,6 +581,13 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
                 }
             assertEquals("ok", integrity)
 
+            val journalMode = app.database.openHelper.writableDatabase
+                .query("PRAGMA journal_mode").use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    cursor.getString(0).lowercase()
+                }
+            assertEquals("The production SQLCipher Room database must use WAL", "wal", journalMode)
+
             // Open a second Room/SQLCipher instance against the same encrypted file.
             // This forces a fresh Android Keystore unwrap and verifies that the image
             // metadata, request/job correlation, and AES-GCM bytes survive a database reopen.
