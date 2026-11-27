@@ -552,7 +552,7 @@ class LiveLilaCoreAndroidE2EInstrumentedTest {
                 assertEquals(64, pngInt(20))
                 val digest = MessageDigest.getInstance("SHA-256")
                     .digest(persistedBytes)
-                    .joinToString("") { "%02x".format(it) }
+                    .joinToString("") { "%02x".format(it.toInt() and 0xff) }
                 assertEquals(storedImage.sha256, digest)
                 assertEquals(storedImage.byteSize, persistedBytes.size.toLong())
             } finally {
