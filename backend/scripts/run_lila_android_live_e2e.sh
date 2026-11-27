@@ -65,7 +65,7 @@ fi
 adb push "$LILA_ANDROID_E2E_CONFIG_PATH" /data/local/tmp/lila-android-e2e.json
 adb shell chmod 0600 /data/local/tmp/lila-android-e2e.json
 set +e
-gradle connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.pitgpt.galaxy.data.remote.LiveLilaCoreAndroidE2EInstrumentedTest -Pandroid.testInstrumentationRunnerArguments.lilaLiveE2e=true
+./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.pitgpt.galaxy.data.remote.LiveLilaCoreAndroidE2EInstrumentedTest -Pandroid.testInstrumentationRunnerArguments.lilaLiveE2e=true
 test_status=$?
 set -e
 

@@ -20,9 +20,8 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
       - name: Run unit tests
-        run: gradle testDebugUnitTest
+        run: ./gradlew testDebugUnitTest
 
   backend-test:
     runs-on: ubuntu-latest
@@ -69,7 +68,6 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
       - name: Enable KVM group permissions
         if: hashFiles('app/src/androidTest/**/*') != ''
         run: |
@@ -84,7 +82,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: gradle connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=com.pitgpt.galaxy.data.remote.LiveLilaCoreAndroidE2EInstrumentedTest
+          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.notClass=com.pitgpt.galaxy.data.remote.LiveLilaCoreAndroidE2EInstrumentedTest
       - name: Upload emulator diagnostics
         if: always() && hashFiles('app/src/androidTest/**/*') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -100,6 +98,20 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+      - name: Set up JDK 17 for Gradle Wrapper validation
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify official Gradle Wrapper JAR and Windows launcher
+        shell: powershell
+        run: |
+          $expectedWrapperSha256 = '2db75c40782f5e8ba1fc278a5574bab070adccb2d21ca5a6e5ed840888448046'
+          $actualWrapperSha256 = (Get-FileHash .\gradle\wrapper\gradle-wrapper.jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualWrapperSha256 -ne $expectedWrapperSha256) {
+            throw 'Gradle Wrapper JAR checksum does not match the official Gradle 8.11.1 release.'
+          }
+          .\gradlew.bat --version
       - name: Run PowerShell 5.1 self-tests
         shell: powershell
         run: |
@@ -256,7 +268,6 @@ jobs:
         if: env.RUN_LILA_ANDROID_E2E == 'true'
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
       - name: Generate ephemeral HTTPS CA and backend certificate
         if: env.RUN_LILA_ANDROID_E2E == 'true'
         run: |
@@ -462,9 +473,8 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
       - name: Assemble debug APK
-        run: gradle assembleDebug
+        run: ./gradlew assembleDebug
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
