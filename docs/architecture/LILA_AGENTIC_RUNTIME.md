@@ -1,6 +1,6 @@
 # Lila Agentic Runtime — архитектура агентного контура
 
-**Статус:** proposed / design review  
+**Статус:** approved for staged implementation; Phase 0 readiness gates remain  
 **Дата:** 2026-11-28  
 **Область:** Lila Core внутри существующего Project Galaxy  
 **Связанные документы:** [Lila Core и Project Galaxy](LILA_CORE_ARCHITECTURE.md), [Lila Agent Core](lila-agent-core.md), [Emergent Functional Personality](../research/EMERGENT_FUNCTIONAL_PERSONHOOD.md)
@@ -35,9 +35,60 @@ Lila Core владеет:
 
 У нас уже есть контекст, память, маршрутизация моделей, диалоговый сервис и долговременные задания для генерации изображений. Агентный контур должен надстроиться над ними и переиспользовать их границы. Он не должен превращать обычный `CoreTurnService` в неограниченный цикл вызова инструментов и не должен смешивать image-job lifecycle с универсальным task lifecycle.
 
-### Интеграция существующей идентичности
+### Интеграция существующей идентичности — решение Phase 0 (2026-11-28)
 
-PR #48 содержит Android-реализацию `LilaIdentity` и bundled repository, но она ещё не объединена с новым серверным Core. До начала агентного выполнения необходимо согласовать единую версионируемую схему идентичности и её источник истины. Android может кэшировать или отображать профиль, но не создавать конкурирующую каноническую личность.
+**Решение:** единственный канонический владелец идентичности `lila.primary` — server-side Lila Core. Core выдаёт версионированный, provider-neutral identity snapshot. `principal_id` всегда берётся из проверенного сервером JWT. Клиент не может назначить владельца, подменить идентичность, системные инструкции или полномочия.
+
+#### Каноническая схема
+
+Identity snapshot содержит:
+- `agent_id` — стабильное значение `lila.primary`;
+- `schema_version` и `identity_revision` — версия схемы и SHA-256 digest канонического нормализованного snapshot;
+- `display_name`, `persona`, `communication_principles`, `safety_boundaries`;
+- `visual_reference_id` и `voice_reference_id` — только ссылки на presentation assets, не сами медиафайлы.
+
+Это общая идентичность Лилы, одинаковая для всех моделей и клиентов. Owner-specific preferences, отношения, цели пользователя и контекст проектов не входят в глобальный snapshot.
+
+#### Сопоставление PR #48
+
+Android-модель `LilaIdentity` из PR #48 остаётся полезным DTO/client projection:
+- `id` → `agent_id`;
+- `schemaVersion` → `schema_version`;
+- `displayName`, `persona`, `communicationPrinciples`, `visualReferenceId`, `voiceReferenceId` сопоставляются напрямую после валидации;
+- `longTermGoals` и `decisionPreferences` не переносятся в глобальную идентичность: это owner-scoped контекст/предпочтения. Их возможный импорт допускается только в зашифрованное хранилище соответствующего владельца, с provenance и явной политикой подтверждения. Автоматически размножать bundled значения между tenant'ами запрещено.
+
+`BundledLilaIdentityRepository` не является вторым источником истины. После подключения Core Android и Desktop получают один snapshot через аутентифицированный Core identity API; клиент может хранить последнюю проверенную ревизию для offline display, но не использовать устаревшую bundled-копию для нового model turn и не подменять ею ошибку Core.
+
+#### Интеграция с текущим server Core
+
+В проверенном HEAD PR #132:
+- `AssembledContext` содержит историю и owner-scoped memory snippets, но пока не identity snapshot;
+- `OpenAICompatibleConfig.system_prompt` содержит общий статический prompt, который использует и OpenAI-compatible adapter, и Ollama adapter; он не является версионированной идентичностью;
+- composition root создаёт `ContextAssembler(store, store)` и `CoreTurnService`, но не inject'ит identity repository.
+
+Следующий P0-B срез должен:
+1. добавить Core-owned `IdentitySnapshot`/repository и authenticated read endpoint (предлагаемый контракт: `GET /v1/lila/identity`);
+2. включить snapshot и его revision/digest в provider-neutral context/prompt envelope;
+3. отделить неизменяемые server policy instructions от curated persona и owner-scoped context;
+4. заставить все model adapters сериализовать один и тот же Core-authored envelope, не хранить отдельные provider-specific личности или system prompts;
+5. фиксировать `identity_revision` в turn/task metadata для воспроизводимости, не записывая hidden chain-of-thought или секреты.
+
+Если identity snapshot недоступен, имеет неподдерживаемую schema version или не проходит проверку digest, Core не должен молча переходить на generic/provider default persona: новый turn завершается контролируемой ошибкой, а история остаётся сохранной.
+
+#### Изменение идентичности и память
+
+Базовая личность меняется только через версионированное curated изменение Core. Пользовательская персонализация хранится отдельно, в owner-scoped encrypted context/profile, с provenance, временем и пользовательским подтверждением для долговременных изменений. Она не может ослаблять safety boundaries или выдавать tool permissions. Секреты и скрытые рассуждения модели не сохраняются.
+
+#### Acceptance criteria для закрытия identity gap
+
+- Android и Desktop получают одинаковый `agent_id`, `identity_revision` и canonical digest.
+- Переключение Ollama ↔ OpenAI-compatible provider не меняет identity snapshot или системную policy.
+- Клиентский запрос не может передать `principal_id`, заменить identity/system prompt или повысить полномочия.
+- Owner-specific preferences не видны другому владельцу.
+- Ошибка загрузки identity не вызывает silent fallback к bundled или provider-specific prompt.
+- Exact-head tests подтверждают versioning, digest validation, tenant isolation и отсутствие secret/CoT persistence.
+
+Это решение закрывает **дизайн** Phase 0, но не утверждает, что серверная identity integration уже реализована. До её реализации и прохождения acceptance tests P0-B остаётся открытым, а Phase 1 Agent Protocol/Task Store не начинается.
 
 ## 3. Цели и не-цели
 

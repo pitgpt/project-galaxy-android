@@ -1,7 +1,7 @@
 # Lila Agentic Runtime Integration — Design Review
 
 **Date:** 2026-11-28  
-**Status:** Awaiting user approval  
+**Status:** Approved for staged implementation (owner approval, 2026-11-28)  
 **Repository:** `pitgpt/project-galaxy-android`  
 **Canonical architecture:** `docs/architecture/LILA_AGENTIC_RUNTIME.md`
 
@@ -78,7 +78,7 @@ Adopt a framework/runtime as the control plane and delegate identity/memory to L
 
 ## Delivery sequence
 
-The detailed task-level plan will be authored after this design is approved. The intended milestones are:
+The approved task-level plan is `docs/superpowers/plans/2026-11-28-lila-agentic-runtime-implementation-plan.md`; delivery remains gated by Phase 0 and P0/P1 prerequisites. The milestones are:
 
 1. Identity/Core reconciliation.
 2. Typed agent protocol and durable Task Store.
@@ -105,10 +105,10 @@ Runtime work must not displace the existing P0 obligations: encrypted persistenc
 ## Open items for implementation planning
 
 - Audit the concrete Core persistence implementation and confirm encryption guarantees before selecting Task Store storage.
-- Decide whether the canonical identity schema should be server-owned with Android as a client/cache or whether the existing shared schema can be used without divergence.
+- Implement the approved server-owned identity snapshot and provider-neutral prompt envelope; Android and Desktop consume the same authenticated Core identity revision.
 - Define the first native tools and exact workspace pairing mechanism.
 - Select an external runtime adapter only after the native agent protocol is stable.
 
-## Review request
+## Approval
 
-Please approve or correct this design before the task-level implementation plan and runtime implementation are started.
+The repository owner approved this architecture and staged implementation on 2026-11-28. This approval authorizes reversible work in feature branches under issue #144; it does not authorize changes to `main`, merges, deployments, releases, destructive data migrations, or account/security-setting changes.

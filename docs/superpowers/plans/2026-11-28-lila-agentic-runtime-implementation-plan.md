@@ -3,7 +3,7 @@
 **Date:** 2026-11-28  
 **Architecture:** `docs/architecture/LILA_AGENTIC_RUNTIME.md`  
 **Design review:** `docs/superpowers/specs/2026-11-28-lila-agentic-runtime-design.md`  
-**Tracking:** GitHub issue to be linked from the architecture PR  
+**Tracking:** [GitHub issue #144](https://github.com/pitgpt/project-galaxy-android/issues/144)  
 **Status:** Approved for staged implementation; implementation remains subordinate to P0 product blockers.
 
 ## Execution rules
@@ -27,12 +27,12 @@ Tasks:
 4. Confirm a real authenticated model-powered Core chat, owner-scoped durable history/memory, composition root, per-user rate limiting and tenant isolation (P0-B).
 5. Confirm OpenAI-compatible provider configuration, LM Studio/Ollama/llama.cpp adapters, connection tests, per-conversation model selection and secret handling (P0-C).
 6. Audit concrete persistence APIs and encryption guarantees for task storage.
-7. Reconcile PR #48 identity schema with server Core; designate one canonical identity schema/source of truth.
+7. Reconcile PR #48 identity schema with server Core. The Phase 0 decision is recorded in `docs/architecture/LILA_AGENTIC_RUNTIME.md`; the server identity snapshot, provider-neutral prompt envelope and authenticated Android/Desktop read path remain P0-B implementation work.
 
 Exit criteria:
 - P0-A/B/C blockers are either closed with evidence or explicitly documented as blockers.
 - No unresolved owner-isolation or plaintext-secret issue in the storage path selected for task state.
-- Identity migration/reconciliation design is reviewed.
+- Identity migration/reconciliation design is reviewed, and the server-owned identity snapshot is implemented and covered by cross-provider/cross-owner exact-head tests before Phase 1.
 - Exact-head CI is green for the dependency PR(s).
 
 ## Phase 1 — agent protocol and durable Task Store
